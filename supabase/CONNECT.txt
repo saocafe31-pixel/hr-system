@@ -1,0 +1,38 @@
+เชื่อม Supabase CLI กับโปรเจกต์ (ครั้งแรก)
+========================================
+
+1) ติดตั้งแพ็กเกจที่รากโปรเจกต์ (HR System)
+   npm install
+
+2) ล็อกอิน Supabase (เปิดเบราว์เซอร์ให้ token)
+   npm run db:login
+
+3) ลิงก์โปรเจกต์คลาวด์ (ref = qidohlmeyhsofuntbmbw จาก URL)
+   วิธี A — พิมพ์รหัส DB เมื่อถาม:
+     npm run db:link
+   วิธี B — ส่งรหัสจากไฟล์ .env (สร้างจาก .env.example):
+     npx supabase link --project-ref qidohlmeyhsofuntbmbw --password %SUPABASE_DB_PASSWORD%
+     (PowerShell: $env:SUPABASE_DB_PASSWORD = 'รหัสของคุณ'; npx supabase link --project-ref qidohlmeyhsofuntbmbw --password $env:SUPABASE_DB_PASSWORD)
+
+รัน SQL ไปที่ฐานข้อมูลคลาวด์
+===========================
+- ไฟล์เดียว:
+    npx supabase db query --linked -f supabase/schema.sql
+
+- คำสั่งสั้นๆ:
+    npx supabase db query --linked "select 1"
+
+ดัน migration (โฟลเดอร์ supabase/migrations)
+==============================================
+- ส่ง migration ที่ยังไม่เคยรันขึ้น remote:
+    npm run db:push
+
+หมายเหตุ: ถ้าเคยรัน schema ใน Dashboard แล้ว การ db push ครั้งแรกอาจชนกับประวัติ migration
+ให้ใช้ db query -f แทน หรือดูเอกสาร supabase migration repair
+
+โลคัล (Docker)
+==============
+- สตาร์ท Postgres + Studio ในเครื่อง:
+    npx supabase start
+- รีเซ็ตตาม migration + seed:
+    npx supabase db reset

@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.local
+*.log
+.DS_Store
+
+# Expo cache ที่ราก (แอปจริงอยู่ที่ mobile/ — ไม่ควรมี .expo ที่ราก)
+.expo/
+
+# Supabase CLI (ลิงก์โปรเจกต์ / cache)
+supabase/.temp/
+supabase/.branches/
+
+.vercel
+.env*.local

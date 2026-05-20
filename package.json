@@ -1,0 +1,34 @@
+{
+  "name": "hr-system",
+  "private": true,
+  "description": "HR System — Supabase CLI + Expo mobile",
+  "scripts": {
+    "supabase": "supabase",
+    "db:login": "supabase login",
+    "db:link": "supabase link --project-ref qidohlmeyhsofuntbmbw",
+    "db:push": "supabase db push",
+    "db:pull": "supabase db pull",
+    "db:query": "supabase db query --linked",
+    "db:schema": "supabase db query --linked -f supabase/schema.sql",
+    "fn:serve:push": "supabase functions serve push-dispatch --no-verify-jwt",
+    "fn:deploy:push": "supabase functions deploy push-dispatch --no-verify-jwt",
+    "fn:serve:webpush": "supabase functions serve webpush-dispatch --no-verify-jwt",
+    "fn:deploy:webpush": "supabase functions deploy webpush-dispatch --no-verify-jwt",
+    "fn:list": "supabase functions list",
+    "mobile": "npm run start --prefix mobile",
+    "expo:start": "npm run start --prefix mobile",
+    "expo:android": "npm run android --prefix mobile",
+    "expo:web": "npm run web --prefix mobile",
+    "expo:prebuild": "npm run prebuild --prefix mobile",
+    "expo:prebuild:clean": "npm run prebuild:clean --prefix mobile",
+    "build:web": "npm run build:web --prefix mobile",
+    "vercel": "vercel",
+    "vercel:deploy": "vercel deploy --cwd mobile --yes",
+    "vercel:prod": "vercel deploy --cwd mobile --yes --prod",
+    "vercel:prod:force": "vercel deploy --cwd mobile --yes --prod --force"
+  },
+  "devDependencies": {
+    "supabase": "^2.84.10",
+    "vercel": "^50.42.0"
+  }
+}

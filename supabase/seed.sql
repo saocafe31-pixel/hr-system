@@ -1,0 +1,1 @@
+-- Seed สำหรับ supabase db reset (local) — เพิ่มข้อมูลทดสอบได้ที่นี่

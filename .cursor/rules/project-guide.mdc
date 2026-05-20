@@ -1,0 +1,10 @@
+---
+description: ชี้ Agents ไปอ่าน docs/PROJECT_GUIDE.md และอัปเดตความคืบหน้า
+alwaysApply: true
+---
+
+# HR System — บริบทโปรเจกต์
+
+- อ่าน **`docs/PROJECT_GUIDE.md`** ก่อนแก้โค้ดหรือเพิ่มฟีเจอร์ (โครงสร้าง, บทบาท, ตาราง Supabase, หน้าแอป)
+- อ่าน **`AGENTS.md`** ที่รากโปรเจกต์สำหรับ checklist ของ Agent
+- หลังฟีเจอร์/สคีมาสำคัญ: **อัปเดต `docs/PROJECT_GUIDE.md`** (§8 ความคืบหน้า, §9 changelog, และ §6 ถ้ามีตารางใหม่)
