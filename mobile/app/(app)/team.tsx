@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 
 import { DatePickerField } from '@/components/DatePickerField';
+import { EmployeeLeaveLateProfilePanel } from '@/components/EmployeeLeaveLateProfilePanel';
 import { EmployeeScheduleCalendarCard } from '@/components/EmployeeScheduleCalendarCard';
 import { FriendlyConfirmModal } from '@/components/FriendlyNoticeModal';
 import { TaskProgressBar } from '@/components/TaskProgressBar';
@@ -76,10 +77,25 @@ type AttendanceSummaryRow = {
   dateYmd: string;
   checkIn: string;
   checkOut: string;
+  checkInId?: string;
+  checkOutId?: string;
   checkInIso?: string;
   checkOutIso?: string;
   employeeCode: string;
   checkInLocation: string;
+  isLeave?: boolean;
+};
+
+type AttendanceEditDraft = {
+  checkIn: string;
+  checkOut: string;
+  location: string;
+};
+
+type MemberActivityNote = {
+  source: 'community' | 'chat';
+  body: string;
+  createdAt: string;
 };
 
 const TASK_STATUSES = ['pending', 'in_progress', 'done', 'cancelled'] as const;
@@ -161,6 +177,26 @@ function fmtBangkokDateTimeCsv(iso: string): string {
     second: '2-digit',
     hour12: false,
   }).format(new Date(iso));
+}
+
+function fmtBangkokTime(iso: string | undefined): string {
+  if (!iso) return '';
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Bangkok',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(iso));
+}
+
+function timeInputToBangkokIso(ymd: string, hhmm: string): string | null {
+  const raw = hhmm.trim();
+  if (!raw) return null;
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(raw);
+  if (!m) return null;
+  const d = new Date(`${ymd}T${m[1]}:${m[2]}:00+07:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
 }
 
 function directoryDisplayName(row: EmployeeDirectory | null | undefined): string {
@@ -246,10 +282,15 @@ export default function TeamScreen() {
   const [branchText, setBranchText] = useState('');
   const [positionText, setPositionText] = useState('');
   const [memberTasks, setMemberTasks] = useState<TaskRow[]>([]);
+  const [memberActivityNotes, setMemberActivityNotes] = useState<MemberActivityNote[]>([]);
   const [memberLogs, setMemberLogs] = useState<AttendanceLog[]>([]);
   const [memberLeaves, setMemberLeaves] = useState<{ starts_on: string; ends_on: string }[]>([]);
   const [summaryAnchorDate, setSummaryAnchorDate] = useState<Date | null>(() => new Date());
   const [detailLoading, setDetailLoading] = useState(false);
+  const [attendanceEditDrafts, setAttendanceEditDrafts] = useState<
+    Record<string, AttendanceEditDraft>
+  >({});
+  const [attendanceSavingYmd, setAttendanceSavingYmd] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [assignTitle, setAssignTitle] = useState('');
   const [assignDesc, setAssignDesc] = useState('');
@@ -283,6 +324,8 @@ export default function TeamScreen() {
   const [memberTaskSearchQuery, setMemberTaskSearchQuery] = useState('');
   const [deleteMemberTaskId, setDeleteMemberTaskId] = useState<string | null>(null);
   const [deleteMemberBusy, setDeleteMemberBusy] = useState(false);
+  const memberDetailScrollRef = useRef<ScrollView | null>(null);
+  const memberTaskListYRef = useRef(0);
 
   const load = useCallback(async () => {
     const directoryReq = admin
@@ -430,6 +473,7 @@ export default function TeamScreen() {
       setDeleteMemberTaskId(null);
       setDeleteMemberBusy(false);
       setMemberTasks([]);
+      setMemberActivityNotes([]);
     }
   }, [edit]);
 
@@ -482,7 +526,14 @@ export default function TeamScreen() {
     try {
       const startIso = new Date(`${period.startYmd}T00:00:00+07:00`).toISOString();
       const endIso = new Date(`${period.endYmd}T23:59:59+07:00`).toISOString();
-      const [{ data: mine }, { data: delegated }, { data: logs }, { data: lv }] = await Promise.all([
+      const [
+        { data: mine },
+        { data: delegated },
+        { data: logs },
+        { data: lv },
+        { data: noteRows },
+        { data: chatRows },
+      ] = await Promise.all([
         supabase
           .from('tasks')
           .select(
@@ -514,6 +565,18 @@ export default function TeamScreen() {
           .in('status', ['pending', 'approved'])
           .lte('starts_on', period.endYmd)
           .gte('ends_on', period.startYmd),
+        supabase
+          .from('community_notes')
+          .select('body,created_at,updated_at')
+          .eq('user_id', edit.id)
+          .order('updated_at', { ascending: false })
+          .limit(1),
+        supabase
+          .from('attendance_chat_messages')
+          .select('body,created_at')
+          .eq('user_id', edit.id)
+          .order('created_at', { ascending: false })
+          .limit(1),
       ]);
       const merged = [...((mine as TaskRow[]) ?? []), ...((delegated as TaskRow[]) ?? [])];
       const uniqueById = new Map<string, TaskRow>();
@@ -521,6 +584,26 @@ export default function TeamScreen() {
       setMemberTasks([...uniqueById.values()]);
       setMemberLogs((logs as AttendanceLog[]) ?? []);
       setMemberLeaves((lv as { starts_on: string; ends_on: string }[]) ?? []);
+      const latestNote = ((noteRows as { body?: string | null; created_at?: string; updated_at?: string }[]) ?? [])[0];
+      const latestChat = ((chatRows as { body?: string | null; created_at?: string }[]) ?? [])[0];
+      setMemberActivityNotes(
+        [
+          latestNote?.body
+            ? {
+                source: 'community' as const,
+                body: latestNote.body,
+                createdAt: latestNote.updated_at ?? latestNote.created_at ?? '',
+              }
+            : null,
+          latestChat?.body
+            ? {
+                source: 'chat' as const,
+                body: latestChat.body,
+                createdAt: latestChat.created_at ?? '',
+              }
+            : null,
+        ].filter((x): x is MemberActivityNote => !!x)
+      );
     } finally {
       setDetailLoading(false);
     }
@@ -553,6 +636,20 @@ export default function TeamScreen() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'tasks' },
+        () => {
+          if (edit) void loadMemberDetail();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'community_notes' },
+        () => {
+          if (edit) void loadMemberDetail();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'attendance_chat_messages' },
         () => {
           if (edit) void loadMemberDetail();
         }
@@ -601,6 +698,7 @@ export default function TeamScreen() {
           checkOut: 'ลา',
           employeeCode: code.trim() || '-',
           checkInLocation: 'ลา',
+          isLeave: true,
         };
       }
       const day = logByDate.get(ymd);
@@ -611,18 +709,10 @@ export default function TeamScreen() {
           : '');
       return {
         dateYmd: ymd,
-        checkIn: day?.checkIn
-          ? new Date(day.checkIn.created_at).toLocaleTimeString('th-TH', {
-              hour: '2-digit',
-              minute: '2-digit',
-            })
-          : '',
-        checkOut: day?.checkOut
-          ? new Date(day.checkOut.created_at).toLocaleTimeString('th-TH', {
-              hour: '2-digit',
-              minute: '2-digit',
-            })
-          : '',
+        checkIn: fmtBangkokTime(day?.checkIn?.created_at),
+        checkOut: fmtBangkokTime(day?.checkOut?.created_at),
+        checkInId: day?.checkIn?.id,
+        checkOutId: day?.checkOut?.id,
         checkInIso: day?.checkIn?.created_at,
         checkOutIso: day?.checkOut?.created_at,
         employeeCode: code.trim() || '-',
@@ -630,6 +720,18 @@ export default function TeamScreen() {
       };
     });
   }, [branches, code, edit, memberLeaves, memberLogs, period.endYmd, period.startYmd]);
+
+  useEffect(() => {
+    const next: Record<string, AttendanceEditDraft> = {};
+    for (const row of summaryRows) {
+      next[row.dateYmd] = {
+        checkIn: row.isLeave ? '' : row.checkIn,
+        checkOut: row.isLeave ? '' : row.checkOut,
+        location: row.isLeave ? '' : row.checkInLocation,
+      };
+    }
+    setAttendanceEditDrafts(next);
+  }, [summaryRows]);
 
   const filteredMemberTasks = useMemo(() => {
     const q = memberTaskSearchQuery.trim().toLowerCase();
@@ -639,6 +741,31 @@ export default function TeamScreen() {
       return hay.includes(q);
     });
   }, [memberTasks, memberTaskSearchQuery]);
+
+  const memberActiveTasks = useMemo(
+    () =>
+      memberTasks
+        .filter((t) => t.status === 'in_progress' || t.status === 'pending')
+        .sort((a, b) => {
+          if (a.status !== b.status) return a.status === 'in_progress' ? -1 : 1;
+          return (
+            new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()
+          );
+        }),
+    [memberTasks]
+  );
+
+  function focusMemberTaskList() {
+    setMemberTaskSearchQuery('');
+    const scrollToTaskList = () => {
+      memberDetailScrollRef.current?.scrollTo({
+        y: Math.max(memberTaskListYRef.current - 12, 0),
+        animated: true,
+      });
+    };
+    setTimeout(scrollToTaskList, 0);
+    setTimeout(scrollToTaskList, 120);
+  }
 
   const memberTaskDashboard = useMemo(() => {
     const nowMs = Date.now();
@@ -1076,6 +1203,61 @@ export default function TeamScreen() {
     await loadMemberDetail();
   }
 
+  async function saveAttendanceLogForKind(
+    row: AttendanceSummaryRow,
+    kind: 'check_in' | 'check_out',
+    timeText: string,
+    note: string
+  ) {
+    if (!edit) return;
+    const existingId = kind === 'check_in' ? row.checkInId : row.checkOutId;
+    const cleanTime = timeText.trim();
+    if (!cleanTime) {
+      if (!existingId) return;
+      const { error } = await supabase.from('attendance_logs').delete().eq('id', existingId);
+      if (error) throw error;
+      return;
+    }
+    const iso = timeInputToBangkokIso(row.dateYmd, cleanTime);
+    if (!iso) {
+      throw new Error('กรุณากรอกเวลาเป็นรูปแบบ HH:mm เช่น 09:00');
+    }
+    const patch = {
+      user_id: edit.id,
+      kind,
+      created_at: iso,
+      branch_id: null,
+      latitude: null,
+      longitude: null,
+      within_branch: false,
+      note: kind === 'check_in' ? note.trim() || 'ปรับเวลาโดยแอดมิน/HR' : null,
+    };
+    if (existingId) {
+      const { error } = await supabase.from('attendance_logs').update(patch).eq('id', existingId);
+      if (error) throw error;
+      return;
+    }
+    const { error } = await supabase.from('attendance_logs').insert(patch);
+    if (error) throw error;
+  }
+
+  async function saveAttendanceEdit(row: AttendanceSummaryRow) {
+    if (!admin || !edit || row.isLeave) return;
+    const draft = attendanceEditDrafts[row.dateYmd];
+    if (!draft) return;
+    setAttendanceSavingYmd(row.dateYmd);
+    try {
+      await saveAttendanceLogForKind(row, 'check_in', draft.checkIn, draft.location);
+      await saveAttendanceLogForKind(row, 'check_out', draft.checkOut, draft.location);
+      toast.success('บันทึกเวลาแล้ว', `อัปเดตเวลาเข้า-ออกของวันที่ ${row.dateYmd}`);
+      await loadMemberDetail();
+    } catch (e) {
+      toast.error('บันทึกเวลาไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setAttendanceSavingYmd(null);
+    }
+  }
+
   async function exportCsv() {
     if (!edit || summaryRows.length === 0) return;
     setExporting(true);
@@ -1404,6 +1586,7 @@ export default function TeamScreen() {
               </Pressable>
             </View>
             <ScrollView
+              ref={memberDetailScrollRef}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
               nestedScrollEnabled>
@@ -1476,27 +1659,113 @@ export default function TeamScreen() {
                     <EmployeeScheduleCalendarCard
                       userId={edit.id}
                       title="ปฏิทินตารางงานของพนักงาน"
+                      autoOpenFirstHighlight
                     />
                   ) : null}
                 </>
               ) : null}
 
+              <EmployeeLeaveLateProfilePanel userId={edit?.id} />
+
               <Text style={styles.sectionTitle}>หน้างาน</Text>
               <Text style={styles.sectionSubText}>
                 แสดงงานของพนักงานคนนี้ในหน้านี้โดยตรง (ไม่สลับไปแท็บงาน)
               </Text>
-              <TextInput
-                style={styles.memberTaskSearchInput}
-                placeholder="ค้นหาจากหัวข้อหรือรายละเอียดงาน..."
-                placeholderTextColor={c.textMuted}
-                value={memberTaskSearchQuery}
-                onChangeText={setMemberTaskSearchQuery}
-              />
-              {memberTaskSearchQuery.trim() ? (
-                <Text style={styles.memberTaskSearchKpiHint}>
-                  ตัวเลขสรุปด้านล่างนับเฉพาะงานที่ตรงคำค้น ({filteredMemberTasks.length} งาน)
-                </Text>
-              ) : null}
+              <View style={styles.memberWorkCard}>
+                <View style={styles.memberWorkHeader}>
+                  <View>
+                    <Text style={styles.memberWorkEyebrow}>Live Work</Text>
+                    <Text style={styles.memberWorkTitle}>งานที่กำลังทำตอนนี้</Text>
+                  </View>
+                  <View style={styles.memberWorkBadge}>
+                    <Text style={styles.memberWorkBadgeNum}>
+                      {memberActiveTasks.length}
+                    </Text>
+                    <Text style={styles.memberWorkBadgeText}>active</Text>
+                  </View>
+                </View>
+                {memberActiveTasks.length === 0 ? (
+                  <Text style={styles.memberWorkEmpty}>
+                    ยังไม่มีงานรอดำเนินการหรือกำลังทำของพนักงานคนนี้
+                  </Text>
+                ) : (
+                  memberActiveTasks.slice(0, 3).map((t) => (
+                    <View key={`active-${t.id}`} style={styles.memberWorkTaskRow}>
+                      <View
+                        style={[
+                          styles.memberWorkPri,
+                          {
+                            backgroundColor: TASK_PRIORITY_OPTIONS.find(
+                              (p) => p.key === ((t.priority as TaskPriority) || 'normal')
+                            )?.color,
+                          },
+                        ]}
+                      />
+                      <View style={styles.memberWorkTaskBody}>
+                        <Text style={styles.memberWorkTaskTitle} numberOfLines={1}>
+                          {t.title}
+                        </Text>
+                        <Text style={styles.memberWorkTaskMeta} numberOfLines={1}>
+                          {TASK_STATUS_TH[t.status] ?? t.status}
+                          {t.due_at
+                            ? ` · กำหนด ${new Date(t.due_at).toLocaleDateString('th-TH')}`
+                            : ''}
+                        </Text>
+                      </View>
+                    </View>
+                  ))
+                )}
+                {memberActivityNotes.length > 0 ? (
+                  <View style={styles.memberWorkNotes}>
+                    {memberActivityNotes.map((n) => (
+                      <View key={`${n.source}-${n.createdAt}`} style={styles.memberWorkNoteRow}>
+                        <Text style={styles.memberWorkNoteSource}>
+                          {n.source === 'community' ? 'Community note' : 'Chat note'}
+                        </Text>
+                        <Text style={styles.memberWorkNoteBody} numberOfLines={2}>
+                          {n.body}
+                        </Text>
+                        {n.createdAt ? (
+                          <Text style={styles.memberWorkNoteTime}>
+                            {new Date(n.createdAt).toLocaleString('th-TH')}
+                          </Text>
+                        ) : null}
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+                <View style={styles.memberWorkActions}>
+                  <Pressable
+                    style={styles.memberWorkPrimaryBtn}
+                    onPress={() => {
+                      setAssignTeamSearch('');
+                      setAssignChecklistLines([{ id: newTeamAssignChecklistLineId(), text: '' }]);
+                      setSelectedAssigneeIds(edit ? [edit.id] : []);
+                      setAssignModalOpen(true);
+                    }}>
+                    <Text style={styles.memberWorkPrimaryText}>+ เพิ่มงานให้พนักงาน</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.memberWorkSecondaryBtn}
+                    onPress={focusMemberTaskList}>
+                    <Text style={styles.memberWorkSecondaryText}>ดูรายการงานในหน้านี้</Text>
+                  </Pressable>
+                </View>
+              </View>
+              <View>
+                <TextInput
+                  style={styles.memberTaskSearchInput}
+                  placeholder="ค้นหาจากหัวข้อหรือรายละเอียดงาน..."
+                  placeholderTextColor={c.textMuted}
+                  value={memberTaskSearchQuery}
+                  onChangeText={setMemberTaskSearchQuery}
+                />
+                {memberTaskSearchQuery.trim() ? (
+                  <Text style={styles.memberTaskSearchKpiHint}>
+                    ตัวเลขสรุปด้านล่างนับเฉพาะงานที่ตรงคำค้น ({filteredMemberTasks.length} งาน)
+                  </Text>
+                ) : null}
+              </View>
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -1575,7 +1844,13 @@ export default function TeamScreen() {
                   </View>
                 ))}
               </View>
-              <Text style={styles.memberTasksScrollHint}>รายการงาน (เลื่อนดูในพื้นที่นี้)</Text>
+              <Text
+                style={styles.memberTasksScrollHint}
+                onLayout={(e) => {
+                  memberTaskListYRef.current = e.nativeEvent.layout.y;
+                }}>
+                รายการงาน (เลื่อนดูในพื้นที่นี้)
+              </Text>
               <ScrollView
                 style={styles.memberTasksScroll}
                 nestedScrollEnabled
@@ -1672,6 +1947,11 @@ export default function TeamScreen() {
               <Text style={styles.periodText}>
                 ช่วงที่แสดง: {period.startYmd} - {period.endYmd}
               </Text>
+              {admin ? (
+                <Text style={styles.attendanceEditHint}>
+                  แอดมิน/HR สามารถแก้เวลาเป็นรูปแบบ HH:mm หรือเว้นว่างเพื่อลบเวลานั้นได้
+                </Text>
+              ) : null}
               <View style={styles.actions}>
                 <Pressable
                   style={[styles.exportBtn, (exporting || detailLoading) && styles.disabled]}
@@ -1697,16 +1977,105 @@ export default function TeamScreen() {
                       <Text style={[styles.cell, styles.colTime, styles.headText]}>เวลาออกงาน</Text>
                       <Text style={[styles.cell, styles.colCode, styles.headText]}>รหัสพนักงาน</Text>
                       <Text style={[styles.cell, styles.colLoc, styles.headText]}>สถานที่เข้างาน</Text>
+                      {admin ? (
+                        <Text style={[styles.cell, styles.colEditAction, styles.headText]}>
+                          แก้ไขเวลา
+                        </Text>
+                      ) : null}
                     </View>
-                    {summaryRows.map((row) => (
-                      <View key={row.dateYmd} style={styles.tableRow}>
-                        <Text style={[styles.cell, styles.colDate]}>{row.dateYmd}</Text>
-                        <Text style={[styles.cell, styles.colTime]}>{row.checkIn}</Text>
-                        <Text style={[styles.cell, styles.colTime]}>{row.checkOut}</Text>
-                        <Text style={[styles.cell, styles.colCode]}>{row.employeeCode}</Text>
-                        <Text style={[styles.cell, styles.colLoc]}>{row.checkInLocation}</Text>
-                      </View>
-                    ))}
+                    {summaryRows.map((row) => {
+                      const draft = attendanceEditDrafts[row.dateYmd] ?? {
+                        checkIn: '',
+                        checkOut: '',
+                        location: '',
+                      };
+                      const rowBusy = attendanceSavingYmd === row.dateYmd;
+                      return (
+                        <View key={row.dateYmd} style={styles.tableRow}>
+                          <Text style={[styles.cell, styles.colDate]}>{row.dateYmd}</Text>
+                          {admin && !row.isLeave ? (
+                            <TextInput
+                              style={[styles.attendanceTimeInput, styles.colTime]}
+                              value={draft.checkIn}
+                              onChangeText={(text) =>
+                                setAttendanceEditDrafts((prev) => ({
+                                  ...prev,
+                                  [row.dateYmd]: {
+                                    ...(prev[row.dateYmd] ?? draft),
+                                    checkIn: text,
+                                  },
+                                }))
+                              }
+                              placeholder="HH:mm"
+                              placeholderTextColor={c.textMuted}
+                              editable={!rowBusy}
+                            />
+                          ) : (
+                            <Text style={[styles.cell, styles.colTime]}>{row.checkIn}</Text>
+                          )}
+                          {admin && !row.isLeave ? (
+                            <TextInput
+                              style={[styles.attendanceTimeInput, styles.colTime]}
+                              value={draft.checkOut}
+                              onChangeText={(text) =>
+                                setAttendanceEditDrafts((prev) => ({
+                                  ...prev,
+                                  [row.dateYmd]: {
+                                    ...(prev[row.dateYmd] ?? draft),
+                                    checkOut: text,
+                                  },
+                                }))
+                              }
+                              placeholder="HH:mm"
+                              placeholderTextColor={c.textMuted}
+                              editable={!rowBusy}
+                            />
+                          ) : (
+                            <Text style={[styles.cell, styles.colTime]}>{row.checkOut}</Text>
+                          )}
+                          <Text style={[styles.cell, styles.colCode]}>{row.employeeCode}</Text>
+                          {admin && !row.isLeave ? (
+                            <TextInput
+                              style={[styles.attendanceLocationInput, styles.colLoc]}
+                              value={draft.location}
+                              onChangeText={(text) =>
+                                setAttendanceEditDrafts((prev) => ({
+                                  ...prev,
+                                  [row.dateYmd]: {
+                                    ...(prev[row.dateYmd] ?? draft),
+                                    location: text,
+                                  },
+                                }))
+                              }
+                              placeholder="สถานที่/หมายเหตุ"
+                              placeholderTextColor={c.textMuted}
+                              editable={!rowBusy}
+                            />
+                          ) : (
+                            <Text style={[styles.cell, styles.colLoc]}>{row.checkInLocation}</Text>
+                          )}
+                          {admin ? (
+                            <View style={[styles.cell, styles.colEditAction]}>
+                              {row.isLeave ? (
+                                <Text style={styles.attendanceEditMuted}>วันลา</Text>
+                              ) : (
+                                <Pressable
+                                  style={[
+                                    styles.attendanceSaveBtn,
+                                    rowBusy && styles.disabled,
+                                  ]}
+                                  disabled={rowBusy}
+                                  onPress={() => void saveAttendanceEdit(row)}>
+                                  <Text style={styles.attendanceSaveBtnText}>
+                                    {rowBusy ? 'กำลังบันทึก...' : 'บันทึก'}
+                                  </Text>
+                                </Pressable>
+                              )}
+                            </View>
+                          ) : null}
+                        </View>
+                      );
+                    })}
                   </View>
                 </ScrollView>
               )}
@@ -2115,6 +2484,90 @@ const styles = StyleSheet.create({
     color: c.text,
   },
   sectionSubText: { fontSize: 12, color: c.textMuted, marginBottom: 8 },
+  memberWorkCard: {
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    borderRadius: r.lg,
+    padding: 12,
+    marginBottom: 12,
+    gap: 8,
+  },
+  memberWorkHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+  },
+  memberWorkEyebrow: {
+    color: c.primaryDark,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  memberWorkTitle: { color: c.text, fontSize: 17, fontWeight: '900', marginTop: 2 },
+  memberWorkBadge: {
+    minWidth: 60,
+    alignItems: 'center',
+    borderRadius: r.md,
+    backgroundColor: c.primary,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  memberWorkBadgeNum: { color: c.onAccent, fontSize: 18, fontWeight: '900', lineHeight: 20 },
+  memberWorkBadgeText: { color: c.onAccent, fontSize: 10, opacity: 0.85 },
+  memberWorkEmpty: {
+    color: c.textMuted,
+    fontSize: 12,
+    backgroundColor: c.surfaceMuted,
+    borderRadius: r.sm,
+    padding: 10,
+  },
+  memberWorkTaskRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    backgroundColor: c.surfaceMuted,
+    borderRadius: r.sm,
+    padding: 9,
+  },
+  memberWorkPri: { width: 4, height: 30, borderRadius: 2, backgroundColor: c.primary },
+  memberWorkTaskBody: { flex: 1, minWidth: 0 },
+  memberWorkTaskTitle: { color: c.text, fontSize: 13, fontWeight: '800' },
+  memberWorkTaskMeta: { color: c.textMuted, fontSize: 11, marginTop: 2 },
+  memberWorkNotes: { gap: 6 },
+  memberWorkNoteRow: {
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surface,
+    borderRadius: r.sm,
+    padding: 9,
+  },
+  memberWorkNoteSource: { color: c.primaryDark, fontSize: 10, fontWeight: '800' },
+  memberWorkNoteBody: { color: c.textSecondary, fontSize: 12, marginTop: 3, lineHeight: 17 },
+  memberWorkNoteTime: { color: c.textMuted, fontSize: 10, marginTop: 4 },
+  memberWorkActions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+  memberWorkPrimaryBtn: {
+    flexGrow: 1,
+    backgroundColor: c.primary,
+    borderRadius: r.sm,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  memberWorkPrimaryText: { color: c.onAccent, fontSize: 12, fontWeight: '800' },
+  memberWorkSecondaryBtn: {
+    flexGrow: 1,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    borderRadius: r.sm,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  memberWorkSecondaryText: { color: c.primaryDark, fontSize: 12, fontWeight: '800' },
   memberTaskSearchInput: {
     borderWidth: 1,
     borderColor: c.border,
@@ -2429,6 +2882,17 @@ const styles = StyleSheet.create({
   priorityChipText: { color: c.textSecondary, fontSize: 12, fontWeight: '600' },
   priorityChipTextOn: { color: c.primaryDark, fontWeight: '700' },
   periodText: { fontSize: 12, color: c.textSecondary, marginBottom: 8 },
+  attendanceEditHint: {
+    fontSize: 12,
+    color: c.primaryDark,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    borderRadius: r.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 8,
+  },
   actions: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -2486,4 +2950,36 @@ const styles = StyleSheet.create({
   colTime: { width: 130 },
   colCode: { width: 110 },
   colLoc: { width: 210 },
+  colEditAction: { width: 120 },
+  attendanceTimeInput: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    marginVertical: 4,
+    fontSize: 12,
+    color: c.text,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    borderRadius: r.sm,
+  },
+  attendanceLocationInput: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    marginVertical: 4,
+    fontSize: 12,
+    color: c.text,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    borderRadius: r.sm,
+  },
+  attendanceSaveBtn: {
+    backgroundColor: c.primary,
+    borderRadius: r.sm,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+  },
+  attendanceSaveBtnText: { color: c.onAccent, fontSize: 12, fontWeight: '700' },
+  attendanceEditMuted: { color: c.textMuted, fontSize: 12 },
 });

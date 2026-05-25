@@ -17,8 +17,13 @@ import {
   setHomeIconBadgeCount,
 } from '@/lib/appNotifications';
 import {
+  emitCommunitySeen,
+  emitMentionRead,
+  emitTaskNotificationsRead,
+  onCommunitySeen,
   onLeaveStatusChanged,
   onMentionRead,
+  onTaskNotificationsRead,
   onTaskStatusChanged,
 } from '@/lib/appSignals';
 import { supabase, supabaseConfigured } from '@/lib/supabase';
@@ -121,6 +126,29 @@ export function TabUnreadBadgesProvider({
     await writeSeen(seenKey('community', uid), now);
     setLastCommunitySeen(now);
     setCommunityRaw(0);
+    emitCommunitySeen({ seenAt: now, source: 'tab' });
+  }, [uid]);
+
+  const markTaskNotificationsSeen = useCallback(async () => {
+    if (!uid) return;
+    setTaskNotifRaw(0);
+    await supabase
+      .from('task_notifications')
+      .update({ read_at: new Date().toISOString() })
+      .eq('recipient_id', uid)
+      .is('read_at', null);
+    emitTaskNotificationsRead({ source: 'tasks_tab' });
+  }, [uid]);
+
+  const markMentionNotificationsSeen = useCallback(async () => {
+    if (!uid) return;
+    setMentionRaw(0);
+    await supabase
+      .from('attendance_chat_mention_notifications')
+      .update({ read_at: new Date().toISOString() })
+      .eq('recipient_id', uid)
+      .is('read_at', null);
+    emitMentionRead({ source: 'chat' });
   }, [uid]);
 
   const fetchBadgeSnapshot = useCallback(
@@ -197,13 +225,26 @@ export function TabUnreadBadgesProvider({
       scheduleRefresh();
     });
     const offMention = onMentionRead(() => {
+      setMentionRaw(0);
+      scheduleRefresh();
+    });
+    const offCommunity = onCommunitySeen((payload) => {
+      setLastCommunitySeen(payload.seenAt);
+      setCommunityRaw(0);
+      if (uid) void writeSeen(seenKey('community', uid), payload.seenAt);
+      scheduleRefresh();
+    });
+    const offTaskNotifs = onTaskNotificationsRead(() => {
+      setTaskNotifRaw(0);
       scheduleRefresh();
     });
     return () => {
       offTask();
       offMention();
+      offCommunity();
+      offTaskNotifs();
     };
-  }, [scheduleRefresh]);
+  }, [scheduleRefresh, uid]);
 
   useEffect(() => {
     let cancelled = false;
@@ -265,15 +306,23 @@ export function TabUnreadBadgesProvider({
 
   useEffect(() => {
     if (!hydrated || !uid) return;
-    if (onChatTab && !prevChatTab.current) void markChatSeen();
+    if (onChatTab && !prevChatTab.current) {
+      void markChatSeen();
+      void markMentionNotificationsSeen();
+    }
     prevChatTab.current = onChatTab;
-  }, [onChatTab, hydrated, uid, markChatSeen]);
+  }, [onChatTab, hydrated, uid, markChatSeen, markMentionNotificationsSeen]);
 
   useEffect(() => {
     if (!hydrated || !uid) return;
     if (onCommunityTab && !prevCommTab.current) void markCommunitySeen();
     prevCommTab.current = onCommunityTab;
   }, [onCommunityTab, hydrated, uid, markCommunitySeen]);
+
+  useEffect(() => {
+    if (!hydrated || !uid || !onTasksTab) return;
+    void markTaskNotificationsSeen();
+  }, [onTasksTab, hydrated, uid, markTaskNotificationsSeen]);
 
   useEffect(() => {
     if (!supabaseConfigured || !uid || !hydrated) return;

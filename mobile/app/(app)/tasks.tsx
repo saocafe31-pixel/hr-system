@@ -221,7 +221,6 @@ export default function TasksScreen() {
   const [assignPriority, setAssignPriority] = useState<TaskPriority>('normal');
   const [mgrSaving, setMgrSaving] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState('');
-  const [rangeDays, setRangeDays] = useState<7 | 30 | 90>(7);
   const [presentationOpen, setPresentationOpen] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<PresentationTemplate['id']>(
     'exec'
@@ -391,7 +390,7 @@ export default function TasksScreen() {
     if (extra.length === 0) return base;
     return [...base, ...extra].sort(compareTasksByPriorityThenCreated);
   }, [sortedTasks, statusFilter, deadlineFilter, dateWindows, taskSearchQuery]);
-  /** สถานะงานทั้งหมดในมุมมอง (ไม่จำกัดช่วงวันที่สร้าง — ใช้เฉพาะการ์ด Task Status) */
+  /** สถานะงานทั้งหมดในมุมมองหลังใช้ตัวกรองวันที่สร้างงาน */
   const taskStatusSnapshot = useMemo(() => {
     const total = sortedTasks.length;
     const byStatus = {
@@ -406,13 +405,19 @@ export default function TasksScreen() {
     }
     return { total, byStatus };
   }, [sortedTasks]);
-  const scopedTasksForSummary = useMemo(() => {
-    const now = Date.now();
-    const minTs = now - rangeDays * 24 * 60 * 60 * 1000;
-    return sortedTasks.filter(
-      (t) => new Date(t.created_at).getTime() >= minTs
-    );
-  }, [sortedTasks, rangeDays]);
+  const scopedTasksForSummary = sortedTasks;
+  const summaryRangeLabel = useMemo(() => {
+    if (taskCreatedRangePreset === '7d') return '7 วันที่ผ่านมา';
+    if (taskCreatedRangePreset === '30d') return '30 วันที่ผ่านมา';
+    if (taskCreatedRangePreset === '90d') return '90 วันที่ผ่านมา';
+    if (taskCreatedRangePreset === 'month') return 'เดือนนี้';
+    if (taskCreatedRangePreset === 'custom') {
+      const from = taskCreatedCustomFrom ? dateToBangkokYmd(taskCreatedCustomFrom) : 'เริ่มต้น';
+      const to = taskCreatedCustomTo ? dateToBangkokYmd(taskCreatedCustomTo) : 'สิ้นสุด';
+      return `${from} ถึง ${to}`;
+    }
+    return 'ทั้งหมด';
+  }, [taskCreatedRangePreset, taskCreatedCustomFrom, taskCreatedCustomTo]);
   const dashboard = useMemo(() => {
     const total = scopedTasksForSummary.length;
     const byStatus = {
@@ -609,7 +614,7 @@ export default function TasksScreen() {
     const tpl =
       PRESENTATION_TEMPLATES.find((t) => t.id === selectedTemplate) ??
       PRESENTATION_TEMPLATES[0];
-    const heading = `รายงานสรุปผลการปฏิบัติงาน (${focusedScopeLabel}) — ช่วงวิเคราะห์ ${rangeDays} วันที่ผ่านมา`;
+    const heading = `รายงานสรุปผลการปฏิบัติงาน (${focusedScopeLabel}) — ช่วงวิเคราะห์ ${summaryRangeLabel}`;
 
     const checklistNarrative = (() => {
       const blocks: string[] = [];
@@ -658,7 +663,7 @@ export default function TasksScreen() {
       ...tpl.sections.map((s, i) => `${i + 1}. ${s}`),
     ];
     return lines.join('\n');
-  }, [selectedTemplate, rangeDays, dashboard, deadlineSummary, scopedTasksForSummary, focusedScopeLabel]);
+  }, [selectedTemplate, summaryRangeLabel, dashboard, deadlineSummary, scopedTasksForSummary, focusedScopeLabel]);
 
   const load = useCallback(async () => {
     const bounds = taskCreatedRangeBounds(
@@ -1375,24 +1380,6 @@ export default function TasksScreen() {
           ) : null}
         </View>
       )}
-      <View style={styles.filterRow}>
-        {[7, 30, 90].map((d) => (
-          <Pressable
-            key={`range-${d}`}
-            style={[styles.filterChip, rangeDays === d && styles.filterChipOn]}
-            onPress={() => setRangeDays(d as 7 | 30 | 90)}>
-            <Text
-              style={[
-                styles.filterChipText,
-                rangeDays === d && styles.filterChipTextOn,
-                { fontSize: ui.fs(12) },
-              ]}>
-              {d} วัน
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-
       <Text
         style={[
           styles.kpiSectionLabel,
@@ -1620,7 +1607,7 @@ export default function TasksScreen() {
         </Pressable>
       </ScrollView>
       <Text style={[styles.rangeHint, { fontSize: ui.fs(11) }]}>
-        Summary for last {rangeDays} days (My Tasks)
+        Summary for {summaryRangeLabel} (My Tasks)
       </Text>
       <View style={styles.chartCard}>
         <Text style={[styles.chartTitle, { fontSize: ui.fs(14) }]}>Deadline Completion Status</Text>
@@ -1667,7 +1654,7 @@ export default function TasksScreen() {
       <View style={styles.chartCard}>
         <Text style={[styles.chartTitle, { fontSize: ui.fs(14) }]}>Task Status</Text>
         <Text style={[styles.chartSubtitle, { fontSize: ui.fs(11) }]}>
-          งานทั้งหมด {taskStatusSnapshot.total} งาน — นับจากทุกงานในมุมมองนี้ (ไม่จำกัดช่วง {rangeDays} วัน) · งานรอ/กำลังทำแสดงในรายการเสมอแม้ไม่อยู่ในช่วงเดดไลน์ที่เลือก
+          งานทั้งหมด {taskStatusSnapshot.total} งาน — นับจากทุกงานในมุมมองนี้ · งานรอ/กำลังทำแสดงในรายการเสมอแม้ไม่อยู่ในช่วงเดดไลน์ที่เลือก
         </Text>
         {STATUSES.map((s) => {
           const count = taskStatusSnapshot.byStatus[s];

@@ -8,7 +8,6 @@ import DateTimePicker, {
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
   Image,
   Linking,
   Modal,
@@ -60,12 +59,38 @@ const DEFAULT_KPI_SETTINGS_TEXT = JSON.stringify(
   null,
   2
 );
+type ClaimStatus = SalaryClaimRow['status'];
+type ClaimHistoryKind = 'salary' | 'expense';
+type ClaimHistoryStatusFilter = 'all' | Exclude<ClaimStatus, 'pending'>;
+const CLAIM_HISTORY_STATUS_FILTERS: ClaimHistoryStatusFilter[] = [
+  'all',
+  'approved',
+  'rejected',
+  'paid',
+];
 type AnnouncementDraftItem =
   | { key: string; kind: 'saved'; url: string }
   | { key: string; kind: 'pending'; localUri: string };
 
 function newDraftKey(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function claimStatusLabelTh(status: ClaimStatus | 'all'): string {
+  switch (status) {
+    case 'all':
+      return 'ทั้งหมด';
+    case 'pending':
+      return 'รอดำเนินการ';
+    case 'approved':
+      return 'อนุมัติแล้ว';
+    case 'rejected':
+      return 'ปฏิเสธแล้ว';
+    case 'paid':
+      return 'จ่ายแล้ว';
+    default:
+      return status;
+  }
 }
 
 const WEB_MODAL_BACKDROP = Platform.select({
@@ -219,9 +244,9 @@ export default function AdminScreen() {
   } | null>(null);
   const [employeeSearch, setEmployeeSearch] = useState('');
   const [employeeActionBusyId, setEmployeeActionBusyId] = useState<string | null>(null);
-  const [claimStatusFilter, setClaimStatusFilter] = useState<
-    'all' | 'pending' | 'approved' | 'rejected' | 'paid'
-  >('all');
+  const [claimHistoryKind, setClaimHistoryKind] = useState<ClaimHistoryKind | null>(null);
+  const [claimHistoryStatusFilter, setClaimHistoryStatusFilter] =
+    useState<ClaimHistoryStatusFilter>('all');
   const [claimMonthFilter, setClaimMonthFilter] = useState(monthKeyOf(new Date()));
   const [claimDateFrom, setClaimDateFrom] = useState('');
   const [claimDateTo, setClaimDateTo] = useState('');
@@ -368,7 +393,8 @@ export default function AdminScreen() {
   ) {
     const busyKey = `salary-${row.id}-${status}`;
     setClaimActionBusyKey(busyKey);
-    const note = salaryReviewNotes[row.id]?.trim() || null;
+    const noteDraft = salaryReviewNotes[row.id];
+    const note = noteDraft === undefined ? row.review_note : noteDraft.trim() || null;
     const actorId = session?.user?.id ?? null;
     const reviewedAt = new Date().toISOString();
     const { error } = await supabase
@@ -400,7 +426,10 @@ export default function AdminScreen() {
       )
     );
     setClaimActionBusyKey(null);
-    toast.success('อัปเดตสถานะแล้ว', `คำขอเบิกเงินเดือนถูกอัปเดตเป็น ${status}`);
+    toast.success(
+      'อัปเดตสถานะแล้ว',
+      `คำขอเบิกเงินเดือนถูกย้ายไปประวัติ (${claimStatusLabelTh(status)})`
+    );
   }
 
   async function updateExpenseClaimStatus(
@@ -409,7 +438,8 @@ export default function AdminScreen() {
   ) {
     const busyKey = `expense-${row.id}-${status}`;
     setClaimActionBusyKey(busyKey);
-    const note = expenseReviewNotes[row.id]?.trim() || null;
+    const noteDraft = expenseReviewNotes[row.id];
+    const note = noteDraft === undefined ? row.review_note : noteDraft.trim() || null;
     const actorId = session?.user?.id ?? null;
     const reviewedAt = new Date().toISOString();
     const { error } = await supabase
@@ -441,7 +471,10 @@ export default function AdminScreen() {
       )
     );
     setClaimActionBusyKey(null);
-    toast.success('อัปเดตสถานะแล้ว', `คำขอเบิกค่าใช้จ่ายถูกอัปเดตเป็น ${status}`);
+    toast.success(
+      'อัปเดตสถานะแล้ว',
+      `คำขอเบิกค่าใช้จ่ายถูกย้ายไปประวัติ (${claimStatusLabelTh(status)})`
+    );
   }
 
   async function exportSalaryClaimCsv() {
@@ -897,23 +930,39 @@ export default function AdminScreen() {
   );
 
   const filteredSalaryClaims = useMemo(
-    () =>
-      salaryClaims.filter((row) => {
-        if (claimStatusFilter !== 'all' && row.status !== claimStatusFilter) return false;
-        if (!inAttendancePeriod(row.created_at)) return false;
-        return inClaimDateRange(row.created_at);
-      }),
-    [salaryClaims, claimStatusFilter, inAttendancePeriod, inClaimDateRange]
+    () => salaryClaims.filter((row) => row.status === 'pending'),
+    [salaryClaims]
   );
 
   const filteredExpenseClaims = useMemo(
+    () => expenseClaims.filter((row) => row.status === 'pending'),
+    [expenseClaims]
+  );
+
+  const historySalaryClaims = useMemo(
     () =>
-      expenseClaims.filter((row) => {
-        if (claimStatusFilter !== 'all' && row.status !== claimStatusFilter) return false;
+      salaryClaims.filter((row) => {
+        if (row.status === 'pending') return false;
+        if (claimHistoryStatusFilter !== 'all' && row.status !== claimHistoryStatusFilter) {
+          return false;
+        }
         if (!inAttendancePeriod(row.created_at)) return false;
         return inClaimDateRange(row.created_at);
       }),
-    [expenseClaims, claimStatusFilter, inAttendancePeriod, inClaimDateRange]
+    [salaryClaims, claimHistoryStatusFilter, inAttendancePeriod, inClaimDateRange]
+  );
+
+  const historyExpenseClaims = useMemo(
+    () =>
+      expenseClaims.filter((row) => {
+        if (row.status === 'pending') return false;
+        if (claimHistoryStatusFilter !== 'all' && row.status !== claimHistoryStatusFilter) {
+          return false;
+        }
+        if (!inAttendancePeriod(row.created_at)) return false;
+        return inClaimDateRange(row.created_at);
+      }),
+    [expenseClaims, claimHistoryStatusFilter, inAttendancePeriod, inClaimDateRange]
   );
 
   function onPickFilterDate(event: DateTimePickerEvent, selectedDate?: Date) {
@@ -926,6 +975,11 @@ export default function AdminScreen() {
     const ymd = ymdOf(selectedDate);
     if (datePickerTarget === 'from') setClaimDateFrom(ymd);
     else setClaimDateTo(ymd);
+  }
+
+  function closeClaimHistory() {
+    setClaimHistoryKind(null);
+    setDatePickerTarget(null);
   }
 
   function openEditBranch(b: Branch) {
@@ -1453,80 +1507,29 @@ export default function AdminScreen() {
 
         <Text style={[styles.h2, { marginTop: 24 }]}>4 · คำขอเบิกเงินเดือน (Claim Salary)</Text>
         <Text style={styles.muted}>
-          รายการส่งจากหน้าโปรไฟล์ช่วงวันที่ 10-14 ของเดือน
+          รายการรอดำเนินการจากหน้าโปรไฟล์ช่วงวันที่ 10-14 ของเดือน
         </Text>
         <View style={styles.claimFilterWrap}>
-          <Text style={styles.label}>ตัวกรองสถานะ</Text>
-          <View style={styles.claimFilterStatusRow}>
-            {(['all', 'pending', 'approved', 'rejected', 'paid'] as const).map((status) => (
-              <Pressable
-                key={status}
-                style={[
-                  styles.claimFilterChip,
-                  claimStatusFilter === status && styles.claimFilterChipActive,
-                ]}
-                onPress={() => setClaimStatusFilter(status)}>
-                <Text
-                  style={[
-                    styles.claimFilterChipText,
-                    claimStatusFilter === status && styles.claimFilterChipTextActive,
-                  ]}>
-                  {status === 'all' ? 'ทั้งหมด' : status}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-          <Text style={styles.label}>ช่วงวันที่สร้างคำขอ (YYYY-MM-DD)</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="เดือนรอบสรุปเวลาเข้า-ออก (YYYY-MM)"
-            value={claimMonthFilter}
-            onChangeText={setClaimMonthFilter}
-          />
+          <Text style={styles.label}>คิวรอดำเนินการ</Text>
           <Text style={styles.muted}>
-            รอบเดือนที่ใช้: {attendancePeriod.from} ถึง {attendancePeriod.to}
+            เมื่อกดอนุมัติ / ปฏิเสธ / จ่ายแล้ว รายการจะหายจากหน้านี้และย้ายไปอยู่หน้าประวัติ
           </Text>
-          <View style={styles.claimDateRow}>
+          <View style={styles.claimHistorySummaryRow}>
             <Pressable
-              style={[styles.input, styles.claimDateInput]}
-              onPress={() => setDatePickerTarget('from')}>
-              <Text style={claimDateFrom ? styles.claimDateValue : styles.claimDatePlaceholder}>
-                {claimDateFrom || 'จากวันที่'}
-              </Text>
+              style={[styles.btnSecondary, styles.claimHistoryBtn]}
+              onPress={() => setClaimHistoryKind('salary')}>
+              <Text style={styles.btnSecondaryText}>ดูประวัติ Claim Salary</Text>
             </Pressable>
-            <Pressable
-              style={[styles.input, styles.claimDateInput]}
-              onPress={() => setDatePickerTarget('to')}>
-              <Text style={claimDateTo ? styles.claimDateValue : styles.claimDatePlaceholder}>
-                {claimDateTo || 'ถึงวันที่'}
-              </Text>
-            </Pressable>
+            <Text style={styles.muted}>
+              รออนุมัติ: {filteredSalaryClaims.length} รายการ
+            </Text>
           </View>
-          {claimDateFrom || claimDateTo ? (
-            <Pressable
-              style={styles.claimDateClearBtn}
-              onPress={() => {
-                setClaimDateFrom('');
-                setClaimDateTo('');
-              }}>
-              <Text style={styles.claimDateClearBtnText}>ล้างช่วงวันที่เลือกเอง</Text>
-            </Pressable>
-          ) : null}
           <Text style={styles.muted}>
-            ผลลัพธ์: เงินเดือน {filteredSalaryClaims.length} รายการ · ค่าใช้จ่าย{' '}
-            {filteredExpenseClaims.length} รายการ
+            ประวัติ Claim Salary ที่ตรงตัวกรองล่าสุด: {historySalaryClaims.length} รายการ
           </Text>
         </View>
-        {datePickerTarget ? (
-          <DateTimePicker
-            value={pickerDateValue}
-            mode="date"
-            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-            onChange={onPickFilterDate}
-          />
-        ) : null}
         {filteredSalaryClaims.length === 0 ? (
-          <Text style={styles.muted}>ยังไม่มีคำขอเบิกเงินเดือน</Text>
+          <Text style={styles.muted}>ยังไม่มีคำขอเบิกเงินเดือนที่รอดำเนินการ</Text>
         ) : (
           filteredSalaryClaims.map((row) => (
             <View key={row.id} style={styles.pwCard}>
@@ -1534,7 +1537,8 @@ export default function AdminScreen() {
                 {row.full_name || row.user_id.slice(0, 8)} · {money(row.requested_amount)} บาท
               </Text>
               <Text style={styles.rowSub}>
-                สถานะ: {row.status} · เดือน: {row.claim_month} · ส่งเมื่อ {row.created_at}
+                สถานะ: {claimStatusLabelTh(row.status)} · เดือน: {row.claim_month} · ส่งเมื่อ{' '}
+                {row.created_at}
               </Text>
               <Text style={styles.rowSub}>
                 บัญชี: {row.bank_name ?? '-'} / {row.account_number ?? '-'}
@@ -1580,15 +1584,34 @@ export default function AdminScreen() {
           ))
         )}
         <Pressable style={styles.btn} onPress={() => void exportSalaryClaimCsv()}>
-          <Text style={styles.btnText}>ส่งออก Claim Salary เป็น CSV</Text>
+          <Text style={styles.btnText}>ส่งออกคิว Claim Salary เป็น CSV</Text>
         </Pressable>
 
         <Text style={[styles.h2, { marginTop: 24 }]}>5 · คำขอเบิกเงิน (Expense Claim)</Text>
         <Text style={styles.muted}>
-          แสดงแยกรายการตามหลักฐานการเบิก
+          รายการรอดำเนินการ แสดงแยกรายการตามหลักฐานการเบิก
         </Text>
+        <View style={styles.claimFilterWrap}>
+          <Text style={styles.label}>คิวรอดำเนินการ</Text>
+          <Text style={styles.muted}>
+            เมื่อกดอนุมัติ / ปฏิเสธ / จ่ายแล้ว รายการจะหายจากหัวข้อนี้และย้ายไปอยู่ประวัติ Expense Claim
+          </Text>
+          <View style={styles.claimHistorySummaryRow}>
+            <Pressable
+              style={[styles.btnSecondary, styles.claimHistoryBtn]}
+              onPress={() => setClaimHistoryKind('expense')}>
+              <Text style={styles.btnSecondaryText}>ดูประวัติ Expense Claim</Text>
+            </Pressable>
+            <Text style={styles.muted}>
+              รออนุมัติ: {filteredExpenseClaims.length} รายการ
+            </Text>
+          </View>
+          <Text style={styles.muted}>
+            ประวัติ Expense Claim ที่ตรงตัวกรองล่าสุด: {historyExpenseClaims.length} รายการ
+          </Text>
+        </View>
         {filteredExpenseClaims.length === 0 ? (
-          <Text style={styles.muted}>ยังไม่มีคำขอเบิกค่าใช้จ่าย</Text>
+          <Text style={styles.muted}>ยังไม่มีคำขอเบิกค่าใช้จ่ายที่รอดำเนินการ</Text>
         ) : (
           filteredExpenseClaims.map((claim) => {
             const items = expenseClaimItems.filter((it) => it.expense_claim_id === claim.id);
@@ -1598,7 +1621,7 @@ export default function AdminScreen() {
                   {claim.full_name || claim.user_id.slice(0, 8)} · รวม {money(claim.total_amount)} บาท
                 </Text>
                 <Text style={styles.rowSub}>
-                  สถานะ: {claim.status} · ส่งเมื่อ {claim.created_at}
+                  สถานะ: {claimStatusLabelTh(claim.status)} · ส่งเมื่อ {claim.created_at}
                 </Text>
                 <Text style={styles.rowSub}>
                   บัญชี: {claim.bank_name ?? '-'} / {claim.account_number ?? '-'} · สาขา{' '}
@@ -1698,7 +1721,7 @@ export default function AdminScreen() {
           })
         )}
         <Pressable style={styles.btn} onPress={() => void exportExpenseClaimCsv()}>
-          <Text style={styles.btnText}>ส่งออก Expense Claim เป็น CSV</Text>
+          <Text style={styles.btnText}>ส่งออกคิว Expense Claim เป็น CSV</Text>
         </Pressable>
 
         <Text style={[styles.h2, { marginTop: 24 }]}>6 · สาขา (branch_information)</Text>
@@ -1707,20 +1730,20 @@ export default function AdminScreen() {
         </Text>
         <TextInput
           style={styles.input}
-          placeholder="รหัสสาขา (ตัวเลข เช่น 1)"
+          placeholder="รหัสสาขา เช่น 101"
+          keyboardType="number-pad"
           value={bId}
           onChangeText={setBId}
-          keyboardType="number-pad"
         />
         <TextInput
           style={styles.input}
-          placeholder="รหัสสาขา (branch_code)"
+          placeholder="branch_code เช่น BKK01"
           value={bCode}
           onChangeText={setBCode}
         />
         <TextInput
           style={styles.input}
-          placeholder="ชื่อสาขา (branch_name)"
+          placeholder="ชื่อสาขา"
           value={bName}
           onChangeText={setBName}
         />
@@ -1732,7 +1755,7 @@ export default function AdminScreen() {
         />
         <TextInput
           style={styles.input}
-          placeholder="เบอร์โทร (ตัวเลข)"
+          placeholder="เบอร์โทร"
           value={bPhone}
           onChangeText={setBPhone}
           keyboardType="phone-pad"
@@ -1753,7 +1776,7 @@ export default function AdminScreen() {
         />
         <TextInput
           style={styles.input}
-          placeholder="รัศมี (เมตร)"
+          placeholder="รัศมี เมตร"
           value={bRad}
           onChangeText={setBRad}
           keyboardType="number-pad"
@@ -1761,33 +1784,33 @@ export default function AdminScreen() {
         <Pressable style={styles.btn} onPress={addBranch}>
           <Text style={styles.btnText}>เพิ่มสาขา</Text>
         </Pressable>
-
-        <FlatList
-          scrollEnabled={false}
-          data={branches}
-          keyExtractor={(b) => String(b.id)}
-          renderItem={({ item: b }) => (
-            <View style={styles.row}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.rowTitle}>
-                  {b.branch_name ?? b.branch_code ?? `สาขา #${b.id}`}
-                </Text>
-                <Text style={styles.rowSub}>
-                  id {b.id} · {b.latitude}, {b.longitude} · รัศมี {b.radius_meters} ม.
-                </Text>
-              </View>
-              <View style={styles.branchActions}>
-                <Pressable onPress={() => openEditBranch(b)}>
-                  <Text style={styles.linkAction}>แก้ไข</Text>
-                </Pressable>
-                <Pressable onPress={() => deleteBranch(b.id)}>
-                  <Text style={styles.danger}>ลบ</Text>
-                </Pressable>
-              </View>
+        {branches.map((b) => (
+          <View key={b.id} style={styles.row}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowTitle}>
+                {b.id} · {b.branch_name}
+              </Text>
+              <Text style={styles.rowSub}>
+                code: {b.branch_code ?? '—'} · lat/lon: {b.latitude},{b.longitude} · r:{' '}
+                {b.radius_meters}m
+              </Text>
             </View>
-          )}
-        />
-
+            <View style={styles.branchActions}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                style={[styles.editBtn, Platform.OS === 'web' && styles.pressableWeb]}
+                onPress={() => openEditBranch(b)}>
+                <Text style={styles.editBtnText}>แก้ไข</Text>
+              </TouchableOpacity>
+              <Pressable
+                onPress={() => {
+                  void deleteBranch(b.id);
+                }}>
+                <Text style={styles.danger}>ลบ</Text>
+              </Pressable>
+            </View>
+          </View>
+        ))}
         <Text style={[styles.h2, { marginTop: 24 }]}>ข้อความการ์ดพักเบรก</Text>
         <Text style={styles.muted}>
           แต่ละช่อง = ข้อความหนึ่งแบบที่อาจถูกสุ่มแสดงบนป๊อปอัพ — กด «เพิ่มข้อความ» เพื่อเพิ่มตัวเลือก
@@ -1935,6 +1958,268 @@ export default function AdminScreen() {
           <Text style={styles.btnText}>บันทึกการตั้งค่า</Text>
         </Pressable>
       </ScrollView>
+
+      <Modal
+        visible={claimHistoryKind !== null}
+        transparent
+        animationType="slide"
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
+        onRequestClose={closeClaimHistory}>
+        <Pressable
+          style={[styles.linkBackdrop, WEB_MODAL_BACKDROP]}
+          onPress={closeClaimHistory}>
+          <Pressable style={styles.linkModalCard} onPress={() => {}}>
+            <View style={styles.claimHistoryHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.linkModalTitle}>
+                  {claimHistoryKind === 'salary'
+                    ? 'ประวัติ Claim Salary'
+                    : 'ประวัติ Expense Claim'}
+                </Text>
+                <Text style={styles.linkModalSub}>
+                  รายการที่อนุมัติ / ปฏิเสธ / จ่ายแล้วของหัวข้อนี้จะถูกแสดงในหน้านี้
+                </Text>
+              </View>
+              <Pressable
+                hitSlop={12}
+                onPress={closeClaimHistory}
+                accessibilityRole="button"
+                accessibilityLabel="ปิดประวัติคำขอ">
+                <Text style={styles.linkAction}>ปิด</Text>
+              </Pressable>
+            </View>
+            <ScrollView
+              style={styles.claimHistoryScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}>
+              <View style={styles.claimFilterWrap}>
+                <Text style={styles.label}>สถานะประวัติ</Text>
+                <View style={styles.claimFilterStatusRow}>
+                  {CLAIM_HISTORY_STATUS_FILTERS.map((status) => (
+                    <Pressable
+                      key={status}
+                      style={[
+                        styles.claimFilterChip,
+                        claimHistoryStatusFilter === status && styles.claimFilterChipActive,
+                      ]}
+                      onPress={() => setClaimHistoryStatusFilter(status)}>
+                      <Text
+                        style={[
+                          styles.claimFilterChipText,
+                          claimHistoryStatusFilter === status &&
+                            styles.claimFilterChipTextActive,
+                        ]}>
+                        {claimStatusLabelTh(status)}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Text style={styles.label}>ช่วงวันที่สร้างคำขอ</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="เดือนรอบสรุปเวลาเข้า-ออก (YYYY-MM)"
+                  value={claimMonthFilter}
+                  onChangeText={setClaimMonthFilter}
+                />
+                <Text style={styles.muted}>
+                  รอบเดือนที่ใช้: {attendancePeriod.from} ถึง {attendancePeriod.to}
+                </Text>
+                <View style={styles.claimDateRow}>
+                  <Pressable
+                    style={[styles.input, styles.claimDateInput]}
+                    onPress={() => setDatePickerTarget('from')}>
+                    <Text
+                      style={claimDateFrom ? styles.claimDateValue : styles.claimDatePlaceholder}>
+                      {claimDateFrom || 'จากวันที่'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.input, styles.claimDateInput]}
+                    onPress={() => setDatePickerTarget('to')}>
+                    <Text style={claimDateTo ? styles.claimDateValue : styles.claimDatePlaceholder}>
+                      {claimDateTo || 'ถึงวันที่'}
+                    </Text>
+                  </Pressable>
+                </View>
+                {claimDateFrom || claimDateTo ? (
+                  <Pressable
+                    style={styles.claimDateClearBtn}
+                    onPress={() => {
+                      setClaimDateFrom('');
+                      setClaimDateTo('');
+                    }}>
+                    <Text style={styles.claimDateClearBtnText}>ล้างช่วงวันที่เลือกเอง</Text>
+                  </Pressable>
+                ) : null}
+                {datePickerTarget ? (
+                  <DateTimePicker
+                    value={pickerDateValue}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={onPickFilterDate}
+                  />
+                ) : null}
+                <Text style={styles.muted}>
+                  ผลลัพธ์:{' '}
+                  {claimHistoryKind === 'salary'
+                    ? `Claim Salary ${historySalaryClaims.length} รายการ`
+                    : `Expense Claim ${historyExpenseClaims.length} รายการ`}
+                </Text>
+              </View>
+
+              {claimHistoryKind === 'salary' ? (
+                <>
+                  <Text style={styles.h2}>ประวัติ Claim Salary</Text>
+                  {historySalaryClaims.length === 0 ? (
+                    <Text style={styles.muted}>ไม่พบประวัติคำขอเบิกเงินเดือนตามตัวกรอง</Text>
+                  ) : (
+                    historySalaryClaims.map((row) => (
+                      <View key={row.id} style={styles.pwCard}>
+                        <Text style={styles.rowTitle}>
+                          {row.full_name || row.user_id.slice(0, 8)} ·{' '}
+                          {money(row.requested_amount)} บาท
+                        </Text>
+                        <Text style={styles.rowSub}>
+                          สถานะ: {claimStatusLabelTh(row.status)} · เดือน: {row.claim_month} ·
+                          ส่งเมื่อ {row.created_at}
+                        </Text>
+                        <Text style={styles.rowSub}>
+                          บัญชี: {row.bank_name ?? '-'} / {row.account_number ?? '-'} · สังกัด{' '}
+                          {row.branch_name ?? '-'}
+                        </Text>
+                        <Text style={styles.rowSub}>
+                          ตรวจเมื่อ: {row.reviewed_at ?? '-'} · ผู้ตรวจ: {row.reviewed_by ?? '-'}
+                        </Text>
+                        {row.review_note ? (
+                          <Text style={styles.rowSub}>บันทึกผล: {row.review_note}</Text>
+                        ) : null}
+                        {row.note ? (
+                          <Text style={styles.rowSub}>หมายเหตุผู้ขอ: {row.note}</Text>
+                        ) : null}
+                        {row.status === 'approved' ? (
+                          <View style={styles.claimActionRow}>
+                            <Pressable
+                              style={[
+                                styles.claimBtn,
+                                styles.claimBtnPaid,
+                                claimActionBusyKey !== null && styles.disabledSoft,
+                              ]}
+                              disabled={claimActionBusyKey !== null}
+                              onPress={() => void updateSalaryClaimStatus(row, 'paid')}>
+                              <Text style={styles.claimBtnText}>จ่ายแล้ว</Text>
+                            </Pressable>
+                          </View>
+                        ) : null}
+                      </View>
+                    ))
+                  )}
+                </>
+              ) : null}
+
+              {claimHistoryKind === 'expense' ? (
+                <>
+                  <Text style={styles.h2}>ประวัติ Expense Claim</Text>
+                  {historyExpenseClaims.length === 0 ? (
+                    <Text style={styles.muted}>ไม่พบประวัติคำขอเบิกค่าใช้จ่ายตามตัวกรอง</Text>
+                  ) : (
+                    historyExpenseClaims.map((claim) => {
+                  const items = expenseClaimItems.filter(
+                    (it) => it.expense_claim_id === claim.id
+                  );
+                  return (
+                    <View key={claim.id} style={styles.pwCard}>
+                      <Text style={styles.rowTitle}>
+                        {claim.full_name || claim.user_id.slice(0, 8)} · รวม{' '}
+                        {money(claim.total_amount)} บาท
+                      </Text>
+                      <Text style={styles.rowSub}>
+                        สถานะ: {claimStatusLabelTh(claim.status)} · ส่งเมื่อ {claim.created_at}
+                      </Text>
+                      <Text style={styles.rowSub}>
+                        บัญชี: {claim.bank_name ?? '-'} / {claim.account_number ?? '-'} · สาขา{' '}
+                        {claim.branch_name ?? '-'}
+                      </Text>
+                      <Text style={styles.rowSub}>
+                        ตรวจเมื่อ: {claim.reviewed_at ?? '-'} · ผู้ตรวจ: {claim.reviewed_by ?? '-'}
+                      </Text>
+                      {claim.review_note ? (
+                        <Text style={styles.rowSub}>บันทึกผล: {claim.review_note}</Text>
+                      ) : null}
+                      {claim.status === 'approved' ? (
+                        <View style={styles.claimActionRow}>
+                          <Pressable
+                            style={[
+                              styles.claimBtn,
+                              styles.claimBtnPaid,
+                              claimActionBusyKey !== null && styles.disabledSoft,
+                            ]}
+                            disabled={claimActionBusyKey !== null}
+                            onPress={() => void updateExpenseClaimStatus(claim, 'paid')}>
+                            <Text style={styles.claimBtnText}>จ่ายแล้ว</Text>
+                          </Pressable>
+                        </View>
+                      ) : null}
+                      {items.length === 0 ? (
+                        <Text style={styles.rowSub}>ยังไม่มีรายการย่อย</Text>
+                      ) : (
+                        items.map((item, idx) => (
+                          <View key={item.id} style={styles.claimItemRow}>
+                            <Text style={styles.rowSub}>
+                              {idx + 1}. {item.item_title} · {money(item.amount)} บาท
+                            </Text>
+                            {item.note ? (
+                              <Text style={styles.rowSub}>หมายเหตุ: {item.note}</Text>
+                            ) : null}
+                            {item.evidence_url ? (
+                              <View style={styles.claimEvidenceBlock}>
+                                {looksLikeImageEvidenceUrl(item.evidence_url) ? (
+                                  <>
+                                    <Pressable
+                                      accessibilityRole="button"
+                                      accessibilityLabel="ดูหลักฐานขนาดใหญ่"
+                                      onPress={() =>
+                                        setExpenseEvidencePreview({
+                                          url: item.evidence_url,
+                                          name: item.evidence_name,
+                                        })
+                                      }>
+                                      <Image
+                                        source={{ uri: item.evidence_url }}
+                                        style={styles.expenseEvidenceThumb}
+                                        resizeMode="cover"
+                                      />
+                                    </Pressable>
+                                    <Text style={styles.rowSub} numberOfLines={2}>
+                                      {item.evidence_name ?? 'หลักฐาน'}
+                                    </Text>
+                                  </>
+                                ) : null}
+                                <Pressable
+                                  onPress={() => {
+                                    void Linking.openURL(item.evidence_url);
+                                  }}>
+                                  <Text style={styles.linkAction}>
+                                    {item.evidence_name ?? 'เปิดหลักฐาน'}
+                                  </Text>
+                                </Pressable>
+                              </View>
+                            ) : (
+                              <Text style={styles.rowSub}>ไม่มีไฟล์แนบ</Text>
+                            )}
+                          </View>
+                        ))
+                      )}
+                    </View>
+                  );
+                    })
+                  )}
+                </>
+              ) : null}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal
         visible={editBranch !== null}
@@ -2377,6 +2662,21 @@ const styles = StyleSheet.create({
     backgroundColor: c.surface,
     marginBottom: 12,
   },
+  claimHistorySummaryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  claimHistoryBtn: { marginBottom: 0 },
+  claimHistoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  claimHistoryScroll: { maxHeight: 620 },
   claimFilterStatusRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',

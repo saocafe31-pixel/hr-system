@@ -1174,6 +1174,7 @@ export default function AttendanceChatScreen() {
                       userId={profileData.user_id}
                       title="ปฏิทินตารางงานของพนักงาน"
                       sub="มุมมองรายเดือน · แตะวันที่ดูตารางและโน้ต — เพื่อนร่วมสาขาเดียวกันอ่านได้ (แก้ไขได้เฉพาะเจ้าของหรือผู้จัดการที่มีสิทธิ์)"
+                      autoOpenFirstHighlight
                     />
                   ) : null}
                 </>

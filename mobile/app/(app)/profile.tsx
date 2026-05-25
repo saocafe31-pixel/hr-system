@@ -99,6 +99,49 @@ function formatWorkDateTh(ymd: string): string {
   }
 }
 
+function formatLeaveDateRangeTh(startYmd: string, endYmd: string): string {
+  if (startYmd === endYmd) return formatWorkDateTh(startYmd);
+  return `${formatWorkDateTh(startYmd)} - ${formatWorkDateTh(endYmd)}`;
+}
+
+function leaveTypeLabelTh(type: LeaveRequestRow['leave_type']): string {
+  if (type === 'sick') return 'ลาป่วย';
+  if (type === 'personal') return 'ลากิจ';
+  if (type === 'vacation') return 'ลาพักร้อน';
+  return type;
+}
+
+function leaveStatusLabelTh(status: LeaveRequestRow['status']): string {
+  if (status === 'approved') return 'อนุมัติแล้ว';
+  if (status === 'rejected') return 'ปฏิเสธแล้ว';
+  return 'รออนุมัติ';
+}
+
+function leaveStatusTone(status: LeaveRequestRow['status']): 'ok' | 'warn' | 'danger' {
+  if (status === 'approved') return 'ok';
+  if (status === 'rejected') return 'danger';
+  return 'warn';
+}
+
+function leaveDaysCount(row: LeaveRequestRow): number {
+  return eachCalendarYmdInclusive(row.starts_on, row.ends_on).length;
+}
+
+function formatCreatedAtTh(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat('th-TH', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'Asia/Bangkok',
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
 function formatIsoClockTh(iso: string): string {
   try {
     return new Intl.DateTimeFormat('th-TH', {
@@ -228,6 +271,7 @@ export default function ProfileScreen() {
   );
 
   const [leaveRows, setLeaveRows] = useState<LeaveRequestRow[]>([]);
+  const [leaveHistoryOpen, setLeaveHistoryOpen] = useState(false);
   const [vacationGrant, setVacationGrant] = useState<VacationGrantRow | null>(
     null
   );
@@ -967,6 +1011,16 @@ export default function ProfileScreen() {
   );
   const vacationPct =
     vacGrant > 0 ? barPct(vacationUsed, vacGrant) : vacationUsed > 0 ? 100 : 0;
+  const leaveHistoryRows = useMemo(
+    () =>
+      [...leaveRows].sort((a, b) => {
+        const aTime = new Date(a.created_at || `${a.starts_on}T00:00:00+07:00`).getTime();
+        const bTime = new Date(b.created_at || `${b.starts_on}T00:00:00+07:00`).getTime();
+        return bTime - aTime;
+      }),
+    [leaveRows]
+  );
+  const leaveHistoryPreview = leaveHistoryRows.slice(0, 4);
 
   const payrollCycleOptions = useMemo(
     () => listPayrollCycleKeysDescending(15),
@@ -1270,6 +1324,77 @@ export default function ProfileScreen() {
           </View>
         </View>
 
+        <View style={styles.leaveHistoryCard}>
+          <View style={styles.leaveHistoryHeader}>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.leaveHistoryTitle}>ประวัติการลา</Text>
+              <Text style={styles.leaveHistorySub}>
+                แสดงคำขอลาทั้งปี {quotaY} รวมรายการรออนุมัติและปฏิเสธ
+              </Text>
+            </View>
+            <Pressable
+              style={[
+                styles.leaveHistoryOpenBtn,
+                leaveHistoryRows.length === 0 && styles.disabled,
+              ]}
+              disabled={leaveHistoryRows.length === 0}
+              onPress={() => setLeaveHistoryOpen(true)}>
+              <Text style={styles.leaveHistoryOpenBtnText}>ดูทั้งหมด</Text>
+            </Pressable>
+          </View>
+          {leaveHistoryRows.length === 0 ? (
+            <Text style={styles.leaveHistoryEmpty}>ยังไม่มีประวัติการลาในปีนี้</Text>
+          ) : (
+            leaveHistoryPreview.map((row) => {
+              const tone = leaveStatusTone(row.status);
+              return (
+                <View key={row.id} style={styles.leaveHistoryRow}>
+                  <View
+                    style={[
+                      styles.leaveHistoryAccent,
+                      tone === 'ok'
+                        ? styles.leaveHistoryAccentOk
+                        : tone === 'danger'
+                          ? styles.leaveHistoryAccentDanger
+                          : styles.leaveHistoryAccentWarn,
+                    ]}
+                  />
+                  <View style={styles.leaveHistoryBody}>
+                    <View style={styles.leaveHistoryTopLine}>
+                      <Text style={styles.leaveHistoryType}>{leaveTypeLabelTh(row.leave_type)}</Text>
+                      <Text
+                        style={[
+                          styles.leaveHistoryStatus,
+                          tone === 'ok'
+                            ? styles.leaveHistoryStatusOk
+                            : tone === 'danger'
+                              ? styles.leaveHistoryStatusDanger
+                              : styles.leaveHistoryStatusWarn,
+                        ]}>
+                        {leaveStatusLabelTh(row.status)}
+                      </Text>
+                    </View>
+                    <Text style={styles.leaveHistoryDate}>
+                      {formatLeaveDateRangeTh(row.starts_on, row.ends_on)} · {leaveDaysCount(row)} วัน
+                    </Text>
+                    <Text style={styles.leaveHistoryReason} numberOfLines={2}>
+                      {row.reason?.trim() || row.supplementary_note?.trim() || 'ไม่ระบุเหตุผล'}
+                    </Text>
+                    <Text style={styles.leaveHistoryCreated}>
+                      ส่งคำขอ {formatCreatedAtTh(row.created_at)}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })
+          )}
+          {leaveHistoryRows.length > leaveHistoryPreview.length ? (
+            <Text style={styles.leaveHistoryMore}>
+              และอีก {leaveHistoryRows.length - leaveHistoryPreview.length} รายการ กดดูทั้งหมดเพื่อดูประวัติครบ
+            </Text>
+          ) : null}
+        </View>
+
         <View style={styles.kpiCard}>
           <View style={styles.kpiHeaderRow}>
             <View style={{ flex: 1, minWidth: 0 }}>
@@ -1554,6 +1679,77 @@ export default function ProfileScreen() {
         </View>
       </Modal>
 
+      <Modal
+        visible={leaveHistoryOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setLeaveHistoryOpen(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>ประวัติการลา ปี {quotaY}</Text>
+            <Text style={styles.leaveHistoryModalSub}>
+              รวมคำขอลาทุกสถานะ เรียงตามวันที่ส่งคำขอล่าสุด
+            </Text>
+            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator>
+              {leaveHistoryRows.length === 0 ? (
+                <Text style={styles.leaveHistoryEmpty}>ยังไม่มีประวัติการลาในปีนี้</Text>
+              ) : (
+                leaveHistoryRows.map((row) => {
+                  const tone = leaveStatusTone(row.status);
+                  return (
+                    <View key={`modal-${row.id}`} style={styles.leaveHistoryRow}>
+                      <View
+                        style={[
+                          styles.leaveHistoryAccent,
+                          tone === 'ok'
+                            ? styles.leaveHistoryAccentOk
+                            : tone === 'danger'
+                              ? styles.leaveHistoryAccentDanger
+                              : styles.leaveHistoryAccentWarn,
+                        ]}
+                      />
+                      <View style={styles.leaveHistoryBody}>
+                        <View style={styles.leaveHistoryTopLine}>
+                          <Text style={styles.leaveHistoryType}>
+                            {leaveTypeLabelTh(row.leave_type)}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.leaveHistoryStatus,
+                              tone === 'ok'
+                                ? styles.leaveHistoryStatusOk
+                                : tone === 'danger'
+                                  ? styles.leaveHistoryStatusDanger
+                                  : styles.leaveHistoryStatusWarn,
+                            ]}>
+                            {leaveStatusLabelTh(row.status)}
+                          </Text>
+                        </View>
+                        <Text style={styles.leaveHistoryDate}>
+                          {formatLeaveDateRangeTh(row.starts_on, row.ends_on)} · {leaveDaysCount(row)} วัน
+                        </Text>
+                        <Text style={styles.leaveHistoryReason}>
+                          {row.reason?.trim() || row.supplementary_note?.trim() || 'ไม่ระบุเหตุผล'}
+                        </Text>
+                        <Text style={styles.leaveHistoryCreated}>
+                          ส่งคำขอ {formatCreatedAtTh(row.created_at)}
+                        </Text>
+                        {row.medical_certificate_url || row.supplementary_document_url ? (
+                          <Text style={styles.leaveHistoryAttach}>มีเอกสารแนบ</Text>
+                        ) : null}
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </ScrollView>
+            <Pressable style={styles.modalClose} onPress={() => setLeaveHistoryOpen(false)}>
+              <Text style={styles.modalCloseText}>ปิด</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       <AdminEmployeeEditModal
         visible={editEmployeeId !== null}
         employeeId={editEmployeeId}
@@ -1779,6 +1975,78 @@ const styles = StyleSheet.create({
     backgroundColor: c.borderSoft,
     marginVertical: 2,
   },
+  leaveHistoryCard: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  leaveHistoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  leaveHistoryTitle: { fontSize: 16, fontWeight: '800', color: c.text },
+  leaveHistorySub: { marginTop: 3, fontSize: 12, color: c.textMuted, lineHeight: 17 },
+  leaveHistoryOpenBtn: {
+    borderRadius: r.sm,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  leaveHistoryOpenBtnText: { color: c.primaryDark, fontSize: 12, fontWeight: '800' },
+  leaveHistoryEmpty: {
+    padding: 12,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceMuted,
+    color: c.textMuted,
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  leaveHistoryRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 8,
+    padding: 10,
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  leaveHistoryAccent: { width: 4, borderRadius: 2 },
+  leaveHistoryAccentOk: { backgroundColor: c.checkIn },
+  leaveHistoryAccentWarn: { backgroundColor: c.accentWarm },
+  leaveHistoryAccentDanger: { backgroundColor: c.error },
+  leaveHistoryBody: { flex: 1, minWidth: 0 },
+  leaveHistoryTopLine: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  leaveHistoryType: { color: c.text, fontSize: 14, fontWeight: '800' },
+  leaveHistoryStatus: {
+    borderRadius: 999,
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    fontSize: 11,
+    fontWeight: '800',
+    overflow: 'hidden',
+  },
+  leaveHistoryStatusOk: { color: c.checkIn, backgroundColor: c.primaryLight },
+  leaveHistoryStatusWarn: { color: c.warningTitle, backgroundColor: c.warningBg },
+  leaveHistoryStatusDanger: { color: c.error, backgroundColor: c.errorBg },
+  leaveHistoryDate: { marginTop: 5, color: c.textSecondary, fontSize: 12, fontWeight: '700' },
+  leaveHistoryReason: { marginTop: 5, color: c.text, fontSize: 12, lineHeight: 18 },
+  leaveHistoryCreated: { marginTop: 5, color: c.textMuted, fontSize: 11 },
+  leaveHistoryAttach: { marginTop: 5, color: c.primaryDark, fontSize: 11, fontWeight: '700' },
+  leaveHistoryMore: { marginTop: 10, color: c.textMuted, fontSize: 12, fontStyle: 'italic' },
+  leaveHistoryModalSub: { marginTop: -4, marginBottom: 10, color: c.textMuted, fontSize: 12 },
   kpiCard: {
     marginTop: 14,
     paddingVertical: 14,

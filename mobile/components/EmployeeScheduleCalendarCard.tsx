@@ -1,7 +1,10 @@
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,12 +13,14 @@ import {
   View,
 } from 'react-native';
 
+import { TaskDetailModal } from '@/components/TaskDetailModal';
 import { NatureTheme } from '@/constants/Theme';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
+import { priorityColor } from '@/lib/taskHelpers';
 import { supabase } from '@/lib/supabase';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
-import type { Branch } from '@/lib/types';
+import type { Branch, TaskPriority } from '@/lib/types';
 
 type Row = {
   ymd: string;
@@ -33,10 +38,25 @@ type Cell = {
   markerSource: 'shift' | 'legacy' | 'memo' | null;
 };
 
+type HighlightDay = {
+  ymd: string;
+  rows: Row[];
+  hasMemo: boolean;
+};
+
 type CalendarChecklistItem = {
   id: string;
   label: string;
   done: boolean;
+};
+
+type LiveWorkTask = {
+  id: string;
+  title: string;
+  status: string;
+  priority?: string | null;
+  due_at?: string | null;
+  created_at?: string | null;
 };
 
 function ymdFromDate(d: Date): string {
@@ -87,19 +107,30 @@ function addMonthsLocal(d: Date, delta: number): Date {
   return next;
 }
 
+function taskStatusLabel(status: string): string {
+  if (status === 'in_progress') return 'กำลังทำ';
+  if (status === 'pending') return 'รอดำเนินการ';
+  return status;
+}
+
 export function EmployeeScheduleCalendarCard({
   userId,
   title = 'ปฏิทินตารางงานของพนักงาน',
   sub = 'มุมมองรายเดือน · แตะวันที่เพื่อดูรายละเอียด',
+  autoOpenFirstHighlight = false,
 }: {
   userId: string;
   title?: string;
   /** คำอธิบายใต้หัวข้อ (เช่น บอกขอบเขตการมองเห็นเมื่อเปิดจากแชท) */
   sub?: string;
+  /** เปิด popup รายวันอัตโนมัติเมื่อเดือนนั้นมีตารางหรือโน้ต */
+  autoOpenFirstHighlight?: boolean;
 }) {
   const toast = useCuteToast();
   const { session } = useAuth();
   const role = useRole();
+  const manager = isManagerOrAdmin(role);
+  const admin = isAdmin(role);
   const [anchorDate, setAnchorDate] = useState<Date>(() => new Date());
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
@@ -114,6 +145,12 @@ export function EmployeeScheduleCalendarCard({
   const [dayMemoLoading, setDayMemoLoading] = useState(false);
   const [dayMemoSaving, setDayMemoSaving] = useState(false);
   const [canEditNotes, setCanEditNotes] = useState(false);
+  const [liveWorkTasks, setLiveWorkTasks] = useState<LiveWorkTask[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const autoOpenedKeyRef = useRef<string | null>(null);
+  const modalOpacity = useRef(new Animated.Value(0)).current;
+  const modalSlideY = useRef(new Animated.Value(22)).current;
+  const livePulse = useRef(new Animated.Value(1)).current;
 
   const period = useMemo(() => {
     const { year, month } = ymdPartsInBangkok(anchorDate);
@@ -159,6 +196,87 @@ export function EmployeeScheduleCalendarCard({
     while (cells.length % 7 !== 0) cells.push({ ymd: null, rows: [], markerSource: null });
     return cells;
   }, [memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]);
+
+  const highlightDays = useMemo<HighlightDay[]>(
+    () =>
+      listYmdRange(period.startYmd, period.endYmd)
+        .map((ymd) => ({
+          ymd,
+          rows: rowsByYmd.get(ymd) ?? [],
+          hasMemo: memoYmdSet.has(ymd),
+        }))
+        .filter((d) => d.rows.length > 0 || d.hasMemo),
+    [memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]
+  );
+
+  function openDayPopup(ymd: string, dayRows: Row[]) {
+    setSelectedYmd(ymd);
+    setDetailRows(dayRows);
+    setDetailOpen(true);
+  }
+
+  useEffect(() => {
+    if (!autoOpenFirstHighlight || loading) return;
+    if (highlightDays.length === 0 && liveWorkTasks.length === 0) return;
+    const key = `${userId}:${period.startYmd}:${period.endYmd}`;
+    if (autoOpenedKeyRef.current === key) return;
+    autoOpenedKeyRef.current = key;
+    const today = ymdFromDate(new Date());
+    const upcoming = highlightDays.find((d) => d.ymd >= today) ?? highlightDays[0] ?? {
+      ymd: today,
+      rows: [],
+    };
+    openDayPopup(upcoming.ymd, upcoming.rows);
+  }, [
+    autoOpenFirstHighlight,
+    highlightDays,
+    liveWorkTasks.length,
+    loading,
+    period.endYmd,
+    period.startYmd,
+    userId,
+  ]);
+
+  useEffect(() => {
+    if (!detailOpen) return;
+    modalOpacity.setValue(0);
+    modalSlideY.setValue(22);
+    Animated.parallel([
+      Animated.timing(modalOpacity, {
+        toValue: 1,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.spring(modalSlideY, {
+        toValue: 0,
+        friction: 8,
+        tension: 70,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [detailOpen, modalOpacity, modalSlideY]);
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(livePulse, {
+          toValue: 1.08,
+          duration: 850,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(livePulse, {
+          toValue: 1,
+          duration: 850,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [livePulse]);
 
   useEffect(() => {
     let alive = true;
@@ -214,7 +332,7 @@ export function EmployeeScheduleCalendarCard({
     if (!userId) return;
     setLoading(true);
     try {
-      const [branchRes, assignmentRes, legacyRes, memoRes] = await Promise.all([
+      const [branchRes, assignmentRes, legacyRes, memoRes, assigneeRes, directTaskRes] = await Promise.all([
         supabase.from('branch_information').select('*').order('branch_name'),
         supabase
           .from('work_schedule_assignments')
@@ -236,6 +354,17 @@ export function EmployeeScheduleCalendarCard({
           .eq('user_id', userId)
           .gte('work_date', period.startYmd)
           .lte('work_date', period.endYmd),
+        supabase
+          .from('task_assignees')
+          .select('task_id')
+          .eq('user_id', userId),
+        supabase
+          .from('tasks')
+          .select('id,title,status,priority,due_at,created_at')
+          .eq('assigned_to', userId)
+          .in('status', ['pending', 'in_progress'])
+          .order('created_at', { ascending: false })
+          .limit(20),
       ]);
       const branchRows = mapBranchInformationRows(
         (branchRes.data as Record<string, unknown>[]) ?? []
@@ -337,6 +466,36 @@ export function EmployeeScheduleCalendarCard({
         }
       }
       setRows(out);
+
+      const linkedTaskIds = [
+        ...new Set(
+          ((assigneeRes.data ?? []) as { task_id?: string }[])
+            .map((r) => r.task_id)
+            .filter((v): v is string => !!v)
+        ),
+      ];
+      const linkedTaskRes = linkedTaskIds.length
+        ? await supabase
+            .from('tasks')
+            .select('id,title,status,priority,due_at,created_at')
+            .in('id', linkedTaskIds)
+            .in('status', ['pending', 'in_progress'])
+            .order('created_at', { ascending: false })
+            .limit(20)
+        : { data: [] as unknown[] };
+      const taskMap = new Map<string, LiveWorkTask>();
+      for (const t of [
+        ...(((linkedTaskRes.data ?? []) as unknown[]) as LiveWorkTask[]),
+        ...(((directTaskRes.data ?? []) as unknown[]) as LiveWorkTask[]),
+      ]) {
+        taskMap.set(t.id, t);
+      }
+      setLiveWorkTasks(
+        [...taskMap.values()].sort((a, b) => {
+          if (a.status !== b.status) return a.status === 'in_progress' ? -1 : 1;
+          return new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime();
+        })
+      );
     } finally {
       setLoading(false);
     }
@@ -457,6 +616,29 @@ export function EmployeeScheduleCalendarCard({
         <ActivityIndicator color={NatureTheme.colors.primary} style={{ marginVertical: 12 }} />
       ) : (
         <>
+          {highlightDays.length > 0 || liveWorkTasks.length > 0 ? (
+            <View style={styles.highlightCard}>
+              <View style={styles.highlightCopy}>
+                <Text style={styles.highlightTitle}>
+                  มีตาราง/โน้ต {highlightDays.length} วัน · Live Work {liveWorkTasks.length} งาน
+                </Text>
+                <Text style={styles.highlightSub}>
+                  ระบบจะเปิดรายละเอียดให้อัตโนมัติเมื่อเข้าดูข้อมูลพนักงาน และแสดงตาราง/โน้ต/งานที่กำลังทำใน popup เดียวกัน
+                </Text>
+              </View>
+              <Pressable
+                style={styles.highlightBtn}
+                onPress={() => {
+                  const today = ymdFromDate(new Date());
+                  const upcoming =
+                    highlightDays.find((d) => d.ymd >= today) ??
+                    highlightDays[0] ?? { ymd: today, rows: [] };
+                  openDayPopup(upcoming.ymd, upcoming.rows);
+                }}>
+                <Text style={styles.highlightBtnText}>เปิดอีกครั้ง</Text>
+              </Pressable>
+            </View>
+          ) : null}
           <View style={styles.weekHeader}>
             {['จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส', 'อา'].map((d) => (
               <Text key={d} style={styles.weekHeaderText}>
@@ -472,9 +654,7 @@ export function EmployeeScheduleCalendarCard({
                 style={[styles.cell, cell.ymd && selectedYmd === cell.ymd && styles.cellSelected]}
                 onPress={() => {
                   if (!cell.ymd) return;
-                  setSelectedYmd(cell.ymd);
-                  setDetailRows(cell.rows);
-                  setDetailOpen(true);
+                  openDayPopup(cell.ymd, cell.rows);
                 }}>
                 <Text style={[styles.dayNumber, !cell.ymd && styles.dayNumberMuted]}>
                   {cell.ymd ? String(Number(cell.ymd.slice(8, 10))) : ''}
@@ -497,19 +677,92 @@ export function EmployeeScheduleCalendarCard({
         </>
       )}
 
-      {detailOpen ? (
+      <Modal
+        visible={detailOpen}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setDetailOpen(false)}>
         <View style={styles.detailOverlayWrap}>
           <Pressable style={styles.detailBackdrop} onPress={() => setDetailOpen(false)} />
-          <View style={styles.detailCard}>
-            <Text style={styles.detailTitle}>
-              {selectedYmd ? `ตารางงานวันที่ ${selectedYmd}` : 'ตารางงาน'}
-            </Text>
-            <Text style={styles.detailSub}>
-              {detailRows.length > 0
-                ? 'รายละเอียดตารางงานที่มอบหมายในวันดังกล่าว'
-                : 'วันนี้ยังไม่มีตารางงาน แต่สามารถจดโน้ต/เช็กลิสต์ได้'}
-            </Text>
+          <Animated.View
+            style={[
+              styles.detailCard,
+              { opacity: modalOpacity, transform: [{ translateY: modalSlideY }] },
+            ]}>
+            <Pressable onPress={() => {}}>
+              <View style={styles.popupHero}>
+                <View style={styles.popupHeroCopy}>
+                  <Text style={styles.popupKicker}>Schedule · Notes · Live Work</Text>
+                  <Text style={styles.detailTitle}>
+                    {selectedYmd ? `ตารางงานวันที่ ${selectedYmd}` : 'ตารางงาน'}
+                  </Text>
+                  <Text style={styles.detailSub}>
+                    {detailRows.length > 0 && selectedYmd && memoYmdSet.has(selectedYmd)
+                      ? 'วันนี้มีทั้งตารางงานและโน้ต/เช็กลิสต์'
+                      : detailRows.length > 0
+                        ? 'รายละเอียดตารางงานที่มอบหมายในวันดังกล่าว'
+                        : selectedYmd && memoYmdSet.has(selectedYmd)
+                          ? 'วันนี้มีโน้ต/เช็กลิสต์ที่บันทึกไว้'
+                          : liveWorkTasks.length > 0
+                            ? 'วันนี้ยังไม่มีตารางงาน แต่มีงานที่กำลังดำเนินการ'
+                            : 'วันนี้ยังไม่มีตารางงาน แต่สามารถจดโน้ต/เช็กลิสต์ได้'}
+                  </Text>
+                </View>
+                <Animated.View
+                  style={[styles.liveBadge, { transform: [{ scale: livePulse }] }]}>
+                  <Text style={styles.liveBadgeNum}>{liveWorkTasks.length}</Text>
+                  <Text style={styles.liveBadgeText}>Live</Text>
+                </Animated.View>
+              </View>
             <ScrollView style={{ maxHeight: 420 }} keyboardShouldPersistTaps="handled">
+              <View style={styles.liveWorkPanel}>
+                <View style={styles.liveWorkPanelHead}>
+                  <View>
+                    <Text style={styles.liveWorkEyebrow}>Live Work</Text>
+                    <Text style={styles.liveWorkTitle}>งานที่กำลังทำตอนนี้</Text>
+                  </View>
+                  <View style={styles.liveWorkCountPill}>
+                    <Text style={styles.liveWorkCountText}>{liveWorkTasks.length} งาน</Text>
+                  </View>
+                </View>
+                {liveWorkTasks.length === 0 ? (
+                  <Text style={styles.liveWorkEmpty}>ยังไม่มีงานกำลังทำหรือรอดำเนินการ</Text>
+                ) : (
+                  liveWorkTasks.slice(0, 4).map((task) => (
+                    <Pressable
+                      key={task.id}
+                      style={({ pressed }) => [
+                        styles.liveWorkRow,
+                        pressed && styles.liveWorkRowPressed,
+                      ]}
+                      onPress={() => setSelectedTaskId(task.id)}>
+                      <View
+                        style={[
+                          styles.liveWorkPriority,
+                          {
+                            backgroundColor: priorityColor(
+                              (task.priority as TaskPriority) || 'normal'
+                            ),
+                          },
+                        ]}
+                      />
+                      <View style={styles.liveWorkBody}>
+                        <Text style={styles.liveWorkTaskTitle} numberOfLines={1}>
+                          {task.title}
+                        </Text>
+                        <Text style={styles.liveWorkTaskMeta} numberOfLines={1}>
+                          {taskStatusLabel(task.status)}
+                          {task.due_at
+                            ? ` · กำหนด ${new Date(task.due_at).toLocaleDateString('th-TH')}`
+                            : ''}
+                        </Text>
+                        <Text style={styles.liveWorkOpenHint}>แตะเพื่อดูรายละเอียดงาน</Text>
+                      </View>
+                    </Pressable>
+                  ))
+                )}
+              </View>
               {detailRows.length > 0 ? (
                 detailRows.map((row, idx) => (
                   <View key={`${row.ymd}-${row.source}-${idx}`} style={styles.detailRow}>
@@ -630,9 +883,19 @@ export function EmployeeScheduleCalendarCard({
             <Pressable style={styles.closeBtn} onPress={() => setDetailOpen(false)}>
               <Text style={styles.closeBtnText}>ปิด</Text>
             </Pressable>
-          </View>
+            </Pressable>
+          </Animated.View>
         </View>
-      ) : null}
+      </Modal>
+      <TaskDetailModal
+        visible={selectedTaskId != null}
+        taskId={selectedTaskId}
+        userId={session?.user?.id ?? userId}
+        onClose={() => setSelectedTaskId(null)}
+        onChanged={loadCalendar}
+        manager={manager}
+        admin={admin}
+      />
     </View>
   );
 }
@@ -662,6 +925,27 @@ const styles = StyleSheet.create({
   },
   monthNavBtnText: { fontSize: 12, color: c.primaryDark, fontWeight: '700' },
   monthNavLabel: { flex: 1, textAlign: 'center', fontSize: 13, color: c.text, fontWeight: '700' },
+  highlightCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    backgroundColor: c.primaryLight,
+    borderRadius: r.sm,
+    padding: 10,
+    marginBottom: 8,
+  },
+  highlightCopy: { flex: 1, minWidth: 0 },
+  highlightTitle: { color: c.primaryDark, fontSize: 12, fontWeight: '800' },
+  highlightSub: { color: c.textSecondary, fontSize: 11, marginTop: 3, lineHeight: 15 },
+  highlightBtn: {
+    borderRadius: r.sm,
+    backgroundColor: c.primary,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  highlightBtnText: { color: c.onAccent, fontSize: 11, fontWeight: '800' },
   weekHeader: { flexDirection: 'row', marginBottom: 5 },
   weekHeaderText: { flex: 1, textAlign: 'center', fontSize: 11, color: c.textMuted, fontWeight: '700' },
   grid: {
@@ -689,8 +973,8 @@ const styles = StyleSheet.create({
   dotLegacy: { backgroundColor: c.accentWarm },
   dotMemo: { backgroundColor: c.checkIn },
   detailOverlayWrap: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 30,
+    flex: 1,
+    zIndex: 900000,
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
@@ -701,9 +985,97 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: c.borderSoft,
     padding: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
   },
-  detailTitle: { fontSize: 16, fontWeight: '700', color: c.text, marginBottom: 4 },
+  popupHero: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: r.md,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    padding: 12,
+    marginBottom: 10,
+  },
+  popupHeroCopy: { flex: 1, minWidth: 0 },
+  popupKicker: {
+    color: c.primaryDark,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    marginBottom: 3,
+  },
+  liveBadge: {
+    width: 58,
+    height: 58,
+    borderRadius: 18,
+    backgroundColor: c.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  liveBadgeNum: { color: c.onAccent, fontSize: 20, fontWeight: '900', lineHeight: 22 },
+  liveBadgeText: { color: c.onAccent, fontSize: 10, opacity: 0.88, fontWeight: '800' },
+  detailTitle: { fontSize: 16, fontWeight: '800', color: c.text, marginBottom: 4 },
   detailSub: { fontSize: 12, color: c.textMuted, marginBottom: 8 },
+  liveWorkPanel: {
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: 12,
+    marginBottom: 10,
+  },
+  liveWorkPanelHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 8,
+  },
+  liveWorkEyebrow: {
+    color: c.primaryDark,
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  liveWorkTitle: { color: c.text, fontSize: 15, fontWeight: '900', marginTop: 2 },
+  liveWorkCountPill: {
+    borderRadius: 999,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  liveWorkCountText: { color: c.primaryDark, fontSize: 11, fontWeight: '800' },
+  liveWorkEmpty: {
+    color: c.textMuted,
+    fontSize: 12,
+    backgroundColor: c.surfaceMuted,
+    borderRadius: r.sm,
+    padding: 10,
+  },
+  liveWorkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceMuted,
+    padding: 9,
+    marginTop: 7,
+  },
+  liveWorkRowPressed: { opacity: 0.78, transform: [{ scale: 0.99 }] },
+  liveWorkPriority: { width: 4, height: 30, borderRadius: 2 },
+  liveWorkBody: { flex: 1, minWidth: 0 },
+  liveWorkTaskTitle: { color: c.text, fontSize: 13, fontWeight: '800' },
+  liveWorkTaskMeta: { color: c.textMuted, fontSize: 11, marginTop: 2 },
+  liveWorkOpenHint: { color: c.primaryDark, fontSize: 10, fontWeight: '800', marginTop: 4 },
   detailRow: {
     borderWidth: 1,
     borderColor: c.borderSoft,

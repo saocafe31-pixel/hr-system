@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Modal,
   Pressable,
@@ -14,7 +14,13 @@ import { router } from 'expo-router';
 import { FriendlyConfirmModal } from '@/components/FriendlyNoticeModal';
 import { NatureTheme } from '@/constants/Theme';
 import { useAuth } from '@/contexts/AuthContext';
-import { emitMentionRead } from '@/lib/appSignals';
+import {
+  emitCommunitySeen,
+  emitMentionRead,
+  emitTaskNotificationsRead,
+  onCommunitySeen,
+  onTaskNotificationsRead,
+} from '@/lib/appSignals';
 import { supabase } from '@/lib/supabase';
 import type {
   AttendanceChatMentionNotificationRow,
@@ -107,6 +113,7 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
   const [confirmReadAllOpen, setConfirmReadAllOpen] = useState(false);
   const [pendingOpenTaskId, setPendingOpenTaskId] = useState<string | null>(null);
   const [communitySeenAt, setCommunitySeenAt] = useState<string | null>(null);
+  const notifOpenAutoReadRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -136,7 +143,7 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
     const rows = ((data as { notifications?: SnapshotNotifRow[] } | null)?.notifications ??
       []) as SnapshotNotifRow[];
     const merged: UnifiedNotif[] = rows
-      .map((row) => {
+      .map((row): UnifiedNotif => {
         if (row.kind === 'task') {
           return {
             kind: 'task',
@@ -255,10 +262,14 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
 
   const unreadNotifs = useMemo(
     () =>
-      notifs.filter((n) =>
-        n.kind === 'task' || n.kind === 'mention' || n.kind === 'finance' ? !n.row.read_at : true
-      ),
-    [notifs]
+      notifs.filter((n) => {
+        if (n.kind === 'task' || n.kind === 'mention' || n.kind === 'finance') {
+          return !n.row.read_at;
+        }
+        if (!communitySeenAt) return true;
+        return new Date(n.row.created_at).getTime() > new Date(communitySeenAt).getTime();
+      }),
+    [communitySeenAt, notifs]
   );
   const unreadFinanceNotifs = useMemo(
     () =>
@@ -271,6 +282,7 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
 
   const openNotifModal = useCallback(() => {
     if (!enabled) return;
+    notifOpenAutoReadRef.current = false;
     setNotifOpen(true);
   }, [enabled]);
 
@@ -286,6 +298,7 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           .from('task_notifications')
           .update({ read_at: now })
           .eq('id', item.row.id);
+        emitTaskNotificationsRead({ source: 'notif_center' });
       } else if (item.kind === 'mention') {
         await supabase
           .from('attendance_chat_mention_notifications')
@@ -304,13 +317,14 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
         const created = item.row.created_at;
         await writeCommunitySeen(uid, created);
         setCommunitySeenAt(created);
+        emitCommunitySeen({ seenAt: created, source: 'notif_center' });
       }
       await loadNotifs();
     },
     [loadNotifs, uid]
   );
 
-  const markAllNotifsRead = useCallback(async () => {
+  const markAllNotifsRead = useCallback(async (reload = true) => {
     if (unreadNotifs.length === 0) return;
     const now = new Date().toISOString();
     const taskIds = unreadNotifs
@@ -329,6 +343,7 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
         .from('task_notifications')
         .update({ read_at: now })
         .in('id', taskIds);
+      emitTaskNotificationsRead({ source: 'notif_center' });
     }
     if (mentionIds.length) {
       await supabase
@@ -356,11 +371,59 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
       if (latest) {
         await writeCommunitySeen(uid, latest);
         setCommunitySeenAt(latest);
+        emitCommunitySeen({ seenAt: latest, source: 'notif_center' });
       }
     }
+    setNotifs((prev) =>
+      prev.map((n) => {
+        if (n.kind === 'task' && taskIds.includes(n.row.id)) {
+          return { ...n, row: { ...n.row, read_at: now } };
+        }
+        if (n.kind === 'mention' && mentionIds.includes(n.row.id)) {
+          return { ...n, row: { ...n.row, read_at: now } };
+        }
+        if (n.kind === 'finance' && financeIds.includes(n.row.id)) {
+          return { ...n, row: { ...n.row, read_at: now } };
+        }
+        return n;
+      })
+    );
     setConfirmReadAllOpen(false);
-    await loadNotifs();
+    if (reload) await loadNotifs();
   }, [unreadNotifs, loadNotifs, uid]);
+
+  useEffect(() => {
+    if (!notifOpen) {
+      notifOpenAutoReadRef.current = false;
+      return;
+    }
+    if (notifOpenAutoReadRef.current || unreadNotifs.length === 0) return;
+    notifOpenAutoReadRef.current = true;
+    void markAllNotifsRead(false);
+  }, [markAllNotifsRead, notifOpen, unreadNotifs.length]);
+
+  useEffect(() => {
+    const offCommunity = onCommunitySeen((payload) => {
+      if (payload.source !== 'notif_center') {
+        setCommunitySeenAt(payload.seenAt);
+        if (uid) void writeCommunitySeen(uid, payload.seenAt);
+      }
+    });
+    const offTaskRead = onTaskNotificationsRead(() => {
+      const now = new Date().toISOString();
+      setNotifs((prev) =>
+        prev.map((n) =>
+          n.kind === 'task' && !n.row.read_at
+            ? { ...n, row: { ...n.row, read_at: now } }
+            : n
+        )
+      );
+    });
+    return () => {
+      offCommunity();
+      offTaskRead();
+    };
+  }, [uid]);
 
   const markAllFinanceNotifsRead = useCallback(async () => {
     if (unreadFinanceNotifs.length === 0) return;

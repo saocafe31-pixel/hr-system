@@ -27,7 +27,7 @@ export default ({ config }: { config: ExpoConfig }): ExpoConfig => ({
     themeColor: '#121212',
     backgroundColor: '#121212',
     orientation: 'portrait',
-    barStyle: 'light',
+    barStyle: 'black-translucent',
     preferRelatedApplications: false,
   },
   extra: {

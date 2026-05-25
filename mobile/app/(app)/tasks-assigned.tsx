@@ -18,6 +18,26 @@ import {
 import { supabase } from '@/lib/supabase';
 import type { TaskRow } from '@/lib/types';
 
+type UserDisplay = {
+  label: string;
+  nickname: string | null;
+};
+
+type ProfileLite = {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+  employee_id?: string | null;
+};
+
+type EmployeeLite = {
+  id: string;
+  legacy_user_id?: string | null;
+  name?: string | null;
+  surname?: string | null;
+  nickname?: string | null;
+};
+
 function mergeTasksById(a: TaskRow[], b: TaskRow[]): TaskRow[] {
   const map = new Map<string, TaskRow>();
   for (const t of a) map.set(t.id, t);
@@ -33,10 +53,15 @@ export default function TasksAssignedScreen() {
   const uid = session?.user?.id ?? null;
   const [loading, setLoading] = useState(true);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [userDisplayById, setUserDisplayById] = useState<Record<string, UserDisplay>>({});
   const [tab, setTab] = useState<'own' | 'delegated'>('own');
 
   const load = useCallback(async () => {
-    if (!uid) return;
+    if (!uid) {
+      setTasks([]);
+      setUserDisplayById({});
+      return;
+    }
     const { data: linkRows } = await supabase
       .from('task_assignees')
       .select('task_id')
@@ -66,6 +91,72 @@ export default function TasksAssignedScreen() {
     }
 
     setTasks(merged);
+    const userIds = [
+      ...new Set(
+        merged.flatMap((t) => [
+          t.assigned_to,
+          t.assigned_by,
+          ...((t.task_assignees ?? []).map((a) => a.user_id)),
+        ]).filter((v): v is string => !!v)
+      ),
+    ];
+    if (userIds.length === 0) {
+      setUserDisplayById({});
+      return;
+    }
+
+    const { data: profileRows } = await supabase
+      .from('profiles')
+      .select('id,email,full_name,employee_id')
+      .in('id', userIds);
+    const profiles = ((profileRows ?? []) as ProfileLite[]) ?? [];
+    const employeeIds = [
+      ...new Set(
+        profiles.map((p) => p.employee_id).filter((v): v is string => !!v)
+      ),
+    ];
+    const emails = [
+      ...new Set(
+        profiles.map((p) => p.email?.trim().toLowerCase()).filter((v): v is string => !!v)
+      ),
+    ];
+    const [byEmployeeIdRes, byLegacyRes] = await Promise.all([
+      employeeIds.length
+        ? supabase
+            .from('employee_directory')
+            .select('id,legacy_user_id,name,surname,nickname')
+            .in('id', employeeIds)
+        : Promise.resolve({ data: [] as unknown[] }),
+      emails.length
+        ? supabase
+            .from('employee_directory')
+            .select('id,legacy_user_id,name,surname,nickname')
+            .in('legacy_user_id', emails)
+        : Promise.resolve({ data: [] as unknown[] }),
+    ]);
+    const employeeById = new Map<string, EmployeeLite>();
+    for (const row of ((byEmployeeIdRes.data ?? []) as EmployeeLite[]) ?? []) {
+      employeeById.set(String(row.id), row);
+    }
+    const employeeByLegacy = new Map<string, EmployeeLite>();
+    for (const row of ((byLegacyRes.data ?? []) as EmployeeLite[]) ?? []) {
+      const key = row.legacy_user_id?.trim().toLowerCase();
+      if (key) employeeByLegacy.set(key, row);
+    }
+    const nextDisplay: Record<string, UserDisplay> = {};
+    for (const p of profiles) {
+      const emp =
+        (p.employee_id ? employeeById.get(String(p.employee_id)) : undefined) ??
+        (p.email ? employeeByLegacy.get(p.email.trim().toLowerCase()) : undefined);
+      const fullName = [emp?.name, emp?.surname].filter(Boolean).join(' ').trim();
+      const fallback = p.full_name?.trim() || p.email?.trim() || p.id.slice(0, 8);
+      const nickname = emp?.nickname?.trim() || null;
+      nextDisplay[p.id] = {
+        label: nickname || fullName || fallback,
+        nickname,
+      };
+    }
+    setUserDisplayById(nextDisplay);
   }, [uid]);
 
   useEffect(() => {
@@ -94,6 +185,18 @@ export default function TasksAssignedScreen() {
   );
 
   const show = tab === 'own' ? ownTasks : delegatedTasks;
+
+  function displayUser(userId: string | null | undefined): string {
+    if (!userId) return '—';
+    if (userId === uid) return 'คุณ';
+    return userDisplayById[userId]?.label || `${String(userId).slice(0, 8)}…`;
+  }
+
+  function displayUsers(userIds: string[]): string {
+    const unique = [...new Set(userIds.filter(Boolean))];
+    if (unique.length === 0) return '—';
+    return unique.map(displayUser).join(', ');
+  }
 
   if (loading) {
     return (
@@ -148,19 +251,21 @@ export default function TasksAssignedScreen() {
             ) : null}
             {t.assigned_by ? (
               <Text style={styles.meta}>
-                ผู้มอบหมาย:{' '}
-                {t.assigned_by === uid
-                  ? 'คุณ'
-                  : `${String(t.assigned_by).slice(0, 8)}…`}
+                ผู้มอบหมาย: {displayUser(t.assigned_by)}
               </Text>
             ) : null}
             {tab === 'own' && (t.task_assignees?.length ?? 0) > 0 ? (
               <Text style={styles.meta} numberOfLines={4}>
                 ผู้รับผิดชอบหลัก:{' '}
-                {(t.task_assignees ?? [])
-                  .filter((a) => a.is_primary)
-                  .map((a) => a.user_id.slice(0, 8))
-                  .join(', ') || '—'}
+                {displayUsers((t.task_assignees ?? []).filter((a) => a.is_primary).map((a) => a.user_id))}
+              </Text>
+            ) : null}
+            {tab === 'delegated' ? (
+              <Text style={styles.meta} numberOfLines={4}>
+                ผู้รับผิดชอบ:{' '}
+                {displayUsers(
+                  (t.task_assignees?.length ? t.task_assignees.map((a) => a.user_id) : [t.assigned_to])
+                )}
               </Text>
             ) : null}
           </View>

@@ -1722,6 +1722,9 @@ export default function AttendanceScreen() {
   }
 
   const pendingCount = pendingTasks.length;
+  const activeTaskCount = pendingTasks.filter((t) => t.status === 'in_progress').length;
+  const waitingTaskCount = pendingTasks.filter((t) => t.status === 'pending').length;
+  const workStatusPreviewTasks = pendingTasks.slice(0, 4);
   const greetName =
     profile?.full_name || profile?.email || session?.user?.email || 'พนักงาน';
   const greetWithMood = nameWithMoodEmoji(greetName, myTodayEmoji);
@@ -2767,15 +2770,28 @@ export default function AttendanceScreen() {
               <Pressable
                 style={styles.pendingCard}
                 onPress={() => router.push('/tasks')}>
-                <Text style={styles.pendingTitle}>
-                  งานที่ยังไม่เสร็จ ({pendingCount})
-                </Text>
-                <Text style={styles.pendingHint}>
-                  งานที่คุณรับผิดชอบ และงานที่คุณมอบให้ผู้อื่น (รอดำเนินการ / กำลังทำ)
-                  เรียงความสำคัญก่อน
-                  — แตะเพื่อไปหน้างาน
-                </Text>
-                {pendingTasks.slice(0, 4).map((t) => (
+                <View style={styles.pendingHeadRow}>
+                  <View>
+                    <Text style={styles.pendingEyebrow}>Work Status</Text>
+                    <Text style={styles.pendingTitle}>งานที่กำลังทำ / ค้างอยู่</Text>
+                  </View>
+                  <View style={styles.pendingCountPill}>
+                    <Text style={styles.pendingCountNum}>{pendingCount}</Text>
+                    <Text style={styles.pendingCountLabel}>งาน</Text>
+                  </View>
+                </View>
+                <View style={styles.pendingStatsRow}>
+                  <View style={styles.pendingStatChip}>
+                    <Text style={styles.pendingStatValue}>{activeTaskCount}</Text>
+                    <Text style={styles.pendingStatLabel}>กำลังทำ</Text>
+                  </View>
+                  <View style={styles.pendingStatChip}>
+                    <Text style={styles.pendingStatValue}>{waitingTaskCount}</Text>
+                    <Text style={styles.pendingStatLabel}>รอดำเนินการ</Text>
+                  </View>
+                  <Text style={styles.pendingHint}>แตะเพื่อจัดการงานทั้งหมด</Text>
+                </View>
+                {workStatusPreviewTasks.map((t) => (
                   <View key={t.id} style={styles.pendingLineRow}>
                     <View
                       style={[
@@ -2787,9 +2803,14 @@ export default function AttendanceScreen() {
                         },
                       ]}
                     />
-                    <Text style={styles.pendingLine} numberOfLines={1}>
-                      {t.title}
-                    </Text>
+                    <View style={styles.pendingLineBody}>
+                      <Text style={styles.pendingLine} numberOfLines={1}>
+                        {t.title}
+                      </Text>
+                      <Text style={styles.pendingLineMeta}>
+                        {taskStatusLabelTh(t.status)}
+                      </Text>
+                    </View>
                   </View>
                 ))}
                 {pendingCount > 4 ? (
@@ -3110,28 +3131,75 @@ const styles = StyleSheet.create({
   lateBtnText: { color: c.accentWarm, fontWeight: '700', fontSize: 14 },
   disabled: { opacity: 0.6 },
   pendingCard: {
-    backgroundColor: c.warningBg,
+    backgroundColor: c.surfaceElevated,
     borderWidth: 1,
-    borderColor: c.warningBorder,
+    borderColor: c.primaryMuted,
     borderRadius: r.md,
     padding: s.card,
     marginBottom: s.section,
   },
-  pendingTitle: { fontSize: 16, fontWeight: '700', color: c.warningTitle },
-  pendingHint: { fontSize: 12, color: c.warningHint, marginTop: 4, marginBottom: 6 },
+  pendingHeadRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  pendingEyebrow: {
+    fontSize: 11,
+    color: c.primaryDark,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  pendingTitle: { fontSize: 17, fontWeight: '800', color: c.text, marginTop: 2 },
+  pendingCountPill: {
+    minWidth: 58,
+    borderRadius: r.md,
+    backgroundColor: c.primary,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+  },
+  pendingCountNum: { color: c.onAccent, fontSize: 18, fontWeight: '900', lineHeight: 20 },
+  pendingCountLabel: { color: c.onAccent, fontSize: 10, opacity: 0.85 },
+  pendingStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  pendingStatChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: c.primaryLight,
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 9,
+  },
+  pendingStatValue: { color: c.primaryDark, fontSize: 12, fontWeight: '900' },
+  pendingStatLabel: { color: c.primaryDark, fontSize: 11, fontWeight: '700' },
+  pendingHint: { fontSize: 12, color: c.textMuted },
   pendingLineRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginTop: 6,
+    marginTop: 8,
+    backgroundColor: c.surfaceMuted,
+    borderRadius: r.sm,
+    padding: 9,
   },
   pendingPriBar: {
     width: 4,
-    height: 16,
+    height: 28,
     borderRadius: 2,
   },
-  pendingLine: { flex: 1, fontSize: 14, color: c.warningBody },
-  pendingMore: { fontSize: 12, color: c.warningHint, marginTop: 8, fontStyle: 'italic' },
+  pendingLineBody: { flex: 1 },
+  pendingLine: { fontSize: 14, color: c.text, fontWeight: '700' },
+  pendingLineMeta: { fontSize: 11, color: c.textMuted, marginTop: 2 },
+  pendingMore: { fontSize: 12, color: c.textMuted, marginTop: 8, fontStyle: 'italic' },
   summaryCard: {
     backgroundColor: c.surface,
     borderRadius: r.md,

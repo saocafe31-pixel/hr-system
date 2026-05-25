@@ -31,9 +31,14 @@ type Props = {
 };
 
 type SubLine = { id: string; text: string };
+type InitialTaskStatus = 'pending' | 'in_progress';
 
 const c = NatureTheme.colors;
 const r = NatureTheme.radius;
+const INITIAL_STATUS_OPTIONS: { key: InitialTaskStatus; label: string; sub: string }[] = [
+  { key: 'in_progress', label: 'กำลังทำ', sub: 'แสดงให้ทีมเห็นว่ากำลังทำงานนี้อยู่' },
+  { key: 'pending', label: 'รอดำเนินการ', sub: 'บันทึกไว้ทำภายหลัง' },
+];
 const WEB_MODAL_BACKDROP = Platform.select({
   web: {
     position: 'fixed' as const,
@@ -58,6 +63,7 @@ export function SelfTaskModal({ visible, onClose, onSaved }: Props) {
   const [startDate, setStartDate] = useState<Date | null>(null);
   const [dueDate, setDueDate] = useState<Date | null>(null);
   const [priority, setPriority] = useState<TaskPriority>('normal');
+  const [initialStatus, setInitialStatus] = useState<InitialTaskStatus>('in_progress');
   const [subLines, setSubLines] = useState<SubLine[]>([
     { id: newLineId(), text: '' },
   ]);
@@ -74,6 +80,7 @@ export function SelfTaskModal({ visible, onClose, onSaved }: Props) {
     setStartDate(null);
     setDueDate(null);
     setPriority('normal');
+    setInitialStatus('in_progress');
     setSubLines([{ id: newLineId(), text: '' }]);
   }, []);
 
@@ -131,6 +138,13 @@ export function SelfTaskModal({ visible, onClose, onSaved }: Props) {
 
       const taskId = String(taskIdRaw);
       const taskTitle = t;
+      if (initialStatus !== 'pending') {
+        const { error: statusErr } = await supabase
+          .from('tasks')
+          .update({ status: initialStatus })
+          .eq('id', taskId);
+        if (statusErr) throw new Error(statusErr.message);
+      }
 
       const labels = subLines.map((s) => s.text.trim()).filter(Boolean);
       if (labels.length) {
@@ -185,14 +199,14 @@ export function SelfTaskModal({ visible, onClose, onSaved }: Props) {
         <Pressable style={[styles.back, WEB_MODAL_BACKDROP]} onPress={() => !saving && onClose()}>
           <Pressable style={styles.card} onPress={() => {}}>
             <ScrollView keyboardShouldPersistTaps="handled">
-              <Text style={styles.h1}>เพิ่มงานของฉัน</Text>
+              <Text style={styles.h1}>เพิ่มงานของฉัน / งานรูทีน</Text>
 
               <Text style={styles.label}>ชื่องาน *</Text>
               <TextInput
                 style={styles.input}
                 value={title}
                 onChangeText={setTitle}
-                placeholder="เช่น นัดลูกค้า บริษัท …"
+                placeholder="เช่น งานเปิดร้านประจำวัน / นัดลูกค้า บริษัท …"
                 editable={!saving}
               />
 
@@ -201,7 +215,7 @@ export function SelfTaskModal({ visible, onClose, onSaved }: Props) {
                 style={[styles.input, styles.tall]}
                 value={desc}
                 onChangeText={setDesc}
-                placeholder="การนัดหมาย การประสานกับทีม ฯลฯ"
+                placeholder="รายละเอียดงานทั่วไป รูทีนประจำวัน หรือการประสานกับทีม"
                 multiline
                 editable={!saving}
               />
@@ -239,6 +253,29 @@ export function SelfTaskModal({ visible, onClose, onSaved }: Props) {
                     <Text style={styles.priText} numberOfLines={2}>
                       {p.label}
                     </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={styles.label}>สถานะเริ่มต้น</Text>
+              <View style={styles.statusRow}>
+                {INITIAL_STATUS_OPTIONS.map((opt) => (
+                  <Pressable
+                    key={opt.key}
+                    style={[
+                      styles.statusChip,
+                      initialStatus === opt.key && styles.statusChipOn,
+                    ]}
+                    onPress={() => setInitialStatus(opt.key)}
+                    disabled={saving}>
+                    <Text
+                      style={[
+                        styles.statusChipText,
+                        initialStatus === opt.key && styles.statusChipTextOn,
+                      ]}>
+                      {opt.label}
+                    </Text>
+                    <Text style={styles.statusChipSub}>{opt.sub}</Text>
                   </Pressable>
                 ))}
               </View>
@@ -384,6 +421,21 @@ const styles = StyleSheet.create({
   },
   priDot: { width: 12, height: 12, borderRadius: 6 },
   priText: { flex: 1, fontSize: 12, color: c.text },
+  statusRow: { gap: 8, marginBottom: 8 },
+  statusChip: {
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    borderRadius: r.sm,
+    padding: 10,
+    backgroundColor: c.surfaceMuted,
+  },
+  statusChipOn: {
+    borderColor: c.primaryMuted,
+    backgroundColor: c.primaryLight,
+  },
+  statusChipText: { color: c.text, fontWeight: '800', fontSize: 14 },
+  statusChipTextOn: { color: c.primaryDark },
+  statusChipSub: { color: c.textMuted, fontSize: 11, marginTop: 3, lineHeight: 15 },
   addLine: { paddingVertical: 8 },
   addLineText: { color: c.link, fontWeight: '600' },
   actions: {

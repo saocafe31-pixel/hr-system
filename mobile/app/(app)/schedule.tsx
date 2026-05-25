@@ -159,6 +159,13 @@ export default function ScheduleScreen() {
   const [detailSheetLoading, setDetailSheetLoading] = useState(false);
   /** เพิ่มหลัง `load()` เพื่อให้โมดัลรายละเอียดรีโหลดรายการเมื่อรีเฟรช/ลบ/แก้ไข */
   const [detailFetchNonce, setDetailFetchNonce] = useState(0);
+  const [selectedDetailAssignmentIds, setSelectedDetailAssignmentIds] = useState<Record<string, boolean>>({});
+  const [bulkEditAsnOpen, setBulkEditAsnOpen] = useState(false);
+  const [bulkEditAsnShiftId, setBulkEditAsnShiftId] = useState<string | null>(null);
+  const [bulkEditAsnBranchId, setBulkEditAsnBranchId] = useState<number | null>(null);
+  const [bulkEditAsnSaving, setBulkEditAsnSaving] = useState(false);
+  const [bulkDeleteAsnConfirmOpen, setBulkDeleteAsnConfirmOpen] = useState(false);
+  const [bulkDeleteAsnSaving, setBulkDeleteAsnSaving] = useState(false);
 
   const load = useCallback(async () => {
     const { data, error } = await supabase
@@ -361,10 +368,45 @@ export default function ScheduleScreen() {
     if (detailSheetAssignments != null) return detailSheetAssignments;
     return selectedAssignments;
   }, [detailSheetAssignments, selectedAssignments]);
+  const selectedDetailAssignments = useMemo(
+    () => assignmentDetailRows.filter((a) => selectedDetailAssignmentIds[a.id]),
+    [assignmentDetailRows, selectedDetailAssignmentIds]
+  );
+  const allDetailRowsSelected =
+    assignmentDetailRows.length > 0 &&
+    assignmentDetailRows.every((a) => selectedDetailAssignmentIds[a.id]);
 
   function openAssignmentDetail(userId: string) {
+    setSelectedDetailAssignmentIds({});
     setSelectedAssignmentUserId(userId);
     setAssignmentDetailOpen(true);
+  }
+
+  function closeAssignmentDetail() {
+    setAssignmentDetailOpen(false);
+    setSelectedDetailAssignmentIds({});
+  }
+
+  function toggleDetailAssignment(id: string) {
+    setSelectedDetailAssignmentIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function toggleAllDetailAssignments() {
+    if (allDetailRowsSelected) {
+      setSelectedDetailAssignmentIds({});
+      return;
+    }
+    setSelectedDetailAssignmentIds(
+      Object.fromEntries(assignmentDetailRows.map((a) => [a.id, true]))
+    );
+  }
+
+  function openBulkEditAssignments() {
+    const first = selectedDetailAssignments[0];
+    if (!first) return;
+    setBulkEditAsnShiftId(first.shift_id);
+    setBulkEditAsnBranchId(first.allowed_branch_id ?? null);
+    setBulkEditAsnOpen(true);
   }
 
   useEffect(() => {
@@ -376,6 +418,15 @@ export default function ScheduleScreen() {
     const exists = assignmentUsers.some((u) => u.id === selectedAssignmentUserId);
     if (!exists) setSelectedAssignmentUserId(null);
   }, [assignmentUsers, selectedAssignmentUserId]);
+
+  useEffect(() => {
+    setSelectedDetailAssignmentIds((prev) => {
+      const valid = new Set(assignmentDetailRows.map((a) => a.id));
+      const entries = Object.entries(prev).filter(([id, on]) => on && valid.has(id));
+      if (entries.length === Object.values(prev).filter(Boolean).length) return prev;
+      return Object.fromEntries(entries);
+    });
+  }, [assignmentDetailRows]);
 
   async function saveSchedule() {
     if (!session?.user?.id || !userId || !startAt.trim() || !endAt.trim()) {
@@ -542,6 +593,48 @@ export default function ScheduleScreen() {
       toast.error('แก้ไขไม่สำเร็จ', e instanceof Error ? e.message : String(e));
     } finally {
       setEditAsnSaving(false);
+    }
+  }
+
+  async function saveBulkEditedAssignments() {
+    if (!mgr || selectedDetailAssignments.length === 0 || !bulkEditAsnShiftId) return;
+    setBulkEditAsnSaving(true);
+    try {
+      const ids = selectedDetailAssignments.map((a) => a.id);
+      const { error } = await supabase
+        .from('work_schedule_assignments')
+        .update({
+          shift_id: bulkEditAsnShiftId,
+          allowed_branch_id: bulkEditAsnBranchId,
+        })
+        .in('id', ids);
+      if (error) throw new Error(error.message);
+      setBulkEditAsnOpen(false);
+      setSelectedDetailAssignmentIds({});
+      await load();
+      toast.success('แก้ไขมอบหมายแล้ว', `อัปเดต ${ids.length} รายการเรียบร้อย`);
+    } catch (e) {
+      toast.error('แก้ไขหลายรายการไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkEditAsnSaving(false);
+    }
+  }
+
+  async function deleteSelectedAssignments() {
+    if (!mgr || selectedDetailAssignments.length === 0 || bulkDeleteAsnSaving) return;
+    setBulkDeleteAsnSaving(true);
+    try {
+      const ids = selectedDetailAssignments.map((a) => a.id);
+      const { error } = await supabase.from('work_schedule_assignments').delete().in('id', ids);
+      if (error) throw new Error(error.message);
+      setBulkDeleteAsnConfirmOpen(false);
+      setSelectedDetailAssignmentIds({});
+      await load();
+      toast.success('ลบมอบหมายแล้ว', `ลบ ${ids.length} รายการเรียบร้อย`);
+    } catch (e) {
+      toast.error('ลบหลายรายการไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkDeleteAsnSaving(false);
     }
   }
 
@@ -953,9 +1046,9 @@ export default function ScheduleScreen() {
         transparent
         statusBarTranslucent
         presentationStyle="overFullScreen"
-        onRequestClose={() => setAssignmentDetailOpen(false)}>
+        onRequestClose={closeAssignmentDetail}>
         <View style={[styles.backdrop, WEB_MODAL_BACKDROP]}>
-          <Pressable style={styles.backdropHit} onPress={() => setAssignmentDetailOpen(false)} />
+          <Pressable style={styles.backdropHit} onPress={closeAssignmentDetail} />
           <View style={[styles.modal, modalSheetPad]}>
             <Text style={styles.modalTitle}>
               รายละเอียดของ{' '}
@@ -963,6 +1056,36 @@ export default function ScheduleScreen() {
                 ? peopleLabel.get(selectedAssignmentUserId) ?? selectedAssignmentUserId.slice(0, 8)
                 : '-'}
             </Text>
+            {mgr && assignmentDetailRows.length > 0 ? (
+              <View style={styles.multiActionBar}>
+                <Pressable style={styles.multiSelectBtn} onPress={toggleAllDetailAssignments}>
+                  <Text style={styles.multiSelectBtnText}>
+                    {allDetailRowsSelected ? 'ยกเลิกทั้งหมด' : 'เลือกทั้งหมด'}
+                  </Text>
+                </Pressable>
+                <Text style={styles.multiSelectedText}>
+                  เลือก {selectedDetailAssignments.length} รายการ
+                </Text>
+                <Pressable
+                  style={[
+                    styles.multiEditBtn,
+                    selectedDetailAssignments.length === 0 && styles.btnDisabled,
+                  ]}
+                  disabled={selectedDetailAssignments.length === 0}
+                  onPress={openBulkEditAssignments}>
+                  <Text style={styles.multiEditBtnText}>แก้ไขที่เลือก</Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.multiDeleteBtn,
+                    selectedDetailAssignments.length === 0 && styles.btnDisabled,
+                  ]}
+                  disabled={selectedDetailAssignments.length === 0}
+                  onPress={() => setBulkDeleteAsnConfirmOpen(true)}>
+                  <Text style={styles.multiDeleteBtnText}>ลบที่เลือก</Text>
+                </Pressable>
+              </View>
+            ) : null}
             <ScrollView
               style={styles.modalScroll}
               contentContainerStyle={styles.modalScrollContent}
@@ -979,9 +1102,25 @@ export default function ScheduleScreen() {
               ) : (
                 assignmentDetailRows.map((a) => (
                   <View key={a.id} style={styles.card}>
-                    <Text style={styles.cardTitle}>
-                      {a.work_date} · {a.work_shifts?.name ?? 'กะ'}
-                    </Text>
+                    <View style={styles.assignmentDetailHead}>
+                      {mgr ? (
+                        <Pressable
+                          style={[
+                            styles.assignmentCheckbox,
+                            selectedDetailAssignmentIds[a.id] && styles.assignmentCheckboxOn,
+                          ]}
+                          onPress={() => toggleDetailAssignment(a.id)}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: !!selectedDetailAssignmentIds[a.id] }}>
+                          <Text style={styles.assignmentCheckboxText}>
+                            {selectedDetailAssignmentIds[a.id] ? '✓' : ''}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                      <Text style={[styles.cardTitle, styles.assignmentDetailTitle]}>
+                        {a.work_date} · {a.work_shifts?.name ?? 'กะ'}
+                      </Text>
+                    </View>
                     <Text style={styles.cardMeta}>
                       {a.work_shifts?.start_time?.slice(0, 5) ?? '?'} –{' '}
                       {a.work_shifts?.end_time?.slice(0, 5) ?? '?'}
@@ -1015,8 +1154,116 @@ export default function ScheduleScreen() {
               )}
             </ScrollView>
             <View style={styles.actions}>
-              <Pressable onPress={() => setAssignmentDetailOpen(false)}>
+              <Pressable onPress={closeAssignmentDetail}>
                 <Text style={{ color: NatureTheme.colors.text }}>ปิด</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={bulkEditAsnOpen}
+        animationType="slide"
+        transparent
+        statusBarTranslucent
+        presentationStyle="overFullScreen"
+        onRequestClose={() => !bulkEditAsnSaving && setBulkEditAsnOpen(false)}>
+        <View style={[styles.backdrop, WEB_MODAL_BACKDROP]}>
+          <Pressable
+            style={styles.backdropHit}
+            onPress={() => !bulkEditAsnSaving && setBulkEditAsnOpen(false)}
+          />
+          <View style={[styles.modal, modalSheetPad]}>
+            <ScrollView
+              style={styles.modalScroll}
+              contentContainerStyle={styles.modalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator>
+              <Text style={styles.modalTitle}>
+                แก้ไขมอบหมายหลายรายการ ({selectedDetailAssignments.length})
+              </Text>
+              <Text style={styles.cardMeta}>
+                การแก้ไขหลายรายการจะปรับเฉพาะ “กะ” และ “สาขาที่เข้าได้” ของรายการที่เลือก
+              </Text>
+              <Text style={styles.label}>กะ</Text>
+              {shifts.map((sh) => (
+                <Pressable
+                  key={sh.id}
+                  style={[styles.row, bulkEditAsnShiftId === sh.id && styles.rowOn]}
+                  onPress={() => setBulkEditAsnShiftId(sh.id)}>
+                  <Text style={{ color: NatureTheme.colors.text }}>
+                    {sh.name} ({sh.start_time.slice(0, 5)}–{sh.end_time.slice(0, 5)})
+                  </Text>
+                </Pressable>
+              ))}
+              <Text style={styles.label}>สาขาที่เข้าได้</Text>
+              <Pressable
+                style={[styles.row, bulkEditAsnBranchId == null && styles.rowOn]}
+                onPress={() => setBulkEditAsnBranchId(null)}>
+                <Text style={{ color: NatureTheme.colors.text }}>ไม่จำกัดสาขา</Text>
+              </Pressable>
+              {branches.map((br) => (
+                <Pressable
+                  key={String(br.id)}
+                  style={[styles.row, bulkEditAsnBranchId === br.id && styles.rowOn]}
+                  onPress={() => setBulkEditAsnBranchId(br.id)}>
+                  <Text style={{ color: NatureTheme.colors.text }}>
+                    {br.branch_name || br.branch_code || `สาขา ${br.id}`}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <View style={styles.actions}>
+              <Pressable onPress={() => setBulkEditAsnOpen(false)} disabled={bulkEditAsnSaving}>
+                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.save,
+                  (bulkEditAsnSaving || !bulkEditAsnShiftId) && { opacity: 0.6 },
+                ]}
+                onPress={() => void saveBulkEditedAssignments()}
+                disabled={bulkEditAsnSaving || !bulkEditAsnShiftId}>
+                <Text style={styles.saveText}>
+                  {bulkEditAsnSaving ? 'กำลังบันทึก…' : 'บันทึกหลายรายการ'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={bulkDeleteAsnConfirmOpen}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        presentationStyle="overFullScreen"
+        onRequestClose={() => !bulkDeleteAsnSaving && setBulkDeleteAsnConfirmOpen(false)}>
+        <View style={[styles.backdrop, WEB_MODAL_BACKDROP]}>
+          <Pressable
+            style={styles.backdropHit}
+            onPress={() => !bulkDeleteAsnSaving && setBulkDeleteAsnConfirmOpen(false)}
+          />
+          <View style={[styles.modal, modalSheetPad]}>
+            <Text style={styles.modalTitle}>ยืนยันลบหลายรายการ</Text>
+            <Text style={styles.cardMeta}>
+              ต้องการลบมอบหมายที่เลือก {selectedDetailAssignments.length} รายการใช่ไหม
+            </Text>
+            <View style={styles.actions}>
+              <Pressable
+                onPress={() => setBulkDeleteAsnConfirmOpen(false)}
+                disabled={bulkDeleteAsnSaving}>
+                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.deleteBtn, bulkDeleteAsnSaving && { opacity: 0.6 }]}
+                onPress={() => void deleteSelectedAssignments()}
+                disabled={bulkDeleteAsnSaving}>
+                <Text style={styles.deleteBtnText}>
+                  {bulkDeleteAsnSaving ? 'กำลังลบ…' : 'ยืนยันลบ'}
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -1529,6 +1776,67 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     gap: 12,
   },
+  multiActionBar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+    padding: 10,
+    borderRadius: r.md,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  multiSelectBtn: {
+    borderRadius: r.sm,
+    borderWidth: 1,
+    borderColor: c.border,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: c.surface,
+  },
+  multiSelectBtnText: { color: c.text, fontSize: 12, fontWeight: '700' },
+  multiSelectedText: { color: c.textMuted, fontSize: 12, fontWeight: '700', marginRight: 'auto' },
+  multiEditBtn: {
+    borderRadius: r.sm,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  multiEditBtnText: { color: c.primaryDark, fontSize: 12, fontWeight: '800' },
+  multiDeleteBtn: {
+    borderRadius: r.sm,
+    backgroundColor: c.errorBg,
+    borderWidth: 1,
+    borderColor: c.error,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  multiDeleteBtnText: { color: c.error, fontSize: 12, fontWeight: '800' },
+  assignmentDetailHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  assignmentDetailTitle: { flex: 1, minWidth: 0 },
+  assignmentCheckbox: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.surfaceMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  assignmentCheckboxOn: {
+    backgroundColor: c.primary,
+    borderColor: c.primaryMuted,
+  },
+  assignmentCheckboxText: { color: c.onAccent, fontSize: 15, fontWeight: '900' },
   assignmentUserWrap: {
     marginHorizontal: s.screen,
     marginBottom: 8,
