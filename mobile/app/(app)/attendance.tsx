@@ -30,7 +30,7 @@ import { WellbeingMoodModal } from '@/components/WellbeingMoodModal';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { NatureTheme } from '@/constants/Theme';
-import { parseAnnouncementSettings } from '@/lib/announcementSlides';
+import { parseAnnouncementSettings, type AnnouncementSlide } from '@/lib/announcementSlides';
 import { onLeaveStatusChanged } from '@/lib/appSignals';
 import { presentBackgroundAwareNotification } from '@/lib/appNotifications';
 import {
@@ -376,6 +376,7 @@ export default function AttendanceScreen() {
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
   const [announcementUrls, setAnnouncementUrls] = useState<string[]>([]);
+  const [announcementSlides, setAnnouncementSlides] = useState<AnnouncementSlide[]>([]);
   const [announcementSlideHeightPx, setAnnouncementSlideHeightPx] = useState(160);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -600,6 +601,7 @@ export default function AttendanceScreen() {
     );
     const annParsed = parseAnnouncementSettings(annRow?.value);
     setAnnouncementUrls(annParsed.urls);
+    setAnnouncementSlides(annParsed.slides);
     setAnnouncementSlideHeightPx(annParsed.slideHeightPx);
     setBreakStartMessages(
       parseSettingsMessages(breakStartRow?.value, BREAK_START_MESSAGES_DEFAULT)
@@ -2586,6 +2588,7 @@ export default function AttendanceScreen() {
           <>
             <AnnouncementCarousel
               urls={announcementUrls}
+              slides={announcementSlides}
               slideHeightPx={announcementSlideHeightPx}
             />
             <View style={styles.userStrip}>

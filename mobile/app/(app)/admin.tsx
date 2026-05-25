@@ -32,6 +32,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { mergeEmployeeWithProfiles, isUuidLike } from '@/lib/adminEmployeeMerge';
 import {
+  ANNOUNCEMENT_DEFAULT_DURATION_MS,
   ANNOUNCEMENT_SETTINGS_KEY,
   buildAnnouncementSettingsValue,
   parseAnnouncementSettings,
@@ -69,11 +70,25 @@ const CLAIM_HISTORY_STATUS_FILTERS: ClaimHistoryStatusFilter[] = [
   'paid',
 ];
 type AnnouncementDraftItem =
-  | { key: string; kind: 'saved'; url: string }
-  | { key: string; kind: 'pending'; localUri: string };
+  | { key: string; kind: 'saved'; url: string; durationSeconds: string }
+  | { key: string; kind: 'pending'; localUri: string; durationSeconds: string };
 
 function newDraftKey(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function announcementDurationSecondsText(durationMs?: number): string {
+  const ms =
+    typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs > 0
+      ? durationMs
+      : ANNOUNCEMENT_DEFAULT_DURATION_MS;
+  return String(Math.max(1, Math.round(ms / 1000)));
+}
+
+function announcementDurationMsFromText(text: string): number {
+  const n = Number(text.trim());
+  if (!Number.isFinite(n) || n <= 0) return ANNOUNCEMENT_DEFAULT_DURATION_MS;
+  return Math.round(n * 1000);
 }
 
 function claimStatusLabelTh(status: ClaimStatus | 'all'): string {
@@ -334,10 +349,11 @@ export default function AdminScreen() {
     const annParsed = parseAnnouncementSettings(annRow?.value);
     setAnnouncementSlideHeightPx(annParsed.slideHeightPx);
     setAnnouncementItems(
-      annParsed.urls.map((url, i) => ({
+      annParsed.slides.map((slide, i) => ({
         key: newDraftKey(`s${i}`),
         kind: 'saved' as const,
-        url,
+        url: slide.url,
+        durationSeconds: announcementDurationSecondsText(slide.durationMs),
       }))
     );
     setBreakStartLines(breakMessagesToEditorLines(breakStartRow?.value));
@@ -1048,20 +1064,21 @@ export default function AdminScreen() {
   async function uploadAndSaveAnnouncementSlides() {
     setAnnouncementUploading(true);
     try {
-      const urls: string[] = [];
+      const slides: { url: string; durationMs: number }[] = [];
       for (const item of announcementItems) {
+        const durationMs = announcementDurationMsFromText(item.durationSeconds);
         if (item.kind === 'saved') {
-          urls.push(item.url);
+          slides.push({ url: item.url, durationMs });
         } else {
           const url = await uploadAnnouncementSlideFromUri(
             item.localUri,
             null
           );
-          urls.push(url);
+          slides.push({ url, durationMs });
         }
       }
       const value = buildAnnouncementSettingsValue(
-        urls,
+        slides,
         announcementSlideHeightPx
       );
       const { error } = await supabase.from('app_settings').upsert({
@@ -1070,10 +1087,11 @@ export default function AdminScreen() {
       });
       if (error) throw new Error(error.message);
       setAnnouncementItems(
-        urls.map((url, i) => ({
+        value.slides.map((slide, i) => ({
           key: newDraftKey(`s${i}`),
           kind: 'saved' as const,
-          url,
+          url: slide.url,
+          durationSeconds: announcementDurationSecondsText(slide.duration_ms),
         }))
       );
       toast.success(
@@ -1116,6 +1134,7 @@ export default function AdminScreen() {
             key: newDraftKey('p'),
             kind: 'pending',
             localUri: asset.uri,
+            durationSeconds: announcementDurationSecondsText(),
           });
         }
       }
@@ -1132,9 +1151,32 @@ export default function AdminScreen() {
     }
     setAnnouncementItems((p) => [
       ...p,
-      { key: newDraftKey('u'), kind: 'saved', url: u },
+      {
+        key: newDraftKey('u'),
+        kind: 'saved',
+        url: u,
+        durationSeconds: announcementDurationSecondsText(),
+      },
     ]);
     setAnnouncementUrlDraft('');
+  }
+
+  function moveAnnouncementItem(index: number, direction: -1 | 1) {
+    setAnnouncementItems((prev) => {
+      const to = index + direction;
+      if (to < 0 || to >= prev.length) return prev;
+      const next = [...prev];
+      const [picked] = next.splice(index, 1);
+      if (!picked) return prev;
+      next.splice(to, 0, picked);
+      return next;
+    });
+  }
+
+  function updateAnnouncementItemDuration(index: number, durationSeconds: string) {
+    setAnnouncementItems((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, durationSeconds } : item))
+    );
   }
 
   async function saveBreakMessages() {
@@ -1230,7 +1272,8 @@ export default function AdminScreen() {
 
         <Text style={styles.h2}>1 · รูปประกาศหน้าเข้า-ออกงาน</Text>
         <Text style={styles.muted}>
-          เลือกรูปหรือ URL ก่อน — รายการที่ยังไม่อัปโหลดจะมีป้าย «รออัปโหลด» — กดปุ่มสีหลักเพื่ออัปโหลดและบันทึกทั้งหมด
+          เลือกรูปหรือ URL ก่อน — ลากลำดับด้วยปุ่มขึ้น/ลงได้ — ตั้งเวลาเฉพาะภาพได้
+          ถ้าเว้นว่างระบบจะใช้ 4 วินาที — กดปุ่มสีหลักเพื่ออัปโหลดและบันทึกทั้งหมด
         </Text>
         <Text style={styles.label}>ความสูงแสดงผลที่หน้าเข้า-ออก (~{announcementSlideHeightPx}px)</Text>
         <View style={styles.annHeightRow}>
@@ -1281,6 +1324,26 @@ export default function AdminScreen() {
               const uri = item.kind === 'saved' ? item.url : item.localUri;
               return (
                 <View key={item.key} style={styles.annThumbCard}>
+                  <View style={styles.annOrderRow}>
+                    <Text style={styles.annOrderBadge}>#{i + 1}</Text>
+                    <View style={styles.annOrderButtons}>
+                      <Pressable
+                        style={[styles.annOrderBtn, i === 0 && styles.disabledSoft]}
+                        disabled={i === 0 || announcementUploading}
+                        onPress={() => moveAnnouncementItem(i, -1)}>
+                        <Text style={styles.annOrderBtnText}>ขึ้น</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.annOrderBtn,
+                          i === announcementItems.length - 1 && styles.disabledSoft,
+                        ]}
+                        disabled={i === announcementItems.length - 1 || announcementUploading}
+                        onPress={() => moveAnnouncementItem(i, 1)}>
+                        <Text style={styles.annOrderBtnText}>ลง</Text>
+                      </Pressable>
+                    </View>
+                  </View>
                   <ZoomableImage
                     source={{ uri }}
                     style={[
@@ -1298,6 +1361,16 @@ export default function AdminScreen() {
                   {item.kind === 'pending' ? (
                     <Text style={styles.annPendingTag}>รออัปโหลด</Text>
                   ) : null}
+                  <Text style={styles.annDurationLabel}>เวลาแสดง (วินาที)</Text>
+                  <TextInput
+                    style={styles.annDurationInput}
+                    value={item.durationSeconds}
+                    onChangeText={(text) => updateAnnouncementItemDuration(i, text)}
+                    placeholder="4"
+                    placeholderTextColor={c.textMuted}
+                    keyboardType="numeric"
+                    editable={!announcementUploading}
+                  />
                   <Pressable
                     style={styles.annThumbRemove}
                     onPress={() =>
@@ -2601,12 +2674,60 @@ const styles = StyleSheet.create({
     marginTop: s.gap,
     marginBottom: s.gap,
   },
-  annThumbCard: { width: 112 },
+  annThumbCard: {
+    width: 144,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceElevated,
+    padding: 8,
+  },
+  annOrderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+    marginBottom: 6,
+  },
+  annOrderBadge: {
+    minWidth: 32,
+    borderRadius: 999,
+    overflow: 'hidden',
+    paddingVertical: 4,
+    paddingHorizontal: 7,
+    backgroundColor: c.primaryLight,
+    color: c.primaryDark,
+    fontSize: 11,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  annOrderButtons: { flexDirection: 'row', gap: 4 },
+  annOrderBtn: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.surface,
+    paddingVertical: 4,
+    paddingHorizontal: 7,
+  },
+  annOrderBtnText: { color: c.textSecondary, fontSize: 11, fontWeight: '700' },
   annThumb: {
-    width: 112,
+    width: '100%',
     height: 72,
     borderRadius: r.sm,
     backgroundColor: c.surfaceMuted,
+  },
+  annDurationLabel: { marginTop: 8, fontSize: 11, color: c.textMuted, fontWeight: '700' },
+  annDurationInput: {
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: c.border,
+    borderRadius: r.sm,
+    paddingVertical: 7,
+    paddingHorizontal: 8,
+    color: c.text,
+    backgroundColor: c.surface,
+    fontSize: 13,
   },
   annThumbRemove: {
     marginTop: 6,

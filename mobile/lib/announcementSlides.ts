@@ -6,21 +6,62 @@ export function parseAnnouncementUrls(value: unknown): string[] {
 
 export type AnnouncementSettingsParsed = {
   urls: string[];
+  slides: AnnouncementSlide[];
   /** ความสูงรูปสไลด์ที่หน้าเข้า-ออก (px) */
   slideHeightPx: number;
+};
+
+export type AnnouncementSlide = {
+  url: string;
+  durationMs: number;
 };
 
 const SLIDE_H_MIN = 100;
 const SLIDE_H_MAX = 320;
 const SLIDE_H_DEFAULT = 160;
+export const ANNOUNCEMENT_DEFAULT_DURATION_MS = 4000;
+const ANNOUNCEMENT_DURATION_MIN_MS = 1000;
+const ANNOUNCEMENT_DURATION_MAX_MS = 60000;
+
+function clampDurationMs(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return ANNOUNCEMENT_DEFAULT_DURATION_MS;
+  return Math.min(
+    ANNOUNCEMENT_DURATION_MAX_MS,
+    Math.max(ANNOUNCEMENT_DURATION_MIN_MS, Math.round(n))
+  );
+}
+
+function parseSlideDurationMs(raw: Record<string, unknown>): number {
+  if (raw.duration_ms != null) return clampDurationMs(raw.duration_ms);
+  if (raw.durationMs != null) return clampDurationMs(raw.durationMs);
+  if (raw.duration_seconds != null) return clampDurationMs(Number(raw.duration_seconds) * 1000);
+  if (raw.durationSeconds != null) return clampDurationMs(Number(raw.durationSeconds) * 1000);
+  return ANNOUNCEMENT_DEFAULT_DURATION_MS;
+}
 
 export function parseAnnouncementSettings(value: unknown): AnnouncementSettingsParsed {
-  const urls: string[] = [];
+  const slides: AnnouncementSlide[] = [];
   if (value != null && typeof value === 'object') {
+    const rawSlides = (value as { slides?: unknown }).slides;
+    if (Array.isArray(rawSlides)) {
+      for (const x of rawSlides) {
+        if (!x || typeof x !== 'object') continue;
+        const row = x as Record<string, unknown>;
+        const url = typeof row.url === 'string' ? row.url.trim() : '';
+        if (url.length > 0) {
+          slides.push({ url, durationMs: parseSlideDurationMs(row) });
+        }
+      }
+    }
+
     const raw = (value as { urls?: unknown }).urls;
     if (Array.isArray(raw)) {
       for (const x of raw) {
-        if (typeof x === 'string' && x.trim().length > 0) urls.push(x.trim());
+        const url = typeof x === 'string' ? x.trim() : '';
+        if (url.length > 0 && !slides.some((slide) => slide.url === url)) {
+          slides.push({ url, durationMs: ANNOUNCEMENT_DEFAULT_DURATION_MS });
+        }
       }
     }
   }
@@ -31,14 +72,24 @@ export function parseAnnouncementSettings(value: unknown): AnnouncementSettingsP
       slideHeightPx = Math.min(SLIDE_H_MAX, Math.max(SLIDE_H_MIN, Math.round(h)));
     }
   }
-  return { urls, slideHeightPx };
+  return { urls: slides.map((slide) => slide.url), slides, slideHeightPx };
 }
 
 export function buildAnnouncementSettingsValue(
-  urls: string[],
+  slidesOrUrls: (AnnouncementSlide | string)[],
   slideHeightPx: number
-): { urls: string[]; slide_height_px: number } {
-  const clean = urls.map((s) => s.trim()).filter((s) => s.length > 0);
+): { urls: string[]; slides: { url: string; duration_ms: number }[]; slide_height_px: number } {
+  const slides = slidesOrUrls
+    .map((item) => {
+      if (typeof item === 'string') {
+        return { url: item.trim(), duration_ms: ANNOUNCEMENT_DEFAULT_DURATION_MS };
+      }
+      return {
+        url: item.url.trim(),
+        duration_ms: clampDurationMs(item.durationMs),
+      };
+    })
+    .filter((item) => item.url.length > 0);
   const h = Math.min(SLIDE_H_MAX, Math.max(SLIDE_H_MIN, Math.round(slideHeightPx)));
-  return { urls: clean, slide_height_px: h };
+  return { urls: slides.map((slide) => slide.url), slides, slide_height_px: h };
 }
