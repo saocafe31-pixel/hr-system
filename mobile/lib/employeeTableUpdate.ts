@@ -36,6 +36,7 @@ export function buildEmployeeHrUpdate(
     nickname: f.nickname.trim() || null,
     position: f.position.trim() || null,
     branch: f.branch.trim() || null,
+    branch_code: null,
     ['phone number']: f.phone.trim() || null,
     'Start date': f.start_date.trim() || null,
     'National ID number': f.national_id.trim() || null,

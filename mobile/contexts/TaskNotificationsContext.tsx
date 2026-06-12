@@ -25,6 +25,7 @@ import { supabase } from '@/lib/supabase';
 import type {
   AttendanceChatMentionNotificationRow,
   FinanceClaimNotificationRow,
+  StatusNotificationRow,
   TaskNotificationRow,
 } from '@/lib/types';
 
@@ -62,6 +63,7 @@ type UnifiedNotif =
   | { kind: 'task'; row: TaskNotificationRow }
   | { kind: 'mention'; row: AttendanceChatMentionNotificationRow }
   | { kind: 'finance'; row: FinanceClaimNotificationRow }
+  | { kind: 'status'; row: StatusNotificationRow }
   | { kind: 'post_comment'; row: { id: string; body: string; created_at: string } }
   | { kind: 'note_reply'; row: { id: string; body: string; created_at: string } };
 
@@ -90,7 +92,7 @@ function notifCreatedAt(item: UnifiedNotif): string {
 }
 
 type SnapshotNotifRow = {
-  kind: 'task' | 'mention' | 'finance' | 'post_comment' | 'note_reply';
+  kind: 'task' | 'mention' | 'finance' | 'status' | 'post_comment' | 'note_reply';
   id: string;
   body: string;
   created_at: string;
@@ -99,8 +101,10 @@ type SnapshotNotifRow = {
   message_id: string | null;
   claim_kind: 'salary' | 'expense' | null;
   claim_id: string | null;
-  event_type: 'submitted' | 'status_updated' | null;
+  event_type: 'submitted' | 'status_updated' | 'leave_status' | 'overtime_status' | null;
   status: 'pending' | 'approved' | 'rejected' | 'paid' | null;
+  entity_kind: 'leave' | 'overtime' | null;
+  entity_id: string | null;
 };
 
 export function TaskNotificationsProvider({ children }: { children: React.ReactNode }) {
@@ -187,6 +191,24 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
             } as FinanceClaimNotificationRow,
           };
         }
+        if (row.kind === 'status') {
+          return {
+            kind: 'status',
+            row: {
+              id: row.id,
+              recipient_id: uid,
+              actor_id: null,
+              event_type:
+                row.event_type === 'overtime_status' ? 'overtime_status' : 'leave_status',
+              entity_kind: row.entity_kind === 'overtime' ? 'overtime' : 'leave',
+              entity_id: row.entity_id ?? '',
+              status: row.status ?? '',
+              body: row.body,
+              read_at: row.read_at,
+              created_at: row.created_at,
+            } as StatusNotificationRow,
+          };
+        }
         if (row.kind === 'post_comment') {
           return {
             kind: 'post_comment',
@@ -254,6 +276,18 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           void loadNotifs();
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'status_notifications',
+          filter: `recipient_id=eq.${uid}`,
+        },
+        () => {
+          void loadNotifs();
+        }
+      )
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
@@ -263,7 +297,12 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
   const unreadNotifs = useMemo(
     () =>
       notifs.filter((n) => {
-        if (n.kind === 'task' || n.kind === 'mention' || n.kind === 'finance') {
+        if (
+          n.kind === 'task' ||
+          n.kind === 'mention' ||
+          n.kind === 'finance' ||
+          n.kind === 'status'
+        ) {
           return !n.row.read_at;
         }
         if (!communitySeenAt) return true;
@@ -313,6 +352,11 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           .from('finance_claim_notifications')
           .update({ read_at: now })
           .eq('id', item.row.id);
+      } else if (item.kind === 'status') {
+        await supabase
+          .from('status_notifications')
+          .update({ read_at: now })
+          .eq('id', item.row.id);
       } else if (uid) {
         const created = item.row.created_at;
         await writeCommunitySeen(uid, created);
@@ -338,6 +382,9 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
     const financeIds = unreadNotifs
       .filter((n): n is UnifiedNotif & { kind: 'finance' } => n.kind === 'finance')
       .map((n) => n.row.id);
+    const statusIds = unreadNotifs
+      .filter((n): n is UnifiedNotif & { kind: 'status' } => n.kind === 'status')
+      .map((n) => n.row.id);
     if (taskIds.length) {
       await supabase
         .from('task_notifications')
@@ -361,6 +408,12 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
         .update({ read_at: now })
         .in('id', financeIds);
     }
+    if (statusIds.length) {
+      await supabase
+        .from('status_notifications')
+        .update({ read_at: now })
+        .in('id', statusIds);
+    }
     const communityRows = unreadNotifs.filter(
       (n) => n.kind === 'post_comment' || n.kind === 'note_reply'
     );
@@ -383,6 +436,9 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           return { ...n, row: { ...n.row, read_at: now } };
         }
         if (n.kind === 'finance' && financeIds.includes(n.row.id)) {
+          return { ...n, row: { ...n.row, read_at: now } };
+        }
+        if (n.kind === 'status' && statusIds.includes(n.row.id)) {
           return { ...n, row: { ...n.row, read_at: now } };
         }
         return n;
@@ -449,6 +505,8 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
         router.push('/chat');
       } else if (item.kind === 'finance') {
         router.push('/profile');
+      } else if (item.kind === 'status') {
+        router.push(item.row.entity_kind === 'overtime' ? '/attendance' : '/profile');
       } else {
         router.push('/community');
       }
@@ -507,7 +565,8 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
                       const unread =
                         item.kind === 'task' ||
                         item.kind === 'mention' ||
-                        item.kind === 'finance'
+                        item.kind === 'finance' ||
+                        item.kind === 'status'
                           ? !item.row.read_at
                           : true;
                       return (
@@ -522,6 +581,10 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
                                 ? 'แชท · กล่าวถึง'
                                 : item.kind === 'finance'
                                   ? 'การเงิน · เบิกเงิน'
+                                  : item.kind === 'status'
+                                    ? item.row.entity_kind === 'overtime'
+                                      ? 'ทีม · โอที'
+                                      : 'ลา · สถานะคำขอ'
                                 : item.kind === 'post_comment'
                                   ? 'คอมมูนิตี้ · โพสต์'
                                   : 'คอมมูนิตี้ · โน้ต'}

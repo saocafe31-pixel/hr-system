@@ -1,6 +1,7 @@
 import { Redirect } from 'expo-router';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { NatureTheme } from '@/constants/Theme';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabaseConfigured } from '@/lib/supabase';
@@ -20,9 +21,7 @@ export default function Index() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen title="กำลังเปิดเว็บแอป" />
     );
   }
 

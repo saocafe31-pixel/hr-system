@@ -6,10 +6,14 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 
+import { LateRequestHistoryCard } from '@/components/LateRequestHistoryCard';
 import { NatureTheme } from '@/constants/Theme';
+import { isAdmin, useRole } from '@/contexts/AuthContext';
+import { useCuteToast } from '@/contexts/CuteToastContext';
 import {
   ATTENDANCE_KPI_SETTINGS_KEY,
   DEFAULT_ATTENDANCE_KPI_SETTINGS,
@@ -40,11 +44,29 @@ import {
   sumLeaveDaysInYear,
 } from '@/lib/leaveLateRules';
 import { supabase } from '@/lib/supabase';
-import type { LeaveRequestRow, VacationGrantRow, WorkScheduleRow } from '@/lib/types';
+import type {
+  LeaveRequestRow,
+  LeaveRequestType,
+  VacationGrantRow,
+  WorkScheduleRow,
+} from '@/lib/types';
 
 type Props = {
   userId: string | null | undefined;
 };
+
+const LEAVE_TYPE_OPTIONS: { value: LeaveRequestType; label: string }[] = [
+  { value: 'sick', label: 'ลาป่วย' },
+  { value: 'personal', label: 'ลากิจ' },
+  { value: 'vacation', label: 'พักร้อน' },
+  { value: 'unpaid', label: 'ลาไม่รับเงิน' },
+];
+
+const LEAVE_STATUS_OPTIONS: { value: LeaveRequestRow['status']; label: string }[] = [
+  { value: 'pending', label: 'รออนุมัติ' },
+  { value: 'approved', label: 'อนุมัติแล้ว' },
+  { value: 'rejected', label: 'ปฏิเสธแล้ว' },
+];
 
 function formatWorkDateTh(ymd: string): string {
   const p = ymd.trim().split('-').map(Number);
@@ -73,6 +95,7 @@ function leaveTypeLabelTh(type: LeaveRequestRow['leave_type']): string {
   if (type === 'sick') return 'ลาป่วย';
   if (type === 'personal') return 'ลากิจ';
   if (type === 'vacation') return 'ลาพักร้อน';
+  if (type === 'unpaid') return 'ลาไม่รับเงิน';
   return type;
 }
 
@@ -132,6 +155,17 @@ function normalizePgDateYmd(raw: string): string {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : s;
 }
 
+function isValidYmd(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return false;
+  const [yy, mo, dd] = value.trim().split('-').map(Number);
+  const dt = new Date(Date.UTC(yy, mo - 1, dd));
+  return (
+    dt.getUTCFullYear() === yy &&
+    dt.getUTCMonth() === mo - 1 &&
+    dt.getUTCDate() === dd
+  );
+}
+
 function lateRequestMinutesByWorkDate(
   rows: { work_date: string; minutes_late: number }[]
 ): Map<string, number> {
@@ -173,9 +207,9 @@ function buildWorkStartByYmd(
   const map: Record<string, string> = {};
   const assignedDays = new Set<string>();
   for (const assignment of assignments) {
-    assignedDays.add(assignment.work_date);
     const shift = assignment.work_shifts;
     if (!shift) continue;
+    assignedDays.add(assignment.work_date);
     map[assignment.work_date] = new Date(
       bangkokShiftStartMs(assignment.work_date, shift.start_time)
     ).toISOString();
@@ -216,6 +250,9 @@ function barPct(used: number, cap: number): number {
 }
 
 export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
+  const role = useRole();
+  const admin = isAdmin(role);
+  const toast = useCuteToast();
   const [loading, setLoading] = useState(false);
   const [leaveRows, setLeaveRows] = useState<LeaveRequestRow[]>([]);
   const [leaveHistoryOpen, setLeaveHistoryOpen] = useState(false);
@@ -235,6 +272,13 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
   const [latePayrollRows, setLatePayrollRows] = useState<
     ReturnType<typeof computeLateFromAttendanceData>
   >([]);
+  const [leaveEditorRow, setLeaveEditorRow] = useState<LeaveRequestRow | null>(null);
+  const [leaveEditType, setLeaveEditType] = useState<LeaveRequestType>('sick');
+  const [leaveEditStatus, setLeaveEditStatus] = useState<LeaveRequestRow['status']>('approved');
+  const [leaveEditStart, setLeaveEditStart] = useState('');
+  const [leaveEditEnd, setLeaveEditEnd] = useState('');
+  const [leaveEditReason, setLeaveEditReason] = useState('');
+  const [leaveEditBusy, setLeaveEditBusy] = useState(false);
 
   const quotaY = currentYearBangkok();
 
@@ -452,6 +496,72 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
     };
   }, [load, loadLatePayrollCycle, userId]);
 
+  const refreshLeaveLatePanels = useCallback(() => {
+    void load();
+    void loadLatePayrollCycle();
+  }, [load, loadLatePayrollCycle]);
+
+  function openLeaveEditor(row: LeaveRequestRow) {
+    if (!admin) return;
+    setLeaveEditorRow(row);
+    setLeaveEditType(row.leave_type);
+    setLeaveEditStatus(row.status);
+    setLeaveEditStart(normalizePgDateYmd(row.starts_on));
+    setLeaveEditEnd(normalizePgDateYmd(row.ends_on));
+    setLeaveEditReason(row.reason?.trim() || row.supplementary_note?.trim() || '');
+  }
+
+  async function saveLeaveEdit() {
+    if (!admin || !leaveEditorRow) return;
+    const startsOn = leaveEditStart.trim();
+    const endsOn = leaveEditEnd.trim();
+    if (!isValidYmd(startsOn) || !isValidYmd(endsOn)) {
+      toast.error('วันที่ไม่ถูกต้อง', 'กรุณากรอกวันที่รูปแบบ YYYY-MM-DD เช่น 2026-06-08');
+      return;
+    }
+    if (startsOn > endsOn) {
+      toast.error('ช่วงวันที่ไม่ถูกต้อง', 'วันเริ่มลาต้องไม่เกินวันสิ้นสุด');
+      return;
+    }
+    setLeaveEditBusy(true);
+    try {
+      const { error } = await supabase.rpc('admin_update_leave_request', {
+        p_request_id: leaveEditorRow.id,
+        p_leave_type: leaveEditType,
+        p_starts_on: startsOn,
+        p_ends_on: endsOn,
+        p_reason: leaveEditReason.trim() || null,
+        p_status: leaveEditStatus,
+      });
+      if (error) throw error;
+      toast.success('แก้ไขรายการลาแล้ว', 'โควต้าและ KPI จะคำนวณจากข้อมูลล่าสุด');
+      setLeaveEditorRow(null);
+      await load();
+    } catch (e) {
+      toast.error('แก้ไขรายการลาไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setLeaveEditBusy(false);
+    }
+  }
+
+  async function deleteLeaveEdit() {
+    if (!admin || !leaveEditorRow) return;
+    setLeaveEditBusy(true);
+    try {
+      const { error } = await supabase.rpc('admin_delete_leave_request', {
+        p_request_id: leaveEditorRow.id,
+      });
+      if (error) throw error;
+      toast.success('ลบรายการลาแล้ว', 'สิทธิ์ลาจะถูกคืนตามรายการที่ลบ');
+      setLeaveEditorRow(null);
+      await load();
+    } catch (e) {
+      toast.error('ลบรายการลาไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setLeaveEditBusy(false);
+    }
+  }
+
   const sickUsed = sumLeaveDaysInYear(leaveRows, quotaY, 'sick');
   const personalUsed = sumLeaveDaysInYear(leaveRows, quotaY, 'personal');
   const vacationUsed = sumLeaveDaysInYear(leaveRows, quotaY, 'vacation');
@@ -660,7 +770,15 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
         {leaveHistoryRows.length === 0 ? (
           <Text style={styles.leaveHistoryEmpty}>ยังไม่มีประวัติการลาในปีนี้</Text>
         ) : (
-          leaveHistoryPreview.map((row) => <LeaveHistoryRow key={row.id} row={row} preview />)
+          leaveHistoryPreview.map((row) => (
+            <LeaveHistoryRow
+              key={row.id}
+              row={row}
+              preview
+              canManage={admin}
+              onManage={openLeaveEditor}
+            />
+          ))
         )}
         {leaveHistoryRows.length > leaveHistoryPreview.length ? (
           <Text style={styles.leaveHistoryMore}>
@@ -669,6 +787,12 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
           </Text>
         ) : null}
       </View>
+
+      <LateRequestHistoryCard
+        userId={userId}
+        canManage={admin}
+        onChanged={refreshLeaveLatePanels}
+      />
 
       <View style={styles.kpiCard}>
         <View style={styles.kpiHeaderRow}>
@@ -813,7 +937,12 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
                 <Text style={styles.leaveHistoryEmpty}>ยังไม่มีประวัติการลาในปีนี้</Text>
               ) : (
                 leaveHistoryRows.map((row) => (
-                  <LeaveHistoryRow key={`modal-${row.id}`} row={row} />
+                  <LeaveHistoryRow
+                    key={`modal-${row.id}`}
+                    row={row}
+                    canManage={admin}
+                    onManage={openLeaveEditor}
+                  />
                 ))
               )}
             </ScrollView>
@@ -823,11 +952,127 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        visible={leaveEditorRow != null}
+        animationType="slide"
+        transparent
+        statusBarTranslucent
+        onRequestClose={() => {
+          if (!leaveEditBusy) setLeaveEditorRow(null);
+        }}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>แก้ไข/ลบรายการลา</Text>
+            <Text style={styles.leaveHistoryModalSub}>
+              สำหรับ Admin เท่านั้น · การลบรายการจะคืนสิทธิ์ลาตามรายการนั้นทันที
+            </Text>
+            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator>
+              <Text style={styles.adminFormLabel}>ประเภทลา</Text>
+              <View style={styles.adminChipRow}>
+                {LEAVE_TYPE_OPTIONS.map((opt) => {
+                  const on = leaveEditType === opt.value;
+                  return (
+                    <Pressable
+                      key={opt.value}
+                      style={[styles.adminChip, on && styles.adminChipOn]}
+                      disabled={leaveEditBusy}
+                      onPress={() => setLeaveEditType(opt.value)}>
+                      <Text style={[styles.adminChipText, on && styles.adminChipTextOn]}>
+                        {opt.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.adminFormLabel}>สถานะ</Text>
+              <View style={styles.adminChipRow}>
+                {LEAVE_STATUS_OPTIONS.map((opt) => {
+                  const on = leaveEditStatus === opt.value;
+                  return (
+                    <Pressable
+                      key={opt.value}
+                      style={[styles.adminChip, on && styles.adminChipOn]}
+                      disabled={leaveEditBusy}
+                      onPress={() => setLeaveEditStatus(opt.value)}>
+                      <Text style={[styles.adminChipText, on && styles.adminChipTextOn]}>
+                        {opt.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.adminFormLabel}>วันเริ่มลา (YYYY-MM-DD)</Text>
+              <TextInput
+                style={styles.adminFormInput}
+                value={leaveEditStart}
+                onChangeText={setLeaveEditStart}
+                editable={!leaveEditBusy}
+                placeholder="2026-06-08"
+                placeholderTextColor={c.textMuted}
+              />
+              <Text style={styles.adminFormLabel}>วันสิ้นสุดลา (YYYY-MM-DD)</Text>
+              <TextInput
+                style={styles.adminFormInput}
+                value={leaveEditEnd}
+                onChangeText={setLeaveEditEnd}
+                editable={!leaveEditBusy}
+                placeholder="2026-06-08"
+                placeholderTextColor={c.textMuted}
+              />
+              <Text style={styles.adminFormLabel}>เหตุผล / หมายเหตุ</Text>
+              <TextInput
+                style={[styles.adminFormInput, styles.adminFormTextarea]}
+                value={leaveEditReason}
+                onChangeText={setLeaveEditReason}
+                editable={!leaveEditBusy}
+                multiline
+                placeholder="ระบุเหตุผล"
+                placeholderTextColor={c.textMuted}
+              />
+            </ScrollView>
+            <View style={styles.adminModalActions}>
+              <Pressable
+                style={[styles.adminDangerBtn, leaveEditBusy && styles.disabled]}
+                disabled={leaveEditBusy}
+                onPress={deleteLeaveEdit}>
+                <Text style={styles.adminDangerBtnText}>ลบรายการ</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.adminSecondaryBtn, leaveEditBusy && styles.disabled]}
+                disabled={leaveEditBusy}
+                onPress={() => setLeaveEditorRow(null)}>
+                <Text style={styles.adminSecondaryBtnText}>ยกเลิก</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.adminSaveBtn, leaveEditBusy && styles.disabled]}
+                disabled={leaveEditBusy}
+                onPress={saveLeaveEdit}>
+                <Text style={styles.adminSaveBtnText}>
+                  {leaveEditBusy ? 'กำลังบันทึก...' : 'บันทึก'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </>
   );
 }
 
-function LeaveHistoryRow({ row, preview = false }: { row: LeaveRequestRow; preview?: boolean }) {
+function LeaveHistoryRow({
+  row,
+  preview = false,
+  canManage = false,
+  onManage,
+}: {
+  row: LeaveRequestRow;
+  preview?: boolean;
+  canManage?: boolean;
+  onManage?: (row: LeaveRequestRow) => void;
+}) {
   const tone = leaveStatusTone(row.status);
   return (
     <View style={styles.leaveHistoryRow}>
@@ -865,8 +1110,16 @@ function LeaveHistoryRow({ row, preview = false }: { row: LeaveRequestRow; previ
         <Text style={styles.leaveHistoryCreated}>
           ส่งคำขอ {formatCreatedAtTh(row.created_at)}
         </Text>
+        {row.is_kpi_exempt ? (
+          <Text style={styles.leaveHistoryAttach}>ปรับโดยแอดมิน/HR · ไม่นับ KPI</Text>
+        ) : null}
         {row.medical_certificate_url || row.supplementary_document_url ? (
           <Text style={styles.leaveHistoryAttach}>มีเอกสารแนบ</Text>
+        ) : null}
+        {canManage ? (
+          <Pressable style={styles.adminInlineBtn} onPress={() => onManage?.(row)}>
+            <Text style={styles.adminInlineBtnText}>แก้ไข/ลบรายการ</Text>
+          </Pressable>
         ) : null}
       </View>
     </View>
@@ -1211,6 +1464,88 @@ const styles = StyleSheet.create({
   latePayrollRowDeltaPos: { color: c.accentWarm },
   latePayrollRowDeltaNeg: { color: c.lateNoticeBar },
   muted: { fontSize: 14, color: c.textMuted, lineHeight: 20 },
+  adminInlineBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 10,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: r.sm,
+    backgroundColor: c.linkLight,
+    borderWidth: 1,
+    borderColor: c.link,
+  },
+  adminInlineBtnText: { color: c.link, fontSize: 12, fontWeight: '800' },
+  adminFormLabel: {
+    marginTop: 12,
+    marginBottom: 6,
+    color: c.textSecondary,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  adminChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  adminChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  adminChipOn: {
+    backgroundColor: c.primaryLight,
+    borderColor: c.primaryMuted,
+  },
+  adminChipText: { color: c.textMuted, fontSize: 12, fontWeight: '800' },
+  adminChipTextOn: { color: c.primaryDark },
+  adminFormInput: {
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceMuted,
+    color: c.text,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    fontSize: 14,
+  },
+  adminFormTextarea: {
+    minHeight: 86,
+    textAlignVertical: 'top',
+  },
+  adminModalActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
+  adminDangerBtn: {
+    flexGrow: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: r.sm,
+    backgroundColor: c.errorBg,
+    borderWidth: 1,
+    borderColor: c.error,
+    alignItems: 'center',
+  },
+  adminDangerBtnText: { color: c.error, fontSize: 13, fontWeight: '900' },
+  adminSecondaryBtn: {
+    flexGrow: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceMuted,
+    alignItems: 'center',
+  },
+  adminSecondaryBtnText: { color: c.textSecondary, fontSize: 13, fontWeight: '800' },
+  adminSaveBtn: {
+    flexGrow: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: r.sm,
+    backgroundColor: c.primary,
+    alignItems: 'center',
+  },
+  adminSaveBtnText: { color: c.canvas, fontSize: 13, fontWeight: '900' },
   disabled: { opacity: 0.6 },
   modalBackdrop: {
     flex: 1,

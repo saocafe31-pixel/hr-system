@@ -10,6 +10,7 @@ import { Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { CuteToastProvider } from '@/contexts/CuteToastContext';
 import { NatureTheme } from '@/constants/Theme';
@@ -35,7 +36,9 @@ export const unstable_settings = {
   initialRouteName: 'index',
 };
 
-SplashScreen.preventAutoHideAsync();
+if (Platform.OS !== 'web') {
+  void SplashScreen.preventAutoHideAsync();
+}
 
 export default function RootLayout() {
   const [loaded, error] = useFonts({
@@ -48,13 +51,13 @@ export default function RootLayout() {
   }, [error]);
 
   useEffect(() => {
-    if (loaded) {
+    if (loaded && Platform.OS !== 'web') {
       SplashScreen.hideAsync();
     }
   }, [loaded]);
 
   if (!loaded) {
-    return null;
+    return <AppLoadingScreen title="กำลังเปิดเว็บแอป" />;
   }
 
   return (

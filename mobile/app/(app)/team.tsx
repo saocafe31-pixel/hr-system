@@ -17,11 +17,13 @@ import {
 } from 'react-native';
 
 import { DatePickerField } from '@/components/DatePickerField';
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { EmployeeLeaveLateProfilePanel } from '@/components/EmployeeLeaveLateProfilePanel';
 import { EmployeeScheduleCalendarCard } from '@/components/EmployeeScheduleCalendarCard';
 import { FriendlyConfirmModal } from '@/components/FriendlyNoticeModal';
 import { TaskProgressBar } from '@/components/TaskProgressBar';
 import { UserAvatar } from '@/components/UserAvatar';
+import { WorkAnalyticsPanel } from '@/components/WorkAnalyticsPanel';
 import { NatureTheme } from '@/constants/Theme';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
@@ -43,6 +45,15 @@ import {
   TASK_STATUS_TH,
 } from '@/lib/taskHelpers';
 import {
+  calculateBreakMinutes,
+  calculateOvertimeMinutes,
+  calculateWorkMinutes,
+  formatDurationMinutesTh,
+  overtimeApprovalLabel,
+  overtimeSummaryStatusLabel,
+  overtimeStatusLabel,
+} from '@/lib/attendanceDurations';
+import {
   assignDisplayHeadline,
   assignMatchesSearch,
   normalizeAssignPickRows,
@@ -51,9 +62,11 @@ import {
 import { humanizeSupabaseError, supabase } from '@/lib/supabase';
 import type {
   AttendanceLog,
+  AttendanceOvertimeRequestRow,
   Branch,
   EmployeeDirectory,
   LeaveRequestRow,
+  LeaveRequestType,
   Profile,
   TaskPriority,
   TaskRow,
@@ -83,13 +96,28 @@ type AttendanceSummaryRow = {
   checkOutIso?: string;
   employeeCode: string;
   checkInLocation: string;
+  workMinutes: number;
+  breakMinutes: number;
+  overtimeMinutes: number;
+  overtimeApprovalStatus: string;
   isLeave?: boolean;
+  leaveId?: string;
+  leaveType?: LeaveRequestType;
+  leaveIsKpiExempt?: boolean;
+  manualOtId?: string;
+  manualOtMinutes?: number;
+  manualOtReason?: string;
 };
+
+type AttendanceLeaveChoice = LeaveRequestType | 'none';
 
 type AttendanceEditDraft = {
   checkIn: string;
   checkOut: string;
   location: string;
+  leaveType: AttendanceLeaveChoice;
+  manualOtHours: string;
+  manualOtReason: string;
 };
 
 type MemberActivityNote = {
@@ -97,6 +125,14 @@ type MemberActivityNote = {
   body: string;
   createdAt: string;
 };
+
+type MemberOvertimeDisplayRow = AttendanceOvertimeRequestRow & {
+  actualCheckInIso: string | null;
+  actualCheckOutIso: string | null;
+  overtimeMinutes: number;
+};
+
+type TeamOvertimeApprovalRow = MemberOvertimeDisplayRow;
 
 const TASK_STATUSES = ['pending', 'in_progress', 'done', 'cancelled'] as const;
 
@@ -110,7 +146,16 @@ const LEAVE_TYPE_TH: Record<string, string> = {
   sick: 'ลาป่วย',
   personal: 'ลากิจ',
   vacation: 'ลาพักร้อน',
+  unpaid: 'ลาไม่รับเงิน',
 };
+
+const ATTENDANCE_LEAVE_CHOICES: { value: AttendanceLeaveChoice; label: string }[] = [
+  { value: 'none', label: 'ไม่ลา' },
+  { value: 'sick', label: 'ลาป่วย' },
+  { value: 'personal', label: 'ลากิจ' },
+  { value: 'vacation', label: 'พักร้อน' },
+  { value: 'unpaid', label: 'ไม่รับเงิน' },
+];
 
 function ymdFromDate(d: Date): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -189,6 +234,42 @@ function fmtBangkokTime(iso: string | undefined): string {
   }).format(new Date(iso));
 }
 
+function fmtBangkokDateTimeShort(iso: string | null | undefined): string {
+  if (!iso) return '-';
+  return new Intl.DateTimeFormat('th-TH', {
+    timeZone: 'Asia/Bangkok',
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(iso));
+}
+
+function overtimeKindLabel(row: AttendanceOvertimeRequestRow): string {
+  if (row.overtime_kind === 'manual') return 'OT แมนนวล';
+  return row.overtime_kind === 'before_work' ? 'OT ก่อนเวลาเข้างาน' : 'OT หลังเลิกงาน';
+}
+
+function overtimeActualTimeLabel(row: TeamOvertimeApprovalRow): string {
+  if (row.overtime_kind === 'manual') {
+    return 'บันทึกโดยแอดมิน/HR';
+  }
+  if (row.overtime_kind === 'before_work') {
+    return `เข้างานจริง ${fmtBangkokDateTimeShort(row.actualCheckInIso)}`;
+  }
+  return `ออกจริง ${fmtBangkokDateTimeShort(row.actualCheckOutIso)}`;
+}
+
+function overtimePlanTimeLabel(row: AttendanceOvertimeRequestRow): string {
+  if (row.overtime_kind === 'manual') {
+    return `วันที่ ${row.work_date}`;
+  }
+  if (row.overtime_kind === 'before_work') {
+    return `เริ่มตามตาราง ${fmtBangkokDateTimeShort(row.plan_start_at)}`;
+  }
+  return `เลิกตามตาราง ${fmtBangkokDateTimeShort(row.plan_end_at)}`;
+}
+
 function timeInputToBangkokIso(ymd: string, hhmm: string): string | null {
   const raw = hhmm.trim();
   if (!raw) return null;
@@ -197,6 +278,20 @@ function timeInputToBangkokIso(ymd: string, hhmm: string): string | null {
   const d = new Date(`${ymd}T${m[1]}:${m[2]}:00+07:00`);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
+}
+
+function minutesToHourInput(minutes: number | null | undefined): string {
+  if (!minutes || minutes <= 0) return '';
+  const hours = minutes / 60;
+  return Number.isInteger(hours) ? String(hours) : String(Math.round(hours * 100) / 100);
+}
+
+function hourInputToMinutes(input: string): number | null {
+  const clean = input.trim().replace(',', '.');
+  if (!clean) return null;
+  const hours = Number(clean);
+  if (!Number.isFinite(hours) || hours <= 0) return null;
+  return Math.round(hours * 60);
 }
 
 function directoryDisplayName(row: EmployeeDirectory | null | undefined): string {
@@ -232,7 +327,7 @@ function pickBestProfileForEmployee(
 }
 
 type AdminBranchGroup = {
-  /** คีย์จัดกลุ่มจาก employee.branch + branch_code (ไม่ใช้ branch_information) */
+  /** คีย์จัดกลุ่มจาก employee.branch_id ก่อน แล้ว fallback เป็นชื่อ/รหัสสาขาเดิม */
   key: string;
   title: string;
   subtitle: string | null;
@@ -241,8 +336,16 @@ type AdminBranchGroup = {
 
 const EMP_BRANCH_KEY_SEP = '\u0001';
 
-/** คีย์จัดกลุ่มตามข้อความสาขาใน employee (ชื่อสาขา + รหัสสาขา) */
+function branchOptionLabel(branch: Branch): string {
+  const code = branch.branch_code?.trim();
+  const name = branch.branch_name?.trim();
+  if (name && code) return `${name} (${code})`;
+  return name || code || `สาขา #${branch.id}`;
+}
+
+/** คีย์จัดกลุ่มตาม branch_id ที่อ้างอิง branch_information */
 function employeeBranchGroupKey(emp: EmployeeDirectory): string {
+  if (emp.branch_id != null) return `id:${emp.branch_id}`;
   const name = emp.branch?.trim() ?? '';
   const code = emp.branch_code?.trim() ?? '';
   if (!name && !code) return 'none';
@@ -284,13 +387,14 @@ export default function TeamScreen() {
   const [memberTasks, setMemberTasks] = useState<TaskRow[]>([]);
   const [memberActivityNotes, setMemberActivityNotes] = useState<MemberActivityNote[]>([]);
   const [memberLogs, setMemberLogs] = useState<AttendanceLog[]>([]);
-  const [memberLeaves, setMemberLeaves] = useState<{ starts_on: string; ends_on: string }[]>([]);
+  const [memberLeaves, setMemberLeaves] = useState<LeaveRequestRow[]>([]);
+  const [memberOvertimeRequests, setMemberOvertimeRequests] = useState<AttendanceOvertimeRequestRow[]>([]);
   const [summaryAnchorDate, setSummaryAnchorDate] = useState<Date | null>(() => new Date());
   const [detailLoading, setDetailLoading] = useState(false);
   const [attendanceEditDrafts, setAttendanceEditDrafts] = useState<
     Record<string, AttendanceEditDraft>
   >({});
-  const [attendanceSavingYmd, setAttendanceSavingYmd] = useState<string | null>(null);
+  const [attendanceSavingAll, setAttendanceSavingAll] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [assignTitle, setAssignTitle] = useState('');
   const [assignDesc, setAssignDesc] = useState('');
@@ -317,8 +421,12 @@ export default function TeamScreen() {
   const [mgrCanApproveLeave, setMgrCanApproveLeave] = useState(false);
   const [mgrCanManageSchedule, setMgrCanManageSchedule] = useState(false);
   const [pendingTeamLeaves, setPendingTeamLeaves] = useState<LeaveRequestRow[]>([]);
+  const [pendingTeamOvertimeRows, setPendingTeamOvertimeRows] = useState<
+    TeamOvertimeApprovalRow[]
+  >([]);
   const [subordinateProfileIds, setSubordinateProfileIds] = useState<string[]>([]);
   const [leaveActionId, setLeaveActionId] = useState<string | null>(null);
+  const [overtimeActionId, setOvertimeActionId] = useState<string | null>(null);
   const [teamAssignPicklist, setTeamAssignPicklist] = useState<AssignPickRow[]>([]);
   const [assignTeamSearch, setAssignTeamSearch] = useState('');
   const [memberTaskSearchQuery, setMemberTaskSearchQuery] = useState('');
@@ -326,6 +434,62 @@ export default function TeamScreen() {
   const [deleteMemberBusy, setDeleteMemberBusy] = useState(false);
   const memberDetailScrollRef = useRef<ScrollView | null>(null);
   const memberTaskListYRef = useRef(0);
+
+  const buildOvertimeRowsWithCheckout = useCallback(
+    async (rows: AttendanceOvertimeRequestRow[]): Promise<TeamOvertimeApprovalRow[]> => {
+      const acceptedRows = rows.filter((row) => row.status === 'accepted');
+      if (acceptedRows.length === 0) return [];
+
+      const userIds = [...new Set(acceptedRows.map((row) => row.user_id).filter(Boolean))];
+      const workDates = acceptedRows.map((row) => row.work_date).sort();
+      const startIso = new Date(`${workDates[0]}T00:00:00+07:00`).toISOString();
+      const endIso = new Date(`${workDates[workDates.length - 1]}T23:59:59+07:00`).toISOString();
+      const { data: logs } = await supabase
+        .from('attendance_logs')
+        .select('user_id,kind,created_at')
+        .in('user_id', userIds)
+        .in('kind', ['check_in', 'check_out'])
+        .gte('created_at', startIso)
+        .lte('created_at', endIso);
+
+      const checkInByUserDate = new Map<string, string>();
+      const checkOutByUserDate = new Map<string, string>();
+      for (const lg of
+        (logs as Array<{ user_id?: string | null; kind?: string | null; created_at?: string | null }> | null) ??
+        []) {
+        if (!lg.user_id || !lg.created_at) continue;
+        const ymd = ymdFromDate(new Date(lg.created_at));
+        const key = `${lg.user_id}:${ymd}`;
+        if (lg.kind === 'check_in') {
+          const current = checkInByUserDate.get(key);
+          if (!current || new Date(lg.created_at).getTime() < new Date(current).getTime()) {
+            checkInByUserDate.set(key, lg.created_at);
+          }
+        }
+        if (lg.kind === 'check_out') {
+          const current = checkOutByUserDate.get(key);
+          if (!current || new Date(lg.created_at).getTime() > new Date(current).getTime()) {
+            checkOutByUserDate.set(key, lg.created_at);
+          }
+        }
+      }
+
+      return acceptedRows
+        .map((row) => {
+          const key = `${row.user_id}:${row.work_date}`;
+          const actualCheckInIso = checkInByUserDate.get(key) ?? null;
+          const actualCheckOutIso = checkOutByUserDate.get(key) ?? null;
+          return {
+            ...row,
+            actualCheckInIso,
+            actualCheckOutIso,
+            overtimeMinutes: calculateOvertimeMinutes(row, actualCheckOutIso, actualCheckInIso),
+          };
+        })
+        .filter((row) => row.overtimeMinutes >= 60 && !!row.reason?.trim());
+    },
+    []
+  );
 
   const load = useCallback(async () => {
     const directoryReq = admin
@@ -379,16 +543,31 @@ export default function TeamScreen() {
     setMgrCanApproveLeave(false);
     setMgrCanManageSchedule(false);
     setPendingTeamLeaves([]);
+    setPendingTeamOvertimeRows([]);
     setSubordinateProfileIds([]);
     setTeamAssignPicklist([]);
     if (admin) {
-      const { data: lv } = await supabase
-        .from('leave_requests')
-        .select('*')
-        .eq('status', 'pending')
-        .order('created_at', { ascending: false })
-        .limit(200);
+      const [{ data: lv }, { data: otRows }] = await Promise.all([
+        supabase
+          .from('leave_requests')
+          .select('*')
+          .eq('status', 'pending')
+          .order('created_at', { ascending: false })
+          .limit(200),
+        supabase
+          .from('attendance_overtime_requests')
+          .select(
+            'id,user_id,work_date,source,overtime_kind,plan_title,plan_start_at,plan_end_at,prompt_at,response_deadline_at,status,responded_at,auto_checked_out_at,approval_status,approved_by,approved_at,approval_note,reason,manual_minutes,manual_created_by,created_at,updated_at'
+          )
+          .eq('status', 'accepted')
+          .eq('approval_status', 'pending')
+          .order('work_date', { ascending: false })
+          .limit(200),
+      ]);
       setPendingTeamLeaves((lv as LeaveRequestRow[]) ?? []);
+      setPendingTeamOvertimeRows(
+        await buildOvertimeRowsWithCheckout((otRows as AttendanceOvertimeRequestRow[]) ?? [])
+      );
       const { data: pickRpc, error: pickErr } = await supabase.rpc('task_assign_picklist');
       if (!pickErr && pickRpc != null) {
         setTeamAssignPicklist(normalizeAssignPickRows(pickRpc));
@@ -414,19 +593,60 @@ export default function TeamScreen() {
         .filter((x): x is string => !!x) ?? [];
       setSubordinateProfileIds(ids);
       if (canL && ids.length > 0) {
-        const { data: lv } = await supabase
-          .from('leave_requests')
-          .select('*')
-          .eq('status', 'pending')
-          .in('user_id', ids)
-          .order('created_at', { ascending: false });
+        const [{ data: lv }, { data: otRows }] = await Promise.all([
+          supabase
+            .from('leave_requests')
+            .select('*')
+            .eq('status', 'pending')
+            .in('user_id', ids)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('attendance_overtime_requests')
+            .select(
+              'id,user_id,work_date,source,overtime_kind,plan_title,plan_start_at,plan_end_at,prompt_at,response_deadline_at,status,responded_at,auto_checked_out_at,approval_status,approved_by,approved_at,approval_note,reason,manual_minutes,manual_created_by,created_at,updated_at'
+            )
+            .eq('status', 'accepted')
+            .eq('approval_status', 'pending')
+            .in('user_id', ids)
+            .order('work_date', { ascending: false }),
+        ]);
         setPendingTeamLeaves((lv as LeaveRequestRow[]) ?? []);
+        setPendingTeamOvertimeRows(
+          await buildOvertimeRowsWithCheckout((otRows as AttendanceOvertimeRequestRow[]) ?? [])
+        );
       }
       const subSet = new Set(ids);
       const { data: pickRpc, error: pickErr } = await supabase.rpc('task_assign_picklist');
       if (!pickErr && pickRpc != null) {
         const all = normalizeAssignPickRows(pickRpc);
-        setTeamAssignPicklist(all.filter((r) => subSet.has(r.profile_id)));
+        const scoped = all.filter((r) => subSet.has(r.profile_id));
+        const missingIds = [...subSet].filter(
+          (id) => !scoped.some((row) => row.profile_id === id)
+        );
+        let missingRows: AssignPickRow[] = [];
+        if (missingIds.length > 0) {
+          const { data: missingProfiles } = await supabase
+            .from('profiles')
+            .select('id, email, full_name, employee_id')
+            .in('id', missingIds);
+          missingRows =
+            ((missingProfiles as {
+              id: string;
+              email: string | null;
+              full_name: string | null;
+              employee_id?: string | null;
+            }[]) ?? []).map((pr) => ({
+              profile_id: pr.id,
+              account_email: pr.email ?? null,
+              hr_user_id: null,
+              full_name: pr.full_name ?? null,
+              employee_id: pr.employee_id ? String(pr.employee_id) : null,
+              hr_name: null,
+              hr_surname: null,
+              hr_nickname: null,
+            }));
+        }
+        setTeamAssignPicklist([...scoped, ...missingRows]);
       } else {
         const fallback: AssignPickRow[] = profileRows
           .filter((pr) => subSet.has(pr.id))
@@ -443,7 +663,7 @@ export default function TeamScreen() {
         setTeamAssignPicklist(fallback);
       }
     }
-  }, [admin, managerScope, role, session?.user?.id]);
+  }, [admin, buildOvertimeRowsWithCheckout, managerScope, role, session?.user?.id]);
 
   useEffect(() => {
     let alive = true;
@@ -531,6 +751,7 @@ export default function TeamScreen() {
         { data: delegated },
         { data: logs },
         { data: lv },
+        { data: otRows },
         { data: noteRows },
         { data: chatRows },
       ] = await Promise.all([
@@ -556,15 +777,27 @@ export default function TeamScreen() {
           .eq('user_id', edit.id)
           .gte('created_at', startIso)
           .lte('created_at', endIso)
-          .in('kind', ['check_in', 'check_out'])
+          .in('kind', ['check_in', 'check_out', 'break_start', 'break_end'])
           .order('created_at', { ascending: true }),
         supabase
           .from('leave_requests')
-          .select('starts_on,ends_on')
+          .select(
+            'id,user_id,leave_type,starts_on,ends_on,reason,medical_certificate_url,supplementary_note,supplementary_document_url,status,created_at,is_kpi_exempt,admin_adjusted_by,admin_adjusted_at'
+          )
           .eq('user_id', edit.id)
           .in('status', ['pending', 'approved'])
           .lte('starts_on', period.endYmd)
           .gte('ends_on', period.startYmd),
+        supabase
+          .from('attendance_overtime_requests')
+          .select(
+            'id,user_id,work_date,source,overtime_kind,plan_title,plan_start_at,plan_end_at,prompt_at,response_deadline_at,status,responded_at,auto_checked_out_at,approval_status,approved_by,approved_at,approval_note,reason,manual_minutes,manual_created_by,created_at,updated_at'
+          )
+          .eq('user_id', edit.id)
+          .eq('status', 'accepted')
+          .gte('work_date', period.startYmd)
+          .lte('work_date', period.endYmd)
+          .order('work_date', { ascending: false }),
         supabase
           .from('community_notes')
           .select('body,created_at,updated_at')
@@ -583,7 +816,8 @@ export default function TeamScreen() {
       for (const t of merged) uniqueById.set(t.id, t);
       setMemberTasks([...uniqueById.values()]);
       setMemberLogs((logs as AttendanceLog[]) ?? []);
-      setMemberLeaves((lv as { starts_on: string; ends_on: string }[]) ?? []);
+      setMemberLeaves((lv as LeaveRequestRow[]) ?? []);
+      setMemberOvertimeRequests((otRows as AttendanceOvertimeRequestRow[]) ?? []);
       const latestNote = ((noteRows as { body?: string | null; created_at?: string; updated_at?: string }[]) ?? [])[0];
       const latestChat = ((chatRows as { body?: string | null; created_at?: string }[]) ?? [])[0];
       setMemberActivityNotes(
@@ -659,6 +893,15 @@ export default function TeamScreen() {
         { event: '*', schema: 'public', table: 'leave_requests' },
         () => {
           void load();
+          if (edit) void loadMemberDetail();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance_overtime_requests' },
+        () => {
+          void load();
+          if (edit) void loadMemberDetail();
         }
       )
       .subscribe();
@@ -678,35 +921,93 @@ export default function TeamScreen() {
 
   const summaryRows = useMemo<AttendanceSummaryRow[]>(() => {
     if (!edit) return [];
-    const leaveDays = new Set<string>();
+    const leaveByDate = new Map<string, LeaveRequestRow>();
     for (const lv of memberLeaves) {
-      for (const ymd of listYmd(lv.starts_on, lv.ends_on)) leaveDays.add(ymd);
+      for (const ymd of listYmd(lv.starts_on, lv.ends_on)) {
+        const current = leaveByDate.get(ymd);
+        if (!current || current.status !== 'approved') leaveByDate.set(ymd, lv);
+      }
     }
-    const logByDate = new Map<string, { checkIn?: AttendanceLog; checkOut?: AttendanceLog }>();
+    const overtimeByDate = new Map<string, AttendanceOvertimeRequestRow[]>();
+    for (const ot of memberOvertimeRequests) {
+      if (ot.status !== 'accepted' || !ot.reason?.trim()) continue;
+      const arr = overtimeByDate.get(ot.work_date) ?? [];
+      arr.push(ot);
+      overtimeByDate.set(ot.work_date, arr);
+    }
+    const logByDate = new Map<
+      string,
+      { checkIn?: AttendanceLog; checkOut?: AttendanceLog; logs: AttendanceLog[] }
+    >();
     for (const lg of memberLogs) {
       const ymd = ymdFromDate(new Date(lg.created_at));
-      const row = logByDate.get(ymd) ?? {};
+      const row = logByDate.get(ymd) ?? { logs: [] };
+      row.logs.push(lg);
       if (lg.kind === 'check_in' && !row.checkIn) row.checkIn = lg;
       if (lg.kind === 'check_out') row.checkOut = lg;
       logByDate.set(ymd, row);
     }
     return listYmd(period.startYmd, period.endYmd).map((ymd) => {
-      if (leaveDays.has(ymd)) {
+      const overtimeRows = overtimeByDate.get(ymd) ?? [];
+      const manualOvertime = overtimeRows.find((ot) => ot.overtime_kind === 'manual');
+      const manualOtMinutes = calculateOvertimeMinutes(manualOvertime, null, null);
+      const leave = leaveByDate.get(ymd);
+      if (leave) {
+        const leaveLabel = LEAVE_TYPE_TH[leave.leave_type] ?? 'ลา';
         return {
           dateYmd: ymd,
-          checkIn: 'ลา',
-          checkOut: 'ลา',
+          checkIn: leaveLabel,
+          checkOut: leaveLabel,
           employeeCode: code.trim() || '-',
-          checkInLocation: 'ลา',
+          checkInLocation: [
+            leaveLabel,
+            leave.is_kpi_exempt ? 'ปรับโดยแอดมิน/HR (ไม่นับ KPI)' : '',
+            leave.reason?.trim() ? `หมายเหตุ: ${leave.reason.trim()}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
           isLeave: true,
+          workMinutes: 0,
+          breakMinutes: 0,
+          overtimeMinutes: 0,
+          overtimeApprovalStatus: '-',
+          manualOtId: manualOvertime?.id,
+          manualOtMinutes,
+          manualOtReason: manualOvertime?.reason ?? '',
+          leaveId: leave.id,
+          leaveType: leave.leave_type,
+          leaveIsKpiExempt: !!leave.is_kpi_exempt,
         };
       }
       const day = logByDate.get(ymd);
       const location =
         day?.checkIn?.note?.trim() ||
+        day?.checkOut?.note?.trim() ||
         (day?.checkIn?.branch_id != null
           ? branches.find((b) => b.id === day.checkIn?.branch_id)?.branch_name ?? ''
           : '');
+      const breakMinutes = calculateBreakMinutes(day?.logs ?? [], day?.checkOut?.created_at);
+      const workMinutes = calculateWorkMinutes(
+        day?.checkIn?.created_at,
+        day?.checkOut?.created_at,
+        breakMinutes
+      );
+      const eligibleOvertimeRows = overtimeRows
+        .map((overtime) => ({
+          overtime,
+          minutes: calculateOvertimeMinutes(
+            overtime,
+            day?.checkOut?.created_at,
+            day?.checkIn?.created_at
+          ),
+        }))
+        .filter((row) =>
+          row.overtime.overtime_kind === 'manual' ? row.minutes > 0 : row.minutes >= 60
+        );
+      const overtimeMinutes = eligibleOvertimeRows.reduce(
+        (sum, row) => sum + row.minutes,
+        0
+      );
       return {
         dateYmd: ymd,
         checkIn: fmtBangkokTime(day?.checkIn?.created_at),
@@ -717,9 +1018,77 @@ export default function TeamScreen() {
         checkOutIso: day?.checkOut?.created_at,
         employeeCode: code.trim() || '-',
         checkInLocation: location,
+        workMinutes,
+        breakMinutes,
+        overtimeMinutes,
+        overtimeApprovalStatus:
+          eligibleOvertimeRows
+            .map((row) => overtimeSummaryStatusLabel(row.overtime))
+            .filter((x) => x !== '-')
+            .join(' / ') || '-',
+        manualOtId: manualOvertime?.id,
+        manualOtMinutes,
+        manualOtReason: manualOvertime?.reason ?? '',
       };
     });
-  }, [branches, code, edit, memberLeaves, memberLogs, period.endYmd, period.startYmd]);
+  }, [
+    branches,
+    code,
+    edit,
+    memberLeaves,
+    memberLogs,
+    memberOvertimeRequests,
+    period.endYmd,
+    period.startYmd,
+  ]);
+
+  const memberOvertimeDisplayRows = useMemo<MemberOvertimeDisplayRow[]>(() => {
+    const checkInByDate = new Map<string, string>();
+    const checkOutByDate = new Map<string, string>();
+    for (const lg of memberLogs) {
+      const ymd = ymdFromDate(new Date(lg.created_at));
+      if (lg.kind === 'check_in') {
+        const current = checkInByDate.get(ymd);
+        if (!current || new Date(lg.created_at).getTime() < new Date(current).getTime()) {
+          checkInByDate.set(ymd, lg.created_at);
+        }
+      }
+      if (lg.kind === 'check_out') {
+        const current = checkOutByDate.get(ymd);
+        if (!current || new Date(lg.created_at).getTime() > new Date(current).getTime()) {
+          checkOutByDate.set(ymd, lg.created_at);
+        }
+      }
+    }
+    return memberOvertimeRequests
+      .filter((row) => row.status === 'accepted' && !!row.reason?.trim())
+      .map((row) => {
+        const actualCheckInIso = checkInByDate.get(row.work_date) ?? null;
+        const actualCheckOutIso = checkOutByDate.get(row.work_date) ?? null;
+        const overtimeMinutes = calculateOvertimeMinutes(
+          row,
+          actualCheckOutIso,
+          actualCheckInIso
+        );
+        return { ...row, actualCheckInIso, actualCheckOutIso, overtimeMinutes };
+      })
+      .filter((row) =>
+        row.overtime_kind === 'manual' ? row.overtimeMinutes > 0 : row.overtimeMinutes >= 60
+      );
+  }, [memberLogs, memberOvertimeRequests]);
+
+  const attendancePeriodTotals = useMemo(
+    () =>
+      summaryRows.reduce(
+        (acc, row) => ({
+          workMinutes: acc.workMinutes + row.workMinutes,
+          breakMinutes: acc.breakMinutes + row.breakMinutes,
+          overtimeMinutes: acc.overtimeMinutes + row.overtimeMinutes,
+        }),
+        { workMinutes: 0, breakMinutes: 0, overtimeMinutes: 0 }
+      ),
+    [summaryRows]
+  );
 
   useEffect(() => {
     const next: Record<string, AttendanceEditDraft> = {};
@@ -728,6 +1097,9 @@ export default function TeamScreen() {
         checkIn: row.isLeave ? '' : row.checkIn,
         checkOut: row.isLeave ? '' : row.checkOut,
         location: row.isLeave ? '' : row.checkInLocation,
+        leaveType: row.leaveType ?? 'none',
+        manualOtHours: minutesToHourInput(row.manualOtMinutes),
+        manualOtReason: row.manualOtReason ?? '',
       };
     }
     setAttendanceEditDrafts(next);
@@ -968,6 +1340,21 @@ export default function TeamScreen() {
     [teamAssignPicklist, assignTeamSearch]
   );
 
+  const teamAnalyticsNameByProfile = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of profiles) {
+      map.set(
+        p.id,
+        p.nickname?.trim() ||
+          p.full_name?.trim() ||
+          p.email?.trim() ||
+          p.employee_code?.trim() ||
+          p.id.slice(0, 8)
+      );
+    }
+    return map;
+  }, [profiles]);
+
   const avatarUrlByProfileId = useMemo(() => {
     const m = new Map<string, string | null>();
     for (const pr of profilesRaw) {
@@ -977,7 +1364,7 @@ export default function TeamScreen() {
   }, [profilesRaw]);
 
   const managerTeamSectionStart = useMemo(() => {
-    return 1 + (mgrCanApproveLeave ? 1 : 0) + (mgrCanManageSchedule ? 1 : 0);
+    return 1 + (mgrCanApproveLeave ? 2 : 0) + (mgrCanManageSchedule ? 1 : 0);
   }, [mgrCanApproveLeave, mgrCanManageSchedule]);
 
   async function saveEdit() {
@@ -985,7 +1372,14 @@ export default function TeamScreen() {
       toast.info('ยังไม่มีข้อมูล employee', 'พนักงานคนนี้ยังไม่เชื่อมกับตาราง employee');
       return;
     }
-    const branchName = branchText.trim() || null;
+    const selectedBranch =
+      branchId != null ? branches.find((b) => b.id === branchId) ?? null : null;
+    const branchName =
+      selectedBranch?.branch_name?.trim() ||
+      selectedBranch?.branch_code?.trim() ||
+      branchText.trim() ||
+      null;
+    const branchCode = selectedBranch?.branch_code?.trim() || null;
     const nameParts = fullName.trim().split(/\s+/).filter(Boolean);
     const firstName = nameParts[0] ?? '';
     const surname = nameParts.slice(1).join(' ');
@@ -1000,11 +1394,24 @@ export default function TeamScreen() {
         position: positionText.trim() || null,
         branch_id: branchId,
         branch: branchName,
+        branch_code: branchCode,
       })
       .eq('id', editEmployee.id);
     if (error) {
       toast.error('บันทึกไม่สำเร็จ', error.message);
       return;
+    }
+    if (admin && edit?.id) {
+      const { error: profileBranchError } = await supabase
+        .from('profiles')
+        .update({ branch_id: branchId })
+        .eq('id', edit.id);
+      if (profileBranchError) {
+        toast.info(
+          'บันทึก employee แล้ว',
+          `แต่ยัง sync profiles.branch_id ไม่สำเร็จ: ${profileBranchError.message}`
+        );
+      }
     }
     await load();
     setEditEmployee((prev) =>
@@ -1018,6 +1425,7 @@ export default function TeamScreen() {
             position: positionText.trim() || null,
             branch_id: branchId,
             branch: branchName,
+            branch_code: branchCode,
           }
         : prev
     );
@@ -1087,6 +1495,29 @@ export default function TeamScreen() {
       await load();
     } finally {
       setLeaveActionId(null);
+    }
+  }
+
+  async function respondMemberOvertime(row: TeamOvertimeApprovalRow, approve: boolean) {
+    setOvertimeActionId(row.id);
+    try {
+      const { error } = await supabase.rpc('respond_overtime_approval', {
+        p_request_id: row.id,
+        p_approve: approve,
+        p_note: null,
+      });
+      if (error) throw error;
+      toast.success(
+        approve ? 'อนุมัติ OT แล้ว' : 'ปฏิเสธ OT แล้ว',
+        `${row.work_date} · ${formatDurationMinutesTh(row.overtimeMinutes)}`
+      );
+      setPendingTeamOvertimeRows((prev) => prev.filter((ot) => ot.id !== row.id));
+      await load();
+      if (edit) await loadMemberDetail();
+    } catch (e) {
+      toast.error('อัปเดต OT ไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setOvertimeActionId(null);
     }
   }
 
@@ -1230,7 +1661,7 @@ export default function TeamScreen() {
       latitude: null,
       longitude: null,
       within_branch: false,
-      note: kind === 'check_in' ? note.trim() || 'ปรับเวลาโดยแอดมิน/HR' : null,
+      note: note.trim() || (kind === 'check_in' ? 'ปรับเวลาโดยแอดมิน/HR' : null),
     };
     if (existingId) {
       const { error } = await supabase.from('attendance_logs').update(patch).eq('id', existingId);
@@ -1241,20 +1672,144 @@ export default function TeamScreen() {
     if (error) throw error;
   }
 
-  async function saveAttendanceEdit(row: AttendanceSummaryRow) {
-    if (!admin || !edit || row.isLeave) return;
-    const draft = attendanceEditDrafts[row.dateYmd];
-    if (!draft) return;
-    setAttendanceSavingYmd(row.dateYmd);
+  async function saveAdminLeaveAdjustment(row: AttendanceSummaryRow, leaveType: LeaveRequestType, note: string) {
+    if (!edit || !session?.user?.id) return;
+    const reason = note.trim() || 'บันทึกวันลาโดยแอดมิน/HR กรณีตกหล่น';
+    const patch = {
+      user_id: edit.id,
+      leave_type: leaveType,
+      starts_on: row.dateYmd,
+      ends_on: row.dateYmd,
+      reason,
+      status: 'approved',
+      is_kpi_exempt: true,
+      admin_adjusted_by: session.user.id,
+      admin_adjusted_at: new Date().toISOString(),
+    };
+    if (row.leaveId) {
+      if (!row.leaveIsKpiExempt) return;
+      const { error } = await supabase.from('leave_requests').update(patch).eq('id', row.leaveId);
+      if (error) throw error;
+      return;
+    }
+    const { error } = await supabase.from('leave_requests').insert(patch);
+    if (error) throw error;
+  }
+
+  async function removeAdminLeaveAdjustment(row: AttendanceSummaryRow) {
+    if (!row.leaveId || !row.leaveIsKpiExempt) return;
+    const { error } = await supabase.from('leave_requests').delete().eq('id', row.leaveId);
+    if (error) throw error;
+  }
+
+  async function saveManualOvertime(row: AttendanceSummaryRow, draft: AttendanceEditDraft) {
+    if (!edit) return;
+    const hourText = draft.manualOtHours.trim();
+    const reason = draft.manualOtReason.trim();
+    if (!hourText && !reason && !row.manualOtId) return;
+
+    if (!hourText && row.manualOtId) {
+      const { error } = await supabase.rpc('admin_set_manual_overtime', {
+        p_user_id: edit.id,
+        p_work_date: row.dateYmd,
+        p_minutes: 0,
+        p_reason: null,
+      });
+      if (error) throw error;
+      return;
+    }
+
+    const minutes = hourInputToMinutes(hourText);
+    if (!minutes) {
+      throw new Error(`วันที่ ${row.dateYmd} กรุณากรอกชั่วโมง OT เป็นตัวเลข เช่น 1 หรือ 1.5`);
+    }
+    if (!reason) {
+      throw new Error(`วันที่ ${row.dateYmd} กรุณาระบุเหตุผล OT แมนนวล`);
+    }
+    if (minutes === (row.manualOtMinutes ?? 0) && reason === (row.manualOtReason ?? '').trim()) {
+      return;
+    }
+
+    const { error } = await supabase.rpc('admin_set_manual_overtime', {
+      p_user_id: edit.id,
+      p_work_date: row.dateYmd,
+      p_minutes: minutes,
+      p_reason: reason,
+    });
+    if (error) throw error;
+  }
+
+  async function saveAllAttendanceEdits() {
+    if (!admin || !edit) return;
+    const editableRows = summaryRows;
+    if (editableRows.length === 0) {
+      toast.info('ไม่มีรายการที่บันทึกได้', 'ช่วงนี้เป็นวันลาหรือยังไม่มีแถวที่แก้ไขได้');
+      return;
+    }
+    for (const row of editableRows) {
+      const draft = attendanceEditDrafts[row.dateYmd];
+      if (!draft) continue;
+      const checkIn = draft.checkIn.trim();
+      const checkOut = draft.checkOut.trim();
+      const note = draft.location.trim();
+      const leaveType = draft.leaveType ?? 'none';
+      const manualOtHours = draft.manualOtHours.trim();
+      const manualOtReason = draft.manualOtReason.trim();
+      if (leaveType === 'none' && note && !checkIn && !checkOut && !row.checkInId && !row.checkOutId) {
+        toast.error(
+          'ยังบันทึกหมายเหตุไม่ได้',
+          `วันที่ ${row.dateYmd} กรุณากรอกเวลาเข้า/ออกอย่างน้อยหนึ่งช่อง หรือเลือกประเภทลา`
+        );
+        return;
+      }
+      if (leaveType === 'none' && checkIn && !timeInputToBangkokIso(row.dateYmd, checkIn)) {
+        toast.error('รูปแบบเวลาไม่ถูกต้อง', `วันที่ ${row.dateYmd} เวลาเข้างานต้องเป็น HH:mm เช่น 09:00`);
+        return;
+      }
+      if (leaveType === 'none' && checkOut && !timeInputToBangkokIso(row.dateYmd, checkOut)) {
+        toast.error('รูปแบบเวลาไม่ถูกต้อง', `วันที่ ${row.dateYmd} เวลาออกงานต้องเป็น HH:mm เช่น 18:00`);
+        return;
+      }
+      if (manualOtHours && !hourInputToMinutes(manualOtHours)) {
+        toast.error('รูปแบบ OT ไม่ถูกต้อง', `วันที่ ${row.dateYmd} ชั่วโมง OT ต้องเป็นตัวเลข เช่น 1 หรือ 1.5`);
+        return;
+      }
+      if (manualOtHours && !manualOtReason) {
+        toast.error('กรุณาระบุเหตุผล OT', `วันที่ ${row.dateYmd} ต้องระบุเหตุผลสำหรับ OT แมนนวล`);
+        return;
+      }
+      if (!manualOtHours && manualOtReason) {
+        toast.error('กรุณาระบุชั่วโมง OT', `วันที่ ${row.dateYmd} มีเหตุผล OT แต่ยังไม่ได้ใส่ชั่วโมง`);
+        return;
+      }
+    }
+    setAttendanceSavingAll(true);
     try {
-      await saveAttendanceLogForKind(row, 'check_in', draft.checkIn, draft.location);
-      await saveAttendanceLogForKind(row, 'check_out', draft.checkOut, draft.location);
-      toast.success('บันทึกเวลาแล้ว', `อัปเดตเวลาเข้า-ออกของวันที่ ${row.dateYmd}`);
+      let savedDays = 0;
+      for (const row of editableRows) {
+        const draft = attendanceEditDrafts[row.dateYmd];
+        if (!draft) continue;
+        if ((draft.leaveType ?? 'none') !== 'none') {
+          await saveAdminLeaveAdjustment(row, draft.leaveType as LeaveRequestType, draft.location);
+          await saveAttendanceLogForKind(row, 'check_in', '', '');
+          await saveAttendanceLogForKind(row, 'check_out', '', '');
+        } else {
+          await removeAdminLeaveAdjustment(row);
+          await saveAttendanceLogForKind(row, 'check_in', draft.checkIn, draft.location);
+          await saveAttendanceLogForKind(row, 'check_out', draft.checkOut, draft.location);
+        }
+        await saveManualOvertime(row, draft);
+        savedDays += 1;
+      }
+      toast.success(
+        'บันทึกเวลาทั้งหมดแล้ว',
+        `อัปเดตเวลาเข้า-ออก ${savedDays} วัน ในช่วง ${period.startYmd} - ${period.endYmd}`
+      );
       await loadMemberDetail();
     } catch (e) {
-      toast.error('บันทึกเวลาไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+      toast.error('บันทึกเวลาทั้งหมดไม่สำเร็จ', e instanceof Error ? e.message : String(e));
     } finally {
-      setAttendanceSavingYmd(null);
+      setAttendanceSavingAll(false);
     }
   }
 
@@ -1262,7 +1817,18 @@ export default function TeamScreen() {
     if (!edit || summaryRows.length === 0) return;
     setExporting(true);
     try {
-      const header = ['วันที่', 'เวลาเข้างาน', 'เวลาออกงาน', 'รหัสพนักงาน', 'สถานที่เข้างาน'];
+      const header = [
+        'วันที่',
+        'เวลาเข้างาน',
+        'เวลาออกงาน',
+        'เวลารวมทำงาน',
+        'เวลาพัก',
+        'OT',
+        'สถานะอนุมัติ OT',
+        'รหัสพนักงาน',
+        'สถานที่/หมายเหตุ',
+        'ประเภทลา',
+      ];
       const lines = [header.map(csvEscape).join(',')];
       for (const row of summaryRows) {
         lines.push(
@@ -1270,8 +1836,13 @@ export default function TeamScreen() {
             row.dateYmd,
             row.checkInIso ? fmtBangkokDateTimeCsv(row.checkInIso) : row.checkIn || '',
             row.checkOutIso ? fmtBangkokDateTimeCsv(row.checkOutIso) : row.checkOut || '',
+            formatDurationMinutesTh(row.workMinutes),
+            formatDurationMinutesTh(row.breakMinutes),
+            formatDurationMinutesTh(row.overtimeMinutes),
+            row.overtimeApprovalStatus,
             row.employeeCode,
             row.checkInLocation || '',
+            row.leaveType ? LEAVE_TYPE_TH[row.leaveType] ?? row.leaveType : '',
           ]
             .map(csvEscape)
             .join(',')
@@ -1313,8 +1884,13 @@ export default function TeamScreen() {
           <td>${htmlEscape(
             row.checkOutIso ? fmtBangkokDateTimeCsv(row.checkOutIso) : row.checkOut
           )}</td>
+          <td>${htmlEscape(formatDurationMinutesTh(row.workMinutes))}</td>
+          <td>${htmlEscape(formatDurationMinutesTh(row.breakMinutes))}</td>
+          <td>${htmlEscape(formatDurationMinutesTh(row.overtimeMinutes))}</td>
+          <td>${htmlEscape(row.overtimeApprovalStatus)}</td>
           <td>${htmlEscape(row.employeeCode)}</td>
           <td>${htmlEscape(row.checkInLocation || '')}</td>
+          <td>${htmlEscape(row.leaveType ? LEAVE_TYPE_TH[row.leaveType] ?? row.leaveType : '')}</td>
         </tr>`
         )
         .join('');
@@ -1330,7 +1906,7 @@ export default function TeamScreen() {
       )}</h3>
       <p>ช่วง ${htmlEscape(period.startYmd)} ถึง ${htmlEscape(period.endYmd)}</p>
       <table><thead><tr>
-      <th>วันที่</th><th>เวลาเข้างาน</th><th>เวลาออกงาน</th><th>รหัสพนักงาน</th><th>สถานที่เข้างาน</th>
+      <th>วันที่</th><th>เวลาเข้างาน</th><th>เวลาออกงาน</th><th>เวลารวมทำงาน</th><th>เวลาพัก</th><th>OT</th><th>สถานะอนุมัติ OT</th><th>รหัสพนักงาน</th><th>สถานที่/หมายเหตุ</th><th>ประเภทลา</th>
       </tr></thead><tbody>${rowsHtml}</tbody></table></body></html>`;
       if (Platform.OS === 'web') {
         const w = window.open('', '_blank');
@@ -1390,22 +1966,83 @@ export default function TeamScreen() {
     });
   }
 
+  function renderPendingOvertimeCards() {
+    if (pendingTeamOvertimeRows.length === 0) {
+      return <Text style={styles.mutedSmall}>ไม่มีคำขอ OT รออนุมัติ</Text>;
+    }
+    return pendingTeamOvertimeRows.map((row) => {
+      const profile = profiles.find((p) => p.id === row.user_id);
+      const who = profile?.full_name || profile?.email || row.user_id.slice(0, 8);
+      const busy = overtimeActionId === row.id;
+      const canApprove =
+        row.overtimeMinutes >= 60 &&
+        !!row.reason?.trim() &&
+        (row.overtime_kind === 'before_work' ? !!row.actualCheckInIso : !!row.actualCheckOutIso);
+      return (
+        <View key={row.id} style={styles.leaveCard}>
+          <Text style={styles.leaveWho}>{who}</Text>
+          <Text style={styles.leaveMeta}>
+            {row.work_date} · {overtimeKindLabel(row)} · {row.plan_title || 'ตารางงาน'} ·{' '}
+            {overtimePlanTimeLabel(row)}
+          </Text>
+          <Text style={styles.leaveReason}>
+            {overtimeActualTimeLabel(row)} · OT คำนวณได้{' '}
+            {formatDurationMinutesTh(row.overtimeMinutes)}
+          </Text>
+          <Text style={styles.leaveReason}>เหตุผล: {row.reason?.trim()}</Text>
+          {!canApprove ? (
+            <Text style={styles.mutedSmall}>ยังไม่ครบเงื่อนไข OT 1 ชั่วโมง/เหตุผล/เวลาจริง</Text>
+          ) : (
+            <View style={styles.leaveActions}>
+              <Pressable
+                style={[styles.leaveBtn, styles.leaveBtnReject, busy && styles.disabled]}
+                disabled={busy}
+                onPress={() => void respondMemberOvertime(row, false)}>
+                <Text style={styles.leaveBtnRejectText}>ปฏิเสธ</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.leaveBtn, styles.leaveBtnOk, busy && styles.disabled]}
+                disabled={busy}
+                onPress={() => void respondMemberOvertime(row, true)}>
+                <Text style={styles.leaveBtnOkText}>
+                  {busy ? 'กำลังบันทึก...' : 'อนุมัติ'}
+                </Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      );
+    });
+  }
+
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดข้อมูลทีม"
+        subtitle="กำลังซิงค์รายชื่อพนักงาน คำขออนุมัติ และกราฟสรุปการทำงาน"
+      />
     );
   }
 
   const showTeamBranchPicker = managerScope && teamBranchKey == null;
+  const teamAnalyticsPanel = managerScope ? (
+    <WorkAnalyticsPanel
+      employeeNameByProfile={teamAnalyticsNameByProfile}
+    />
+  ) : null;
 
   const adminTopSections = admin ? (
     <View style={styles.managerTop}>
+      {teamAnalyticsPanel}
       <Text style={styles.h2}>1 · อนุมัติลา</Text>
       <Text style={styles.mutedSmall}>คำขอลาทั้งหมดที่รอดำเนินการในระบบ</Text>
       {renderPendingLeaveCards()}
-      <Text style={[styles.h2, { marginTop: 18 }]}>2 · เลือกกลุ่มตามสาขา</Text>
+      <Text style={[styles.h2, { marginTop: 18 }]}>2 · อนุมัติ OT</Text>
+      <Text style={styles.mutedSmall}>
+        แสดงเฉพาะรายการที่พนักงานกดขอ OT พร้อมเหตุผล และเวลาจริงครบ 1 ชั่วโมงขึ้นไป
+      </Text>
+      {renderPendingOvertimeCards()}
+      <Text style={[styles.h2, { marginTop: 18 }]}>3 · เลือกกลุ่มตามสาขา</Text>
       <Text style={styles.mutedSmall}>
         เลือกสาขาหรือกลุ่มพนักงานเพื่อดูรายชื่อและแก้ไขข้อมูล HR
       </Text>
@@ -1415,6 +2052,7 @@ export default function TeamScreen() {
   const managerTopSections =
     !admin && role === 'manager' ? (
       <View style={styles.managerTop}>
+        {teamAnalyticsPanel}
         {mgrCanApproveLeave ? (
           <>
             <Text style={styles.h2}>1 · อนุมัติลา</Text>
@@ -1422,12 +2060,17 @@ export default function TeamScreen() {
               คำขอที่รออนุมัติจากพนักงานภายใต้การดูแลของคุณ
             </Text>
             {renderPendingLeaveCards()}
+            <Text style={[styles.h2, { marginTop: 18 }]}>2 · อนุมัติ OT</Text>
+            <Text style={styles.mutedSmall}>
+              รายการ OT ที่ลูกทีมกดขอพร้อมเหตุผล และเวลาจริงครบ 1 ชั่วโมงขึ้นไป
+            </Text>
+            {renderPendingOvertimeCards()}
           </>
         ) : null}
         {mgrCanManageSchedule ? (
           <>
             <Text style={[styles.h2, { marginTop: mgrCanApproveLeave ? 18 : 0 }]}>
-              {mgrCanApproveLeave ? '2 · ' : '1 · '}ตารางงาน
+              {mgrCanApproveLeave ? '3 · ' : '1 · '}ตารางงาน
             </Text>
             <Text style={styles.mutedSmall}>
               จัดมอบหมายกะรายวันให้ลูกทีมได้จากแท็บ «ตาราง»
@@ -1646,12 +2289,54 @@ export default function TeamScreen() {
                     }
                   />
                   <Text style={styles.label}>สาขา</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="สาขา (employee.branch)"
-                    value={branchText}
-                    onChangeText={setBranchText}
-                  />
+                  <ScrollView
+                    horizontal
+                    style={styles.branchPicker}
+                    contentContainerStyle={styles.branchPickerContent}
+                    nestedScrollEnabled>
+                    <Pressable
+                      style={[
+                        styles.taskStatusChip,
+                        branchId == null && styles.taskStatusChipOn,
+                      ]}
+                      onPress={() => {
+                        setBranchId(null);
+                        setBranchText('');
+                      }}>
+                      <Text
+                        style={
+                          branchId == null
+                            ? styles.taskStatusChipTextOn
+                            : styles.taskStatusChipText
+                        }>
+                        ไม่ระบุ
+                      </Text>
+                    </Pressable>
+                    {branches.map((b) => (
+                      <Pressable
+                        key={b.id}
+                        style={[
+                          styles.taskStatusChip,
+                          branchId === b.id && styles.taskStatusChipOn,
+                        ]}
+                        onPress={() => {
+                          setBranchId(b.id);
+                          setBranchText(b.branch_name ?? b.branch_code ?? String(b.id));
+                        }}>
+                        <Text
+                          style={
+                            branchId === b.id
+                              ? styles.taskStatusChipTextOn
+                              : styles.taskStatusChipText
+                          }>
+                          {branchOptionLabel(b)}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                  <Text style={styles.branchPickerHint}>
+                    บันทึกแล้ว employee.branch / branch_code จะอิงจาก branch_information
+                  </Text>
                   <Pressable style={styles.save} onPress={saveEdit}>
                     <Text style={styles.saveText}>บันทึกลงตาราง employee</Text>
                   </Pressable>
@@ -1666,6 +2351,92 @@ export default function TeamScreen() {
               ) : null}
 
               <EmployeeLeaveLateProfilePanel userId={edit?.id} />
+
+              <Text style={styles.sectionTitle}>โอที</Text>
+              <Text style={styles.sectionSubText}>
+                คำนวณจากเวลาออกงานจริงเทียบกับเวลาเลิกงานตามตาราง และนับเฉพาะวันที่พนักงานกดขอทำ OT
+              </Text>
+              <View style={styles.overtimeCard}>
+                {memberOvertimeDisplayRows.length === 0 ? (
+                  <Text style={styles.mutedSmall}>ยังไม่มีคำขอ OT ในช่วงที่เลือก</Text>
+                ) : (
+                  <ScrollView style={styles.overtimeScroll} nestedScrollEnabled>
+                    {memberOvertimeDisplayRows.map((row) => {
+                      const canApprove =
+                        row.status === 'accepted' &&
+                        (row.approval_status ?? 'pending') === 'pending' &&
+                        row.overtimeMinutes >= 60 &&
+                        !!row.reason?.trim() &&
+                        (row.overtime_kind === 'before_work'
+                          ? !!row.actualCheckInIso
+                          : !!row.actualCheckOutIso);
+                      const busy = overtimeActionId === row.id;
+                      return (
+                        <View key={row.id} style={styles.overtimeRow}>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <View style={styles.overtimeTopLine}>
+                              <Text style={styles.overtimeDate}>{row.work_date}</Text>
+                              <Text
+                                style={[
+                                  styles.overtimeApprovalPill,
+                                  row.approval_status === 'approved'
+                                    ? styles.overtimeApprovalOk
+                                    : row.approval_status === 'rejected'
+                                      ? styles.overtimeApprovalReject
+                                      : styles.overtimeApprovalPending,
+                                ]}>
+                                {overtimeApprovalLabel(row.approval_status)}
+                              </Text>
+                            </View>
+                            <Text style={styles.overtimeMeta}>
+                              {overtimeKindLabel(row)} · {row.plan_title || 'ตารางงาน'} ·{' '}
+                              {overtimePlanTimeLabel(row)} · {overtimeActualTimeLabel(row)}
+                            </Text>
+                            <Text style={styles.overtimeMeta}>
+                              สถานะพนักงาน: {overtimeStatusLabel(row.status)} · OT คำนวณได้{' '}
+                              {formatDurationMinutesTh(row.overtimeMinutes)}
+                            </Text>
+                            {row.reason ? (
+                              <Text style={styles.overtimeMeta}>เหตุผล: {row.reason}</Text>
+                            ) : null}
+                            {row.approved_at ? (
+                              <Text style={styles.overtimeMeta}>
+                                อัปเดตโดยผู้อนุมัติ {fmtBangkokDateTimeShort(row.approved_at)}
+                              </Text>
+                            ) : null}
+                          </View>
+                          {canApprove ? (
+                            <View style={styles.overtimeActions}>
+                              <Pressable
+                                style={[
+                                  styles.overtimeActionBtn,
+                                  styles.overtimeRejectBtn,
+                                  busy && styles.disabled,
+                                ]}
+                                disabled={busy}
+                                onPress={() => void respondMemberOvertime(row, false)}>
+                                <Text style={styles.overtimeRejectText}>ปฏิเสธ</Text>
+                              </Pressable>
+                              <Pressable
+                                style={[
+                                  styles.overtimeActionBtn,
+                                  styles.overtimeApproveBtn,
+                                  busy && styles.disabled,
+                                ]}
+                                disabled={busy}
+                                onPress={() => void respondMemberOvertime(row, true)}>
+                                <Text style={styles.overtimeApproveText}>
+                                  {busy ? 'กำลังบันทึก...' : 'อนุมัติ'}
+                                </Text>
+                              </Pressable>
+                            </View>
+                          ) : null}
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                )}
+              </View>
 
               <Text style={styles.sectionTitle}>หน้างาน</Text>
               <Text style={styles.sectionSubText}>
@@ -1947,9 +2718,30 @@ export default function TeamScreen() {
               <Text style={styles.periodText}>
                 ช่วงที่แสดง: {period.startYmd} - {period.endYmd}
               </Text>
+              <View style={styles.durationSummaryGrid}>
+                <View style={styles.durationSummaryCard}>
+                  <Text style={styles.durationSummaryLabel}>เวลาทำงานรวม</Text>
+                  <Text style={styles.durationSummaryValue}>
+                    {formatDurationMinutesTh(attendancePeriodTotals.workMinutes)}
+                  </Text>
+                </View>
+                <View style={styles.durationSummaryCard}>
+                  <Text style={styles.durationSummaryLabel}>เวลาพักรวม</Text>
+                  <Text style={styles.durationSummaryValue}>
+                    {formatDurationMinutesTh(attendancePeriodTotals.breakMinutes)}
+                  </Text>
+                </View>
+                <View style={styles.durationSummaryCard}>
+                  <Text style={styles.durationSummaryLabel}>OT รวม</Text>
+                  <Text style={styles.durationSummaryValue}>
+                    {formatDurationMinutesTh(attendancePeriodTotals.overtimeMinutes)}
+                  </Text>
+                </View>
+              </View>
               {admin ? (
                 <Text style={styles.attendanceEditHint}>
-                  แอดมิน/HR สามารถแก้เวลาเป็นรูปแบบ HH:mm หรือเว้นว่างเพื่อลบเวลานั้นได้
+                  แอดมิน/HR สามารถแก้เวลาเป็นรูปแบบ HH:mm, ระบุสถานที่/หมายเหตุ, เลือกประเภทลา
+                  หรือเพิ่ม OT แมนนวลเป็นชั่วโมงพร้อมเหตุผลได้ โดยลาที่บันทึกจากหน้านี้จะนับโควตาจริงแต่ไม่นำไปหัก KPI
                 </Text>
               ) : null}
               <View style={styles.actions}>
@@ -1975,25 +2767,38 @@ export default function TeamScreen() {
                       <Text style={[styles.cell, styles.colDate, styles.headText]}>วันที่</Text>
                       <Text style={[styles.cell, styles.colTime, styles.headText]}>เวลาเข้างาน</Text>
                       <Text style={[styles.cell, styles.colTime, styles.headText]}>เวลาออกงาน</Text>
-                      <Text style={[styles.cell, styles.colCode, styles.headText]}>รหัสพนักงาน</Text>
-                      <Text style={[styles.cell, styles.colLoc, styles.headText]}>สถานที่เข้างาน</Text>
+                      <Text style={[styles.cell, styles.colDuration, styles.headText]}>เวลารวมทำงาน</Text>
+                      <Text style={[styles.cell, styles.colDuration, styles.headText]}>เวลาพัก</Text>
+                      <Text style={[styles.cell, styles.colDuration, styles.headText]}>OT</Text>
                       {admin ? (
-                        <Text style={[styles.cell, styles.colEditAction, styles.headText]}>
-                          แก้ไขเวลา
-                        </Text>
+                        <>
+                          <Text style={[styles.cell, styles.colManualOt, styles.headText]}>
+                            OT แมนนวล (ชม.)
+                          </Text>
+                          <Text style={[styles.cell, styles.colManualOtReason, styles.headText]}>
+                            เหตุผล OT
+                          </Text>
+                        </>
                       ) : null}
+                      <Text style={[styles.cell, styles.colOtStatus, styles.headText]}>สถานะ OT</Text>
+                      <Text style={[styles.cell, styles.colCode, styles.headText]}>รหัสพนักงาน</Text>
+                      <Text style={[styles.cell, styles.colLoc, styles.headText]}>สถานที่/หมายเหตุ</Text>
+                      <Text style={[styles.cell, styles.colLeave, styles.headText]}>ประเภทลา</Text>
                     </View>
                     {summaryRows.map((row) => {
                       const draft = attendanceEditDrafts[row.dateYmd] ?? {
                         checkIn: '',
                         checkOut: '',
                         location: '',
+                        leaveType: row.leaveType ?? 'none',
+                        manualOtHours: minutesToHourInput(row.manualOtMinutes),
+                        manualOtReason: row.manualOtReason ?? '',
                       };
-                      const rowBusy = attendanceSavingYmd === row.dateYmd;
+                      const isLeaveDraft = (draft.leaveType ?? 'none') !== 'none';
                       return (
                         <View key={row.dateYmd} style={styles.tableRow}>
                           <Text style={[styles.cell, styles.colDate]}>{row.dateYmd}</Text>
-                          {admin && !row.isLeave ? (
+                          {admin ? (
                             <TextInput
                               style={[styles.attendanceTimeInput, styles.colTime]}
                               value={draft.checkIn}
@@ -2006,14 +2811,14 @@ export default function TeamScreen() {
                                   },
                                 }))
                               }
-                              placeholder="HH:mm"
+                              placeholder={isLeaveDraft ? 'ลา' : 'HH:mm'}
                               placeholderTextColor={c.textMuted}
-                              editable={!rowBusy}
+                              editable={!attendanceSavingAll && !isLeaveDraft}
                             />
                           ) : (
                             <Text style={[styles.cell, styles.colTime]}>{row.checkIn}</Text>
                           )}
-                          {admin && !row.isLeave ? (
+                          {admin ? (
                             <TextInput
                               style={[styles.attendanceTimeInput, styles.colTime]}
                               value={draft.checkOut}
@@ -2026,15 +2831,62 @@ export default function TeamScreen() {
                                   },
                                 }))
                               }
-                              placeholder="HH:mm"
+                              placeholder={isLeaveDraft ? 'ลา' : 'HH:mm'}
                               placeholderTextColor={c.textMuted}
-                              editable={!rowBusy}
+                              editable={!attendanceSavingAll && !isLeaveDraft}
                             />
                           ) : (
                             <Text style={[styles.cell, styles.colTime]}>{row.checkOut}</Text>
                           )}
+                          <Text style={[styles.cell, styles.colDuration]}>
+                            {formatDurationMinutesTh(row.workMinutes)}
+                          </Text>
+                          <Text style={[styles.cell, styles.colDuration]}>
+                            {formatDurationMinutesTh(row.breakMinutes)}
+                          </Text>
+                          <Text style={[styles.cell, styles.colDuration]}>
+                            {formatDurationMinutesTh(row.overtimeMinutes)}
+                          </Text>
+                          {admin ? (
+                            <>
+                              <TextInput
+                                style={[styles.attendanceTimeInput, styles.colManualOt]}
+                                value={draft.manualOtHours}
+                                onChangeText={(text) =>
+                                  setAttendanceEditDrafts((prev) => ({
+                                    ...prev,
+                                    [row.dateYmd]: {
+                                      ...(prev[row.dateYmd] ?? draft),
+                                      manualOtHours: text,
+                                    },
+                                  }))
+                                }
+                                placeholder="เช่น 1.5"
+                                placeholderTextColor={c.textMuted}
+                                editable={!attendanceSavingAll}
+                                keyboardType="decimal-pad"
+                              />
+                              <TextInput
+                                style={[styles.attendanceLocationInput, styles.colManualOtReason]}
+                                value={draft.manualOtReason}
+                                onChangeText={(text) =>
+                                  setAttendanceEditDrafts((prev) => ({
+                                    ...prev,
+                                    [row.dateYmd]: {
+                                      ...(prev[row.dateYmd] ?? draft),
+                                      manualOtReason: text,
+                                    },
+                                  }))
+                                }
+                                placeholder="เหตุผล OT แมนนวล"
+                                placeholderTextColor={c.textMuted}
+                                editable={!attendanceSavingAll}
+                              />
+                            </>
+                          ) : null}
+                          <Text style={[styles.cell, styles.colOtStatus]}>{row.overtimeApprovalStatus}</Text>
                           <Text style={[styles.cell, styles.colCode]}>{row.employeeCode}</Text>
-                          {admin && !row.isLeave ? (
+                          {admin ? (
                             <TextInput
                               style={[styles.attendanceLocationInput, styles.colLoc]}
                               value={draft.location}
@@ -2049,36 +2901,71 @@ export default function TeamScreen() {
                               }
                               placeholder="สถานที่/หมายเหตุ"
                               placeholderTextColor={c.textMuted}
-                              editable={!rowBusy}
+                              editable={!attendanceSavingAll}
                             />
                           ) : (
                             <Text style={[styles.cell, styles.colLoc]}>{row.checkInLocation}</Text>
                           )}
                           {admin ? (
-                            <View style={[styles.cell, styles.colEditAction]}>
-                              {row.isLeave ? (
-                                <Text style={styles.attendanceEditMuted}>วันลา</Text>
-                              ) : (
-                                <Pressable
-                                  style={[
-                                    styles.attendanceSaveBtn,
-                                    rowBusy && styles.disabled,
-                                  ]}
-                                  disabled={rowBusy}
-                                  onPress={() => void saveAttendanceEdit(row)}>
-                                  <Text style={styles.attendanceSaveBtnText}>
-                                    {rowBusy ? 'กำลังบันทึก...' : 'บันทึก'}
-                                  </Text>
-                                </Pressable>
-                              )}
+                            <View style={[styles.leaveChoiceRow, styles.colLeave]}>
+                              {ATTENDANCE_LEAVE_CHOICES.map((choice) => {
+                                const on = (draft.leaveType ?? 'none') === choice.value;
+                                return (
+                                  <Pressable
+                                    key={choice.value}
+                                    style={[styles.leaveChoiceChip, on && styles.leaveChoiceChipOn]}
+                                    disabled={attendanceSavingAll || (!!row.leaveId && !row.leaveIsKpiExempt)}
+                                    onPress={() =>
+                                      setAttendanceEditDrafts((prev) => ({
+                                        ...prev,
+                                        [row.dateYmd]: {
+                                          ...(prev[row.dateYmd] ?? draft),
+                                          checkIn: choice.value === 'none' ? draft.checkIn : '',
+                                          checkOut: choice.value === 'none' ? draft.checkOut : '',
+                                          leaveType: choice.value,
+                                        },
+                                      }))
+                                    }>
+                                    <Text
+                                      style={[
+                                        styles.leaveChoiceChipText,
+                                        on && styles.leaveChoiceChipTextOn,
+                                      ]}>
+                                      {choice.label}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                              {row.leaveId && !row.leaveIsKpiExempt ? (
+                                <Text style={styles.leaveChoiceLocked}>คำขอลาปกติ</Text>
+                              ) : null}
                             </View>
-                          ) : null}
+                          ) : (
+                            <Text style={[styles.cell, styles.colLeave]}>
+                              {row.leaveType ? LEAVE_TYPE_TH[row.leaveType] : '-'}
+                            </Text>
+                          )}
                         </View>
                       );
                     })}
                   </View>
                 </ScrollView>
               )}
+              {admin && !detailLoading ? (
+                <Pressable
+                  style={[
+                    styles.attendanceSaveAllBtn,
+                    (attendanceSavingAll || detailLoading) && styles.disabled,
+                  ]}
+                  onPress={() => void saveAllAttendanceEdits()}
+                  disabled={attendanceSavingAll || detailLoading}>
+                  {attendanceSavingAll ? (
+                    <ActivityIndicator color={c.onAccent} />
+                  ) : (
+                    <Text style={styles.attendanceSaveAllBtnText}>บันทึกทั้งหมด</Text>
+                  )}
+                </Pressable>
+              ) : null}
 
               <View style={[styles.actions, { marginTop: 12 }]}>
                 <Pressable style={styles.closeBtn} onPress={() => setEdit(null)}>
@@ -2241,13 +3128,13 @@ export default function TeamScreen() {
               <Text style={styles.assignTeamLabel}>มอบหมายงานให้ *</Text>
               <Text style={styles.assignTeamHint}>
                 แตะแถวเพื่อเลือก/ยกเลิกหลายคน — แสดงชื่อจาก HR / โปรไฟล์
-                {admin ? '' : ' (เฉพาะลูกทีมที่แอดมินกำหนด)'} · ค้นหาจากชื่อ นามสกุล ชื่อเล่น หรืออีเมล
+                {admin ? '' : ' (เฉพาะคนในทีมที่แอดมินกำหนด รวม Admin/HR ได้)'} · ค้นหาจากชื่อ นามสกุล ชื่อเล่น หรืออีเมล
               </Text>
               {teamAssignPicklist.length === 0 ? (
                 <Text style={styles.assignTeamEmpty}>
                   {admin
                     ? 'ยังไม่มีรายชื่อพนักงาน — ตรวจสอบ RPC task_assign_picklist หรือสิทธิ์'
-                    : 'ยังไม่มีรายชื่อลูกทีม — ให้แอดมินกำหนด manager_direct_reports'}
+                    : 'ยังไม่มีรายชื่อในทีม — ให้แอดมินกำหนด manager_direct_reports รวม Admin/HR ได้'}
                 </Text>
               ) : (
                 <>
@@ -2644,6 +3531,14 @@ const styles = StyleSheet.create({
   },
   textArea: { minHeight: 72, textAlignVertical: 'top' },
   label: { fontWeight: '600', marginBottom: 6, color: c.textSecondary },
+  branchPicker: { flexGrow: 0, marginBottom: 4, maxHeight: 42 },
+  branchPickerContent: { gap: 6, paddingRight: 8 },
+  branchPickerHint: {
+    color: c.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
+    marginBottom: 8,
+  },
   list: { maxHeight: 180, marginBottom: 12 },
   row: { padding: 10, borderBottomWidth: 1, borderColor: c.borderSoft },
   rowOn: { backgroundColor: c.primaryLight },
@@ -2882,6 +3777,74 @@ const styles = StyleSheet.create({
   priorityChipText: { color: c.textSecondary, fontSize: 12, fontWeight: '600' },
   priorityChipTextOn: { color: c.primaryDark, fontWeight: '700' },
   periodText: { fontSize: 12, color: c.textSecondary, marginBottom: 8 },
+  overtimeCard: {
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    gap: 8,
+  },
+  overtimeScroll: { maxHeight: 360 },
+  overtimeRow: {
+    flexDirection: 'row',
+    gap: 10,
+    padding: 10,
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  overtimeTopLine: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 5,
+  },
+  overtimeDate: { color: c.text, fontSize: 14, fontWeight: '800' },
+  overtimeMeta: { color: c.textMuted, fontSize: 12, lineHeight: 18 },
+  overtimeApprovalPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: '800',
+    overflow: 'hidden',
+  },
+  overtimeApprovalOk: { backgroundColor: c.primaryLight, color: c.primaryDark },
+  overtimeApprovalReject: { backgroundColor: c.errorBg, color: c.error },
+  overtimeApprovalPending: { backgroundColor: c.lateNoticeBg, color: c.lateNoticeBar },
+  overtimeActions: { justifyContent: 'center', gap: 6, minWidth: 86 },
+  overtimeActionBtn: {
+    borderRadius: r.sm,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+  },
+  overtimeApproveBtn: { backgroundColor: c.primary, borderColor: c.primaryMuted },
+  overtimeRejectBtn: { backgroundColor: c.errorBg, borderColor: c.error + '55' },
+  overtimeApproveText: { color: c.onAccent, fontSize: 12, fontWeight: '800' },
+  overtimeRejectText: { color: c.error, fontSize: 12, fontWeight: '800' },
+  durationSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 10,
+  },
+  durationSummaryCard: {
+    flexGrow: 1,
+    minWidth: 150,
+    padding: 10,
+    borderRadius: r.md,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  durationSummaryLabel: { color: c.textMuted, fontSize: 11, fontWeight: '700' },
+  durationSummaryValue: { color: c.primaryDark, fontSize: 16, fontWeight: '900', marginTop: 3 },
   attendanceEditHint: {
     fontSize: 12,
     color: c.primaryDark,
@@ -2929,6 +3892,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   exportBtnAltText: { color: c.text, fontWeight: '700' },
+  attendanceSaveAllBtn: {
+    backgroundColor: c.primary,
+    borderRadius: r.sm,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 42,
+    marginTop: 12,
+  },
+  attendanceSaveAllBtnText: { color: c.onAccent, fontWeight: '800' },
   save: {
     backgroundColor: c.primary,
     paddingHorizontal: 18,
@@ -2948,8 +3922,13 @@ const styles = StyleSheet.create({
   cell: { paddingHorizontal: 8, paddingVertical: 8, fontSize: 12, color: c.text },
   colDate: { width: 110 },
   colTime: { width: 130 },
+  colDuration: { width: 125 },
+  colManualOt: { width: 140 },
+  colManualOtReason: { width: 230 },
+  colOtStatus: { width: 135 },
   colCode: { width: 110 },
   colLoc: { width: 210 },
+  colLeave: { width: 290 },
   colEditAction: { width: 120 },
   attendanceTimeInput: {
     paddingHorizontal: 8,
@@ -2973,6 +3952,29 @@ const styles = StyleSheet.create({
     borderColor: c.borderSoft,
     borderRadius: r.sm,
   },
+  leaveChoiceRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  leaveChoiceChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  leaveChoiceChipOn: {
+    backgroundColor: c.primaryLight,
+    borderColor: c.primaryMuted,
+  },
+  leaveChoiceChipText: { color: c.textSecondary, fontSize: 11, fontWeight: '700' },
+  leaveChoiceChipTextOn: { color: c.primaryDark },
+  leaveChoiceLocked: { width: '100%', color: c.textMuted, fontSize: 10, marginTop: 2 },
   attendanceSaveBtn: {
     backgroundColor: c.primary,
     borderRadius: r.sm,

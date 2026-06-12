@@ -22,6 +22,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { Video, ResizeMode } from 'expo-av';
 import { LinearGradient } from 'expo-linear-gradient';
 
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { CommunityFeedPostImage } from '@/components/CommunityFeedPostImage';
 import { UserAvatar } from '@/components/UserAvatar';
 import { ZoomableImage } from '@/components/ZoomableImage';
@@ -207,6 +208,7 @@ type LikerRow = {
 type FeedAspectPreset = 'square' | 'portrait' | 'landscape';
 
 const NOTE_TTL_MS = 24 * 60 * 60 * 1000;
+const COMMUNITY_FEED_LIMIT = 40;
 
 type ProfileLite = {
   id: string;
@@ -302,6 +304,8 @@ export default function CommunityScreen() {
   const reloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingReloadRef = useRef(false);
+  const loadSeqRef = useRef(0);
+  const myNoteDirtyRef = useRef(false);
   const storyCards = useMemo(
     () =>
       cards.filter(
@@ -431,9 +435,12 @@ export default function CommunityScreen() {
   }, [storyCards.length, query, storyFade, storySlideY]);
 
   const load = useCallback(async () => {
+    const loadSeq = ++loadSeqRef.current;
+    const isLatestLoad = () => loadSeq === loadSeqRef.current;
     const {
       data: { user },
     } = await supabase.auth.getUser();
+    if (!isLatestLoad()) return;
     const uid = user?.id ?? null;
     setActiveUserId(uid);
 
@@ -442,7 +449,7 @@ export default function CommunityScreen() {
       .select('id, full_name, email, avatar_url, employee_id, role')
       .order('full_name');
     if (pErr) {
-      toast.error('โหลดข้อมูลไม่สำเร็จ', pErr.message);
+      if (isLatestLoad()) toast.error('โหลดข้อมูลไม่สำเร็จ', pErr.message);
       return;
     }
 
@@ -535,7 +542,7 @@ export default function CommunityScreen() {
         .from('community_feed_posts')
         .select(feedSelectFull)
         .order('created_at', { ascending: false })
-        .limit(80);
+        .limit(COMMUNITY_FEED_LIMIT);
       feedRaw = (r1.data ?? null) as unknown[] | null;
       feedErr = r1.error;
       if (feedErr) {
@@ -543,7 +550,7 @@ export default function CommunityScreen() {
           .from('community_feed_posts')
           .select(feedSelectLegacy)
           .order('created_at', { ascending: false })
-          .limit(80);
+          .limit(COMMUNITY_FEED_LIMIT);
         if (!r2.error) {
           feedRaw = (r2.data ?? []) as unknown[];
           feedErr = null;
@@ -724,6 +731,7 @@ export default function CommunityScreen() {
       }
     }
 
+    if (!isLatestLoad()) return;
     setFeedPosts(feedErr ? [] : feedWithLikes);
     if (feedErr) {
       toast.error(
@@ -733,6 +741,7 @@ export default function CommunityScreen() {
     }
 
     const moodMap = await fetchLatestTodayEmojiByUserIds(userIds);
+    if (!isLatestLoad()) return;
     const empInfoMap: Record<string, { position: string; branch: string }> = {};
     for (const e of Object.values(empMap)) {
       empInfoMap[e.id] = {
@@ -798,9 +807,17 @@ export default function CommunityScreen() {
       return card;
     });
 
+    if (!isLatestLoad()) return;
     setCards(built);
     const mine = uid ? built.find((b) => b.user_id === uid) : null;
-    setMyNote(mine?.note?.body ?? '');
+    const serverNote = mine?.note?.body ?? '';
+    setMyNote((prev) => {
+      if (myNoteDirtyRef.current && prev.trim() !== serverNote.trim()) {
+        return prev;
+      }
+      myNoteDirtyRef.current = false;
+      return serverNote;
+    });
   }, [toast]);
 
   const onPullRefresh = useCallback(async () => {
@@ -854,13 +871,6 @@ export default function CommunityScreen() {
   }, [load]);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      scheduleReload();
-    }, 60_000);
-    return () => clearInterval(id);
-  }, [scheduleReload]);
-
-  useEffect(() => {
     return () => {
       if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current);
       if (maxWaitTimerRef.current) clearTimeout(maxWaitTimerRef.current);
@@ -868,6 +878,9 @@ export default function CommunityScreen() {
   }, []);
 
   useEffect(() => {
+    if (Platform.OS === 'web') {
+      return undefined;
+    }
     const channel = supabase
       .channel(`community_live_${activeUserId ?? 'guest'}`)
       .on(
@@ -893,26 +906,6 @@ export default function CommunityScreen() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'community_feed_likes' },
-        scheduleReload
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'attendance_logs' },
-        scheduleReload
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'tasks' },
-        scheduleReload
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'profiles' },
-        scheduleReload
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'leave_requests' },
         scheduleReload
       )
       .subscribe();
@@ -950,6 +943,7 @@ export default function CommunityScreen() {
       toast.error('บันทึกโน้ตไม่สำเร็จ', error.message);
       return;
     }
+    myNoteDirtyRef.current = false;
     toast.success('บันทึกโน้ตแล้ว', 'ทีมเห็นข้อความคุณในวงแหวนแล้วนะ ✨');
     await load();
   }
@@ -1240,9 +1234,10 @@ export default function CommunityScreen() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดคอมมูนิตี้"
+        subtitle="กำลังเตรียมประกาศ ฟีดรูปภาพ และโน้ตล่าสุดของทีม"
+      />
     );
   }
 
@@ -1334,6 +1329,10 @@ export default function CommunityScreen() {
         data={filteredFeed}
         keyExtractor={(p) => p.id}
         keyboardShouldPersistTaps="handled"
+        initialNumToRender={4}
+        maxToRenderPerBatch={3}
+        updateCellsBatchingPeriod={80}
+        windowSize={5}
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl
@@ -1490,7 +1489,10 @@ export default function CommunityScreen() {
               <TextInput
                 style={styles.input}
                 value={myNote}
-                onChangeText={(t) => setMyNote(t.slice(0, MY_NOTE_MAX_CHARS))}
+                onChangeText={(t) => {
+                  myNoteDirtyRef.current = true;
+                  setMyNote(t.slice(0, MY_NOTE_MAX_CHARS));
+                }}
                 placeholder="เขียนข้อความสั้นๆ ให้ทีมเห็น..."
                 multiline
                 maxLength={MY_NOTE_MAX_CHARS}

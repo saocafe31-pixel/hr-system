@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
+import FontAwesome from '@expo/vector-icons/FontAwesome';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import * as Sharing from 'expo-sharing';
@@ -7,7 +8,6 @@ import DateTimePicker, {
 } from '@react-native-community/datetimepicker';
 import {
   ActivityIndicator,
-  Alert,
   Image,
   Linking,
   Modal,
@@ -25,7 +25,9 @@ import {
   AdminEmployeeEditModal,
   ADMIN_NEW_EMPLOYEE_ID,
 } from '@/components/AdminEmployeeEditModal';
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { AdminManagerDelegationModal } from '@/components/AdminManagerDelegationModal';
+import { AdminPayrollPanel } from '@/components/AdminPayrollPanel';
 import { ZoomableImage } from '@/components/ZoomableImage';
 import { NatureTheme } from '@/constants/Theme';
 import { useAuth } from '@/contexts/AuthContext';
@@ -36,12 +38,23 @@ import {
   ANNOUNCEMENT_SETTINGS_KEY,
   buildAnnouncementSettingsValue,
   parseAnnouncementSettings,
+  type AnnouncementTransitionMode,
 } from '@/lib/announcementSlides';
 import {
   ATTENDANCE_KPI_SETTINGS_KEY,
   DEFAULT_ATTENDANCE_KPI_SETTINGS,
   parseAttendanceKpiSettings,
 } from '@/lib/attendanceKpi';
+import {
+  PAYROLL_COMPANY_INFO_KEY,
+  parsePayrollCompanyInfo,
+} from '@/lib/payrollCompanyInfo';
+import {
+  computeLateFromAttendanceData,
+  payrollPeriodCheckInIsoRange,
+  type AssignmentWithShiftTimes,
+  type LateActualFromScheduleRow,
+} from '@/lib/computeLateFromAttendance';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
 import { supabase } from '@/lib/supabase';
 import { uploadAnnouncementSlideFromUri } from '@/lib/uploadAnnouncementSlide';
@@ -52,6 +65,7 @@ import type {
   ExpenseClaimRow,
   Profile,
   SalaryClaimRow,
+  WorkScheduleRow,
 } from '@/lib/types';
 const BREAK_START_KEY = 'attendance_break_start_messages';
 const BREAK_END_KEY = 'attendance_break_end_messages';
@@ -63,12 +77,129 @@ const DEFAULT_KPI_SETTINGS_TEXT = JSON.stringify(
 type ClaimStatus = SalaryClaimRow['status'];
 type ClaimHistoryKind = 'salary' | 'expense';
 type ClaimHistoryStatusFilter = 'all' | Exclude<ClaimStatus, 'pending'>;
+type ExpensePayrollHandling = ExpenseClaimRow['payroll_handling'];
+type LateRankSortMode = 'count' | 'minutes';
+type AdminSectionKey =
+  | 'announcements'
+  | 'employees'
+  | 'managers'
+  | 'salaryClaims'
+  | 'expenseClaims'
+  | 'payroll'
+  | 'branches'
+  | 'breakMessages'
+  | 'kpi';
+type EmployeeConfirmAction = {
+  kind: 'resign' | 'delete';
+  row: AdminEmployeePasswordRow;
+};
+const ADMIN_SECTIONS: Array<{
+  key: AdminSectionKey;
+  no: string;
+  title: string;
+  subtitle: string;
+  icon: ComponentProps<typeof FontAwesome>['name'];
+}> = [
+  {
+    key: 'announcements',
+    no: '1',
+    title: 'รูปประกาศหน้าเข้า-ออกงาน',
+    subtitle: 'สไลด์และรูปหน้า attendance',
+    icon: 'image',
+  },
+  {
+    key: 'employees',
+    no: '2',
+    title: 'พนักงาน',
+    subtitle: 'employee + profiles',
+    icon: 'users',
+  },
+  {
+    key: 'managers',
+    no: '3',
+    title: 'ผู้จัดการ',
+    subtitle: 'สิทธิ์ & ลูกทีม',
+    icon: 'sitemap',
+  },
+  {
+    key: 'salaryClaims',
+    no: '4',
+    title: 'คำขอเบิกเงินเดือน',
+    subtitle: 'Claim Salary',
+    icon: 'credit-card',
+  },
+  {
+    key: 'expenseClaims',
+    no: '5',
+    title: 'คำขอเบิกเงิน',
+    subtitle: 'Expense Claim',
+    icon: 'file-text-o',
+  },
+  {
+    key: 'payroll',
+    no: '6',
+    title: 'Payroll / สลิปเงินเดือน',
+    subtitle: 'ฐานเงินเดือนและสลิป',
+    icon: 'money',
+  },
+  {
+    key: 'branches',
+    no: '7',
+    title: 'สาขา',
+    subtitle: 'branch_information',
+    icon: 'map-marker',
+  },
+  {
+    key: 'breakMessages',
+    no: '8',
+    title: 'ข้อความการ์ดพักเบรก',
+    subtitle: 'ข้อความ popup พัก/กลับงาน',
+    icon: 'coffee',
+  },
+  {
+    key: 'kpi',
+    no: '9',
+    title: 'ตั้งค่า KPI ลา / ขอเข้าสาย',
+    subtitle: 'เกณฑ์ KPI และ JSON ระบบ',
+    icon: 'sliders',
+  },
+];
 const CLAIM_HISTORY_STATUS_FILTERS: ClaimHistoryStatusFilter[] = [
   'all',
   'approved',
   'rejected',
   'paid',
 ];
+type AnalyticsLateRow = LateActualFromScheduleRow & { user_id: string };
+type WorkAnalyticsData = {
+  wellbeingRows: Array<{ user_id: string; score: number; created_at: string }>;
+  lateRows: AnalyticsLateRow[];
+  sickLeaveRows: Array<{
+    user_id: string;
+    starts_on: string;
+    ends_on: string;
+    status: string;
+    leave_type: string;
+  }>;
+};
+type ChartPoint = {
+  key: string;
+  label: string;
+  value: number;
+  sub?: string;
+};
+type AnalyticsMonthOption = {
+  key: string;
+  label: string;
+  rangeLabel: string;
+};
+type RankRow = {
+  userId: string;
+  name: string;
+  count: number;
+  minutes?: number;
+  days?: number;
+};
 type AnnouncementDraftItem =
   | { key: string; kind: 'saved'; url: string; durationSeconds: string }
   | { key: string; kind: 'pending'; localUri: string; durationSeconds: string };
@@ -106,6 +237,14 @@ function claimStatusLabelTh(status: ClaimStatus | 'all'): string {
     default:
       return status;
   }
+}
+
+function expensePayrollHandlingLabelTh(
+  handling: ExpensePayrollHandling | null | undefined
+): string {
+  if (handling === 'payroll') return 'ลง Payroll / สลิปเงินเดือน';
+  if (handling === 'direct') return 'จ่ายแยก ไม่ลงเงินเดือน';
+  return 'ยังไม่ได้เลือกวิธีจ่าย';
 }
 
 const WEB_MODAL_BACKDROP = Platform.select({
@@ -180,6 +319,33 @@ function attendancePeriodFromMonthKey(monthKey: string): { from: string; to: str
   return { from: ymdOf(from), to: ymdOf(to) };
 }
 
+function formatMonthOptionLabel(monthKey: string): string {
+  const [yy, mm] = monthKey.split('-');
+  const y = Number(yy);
+  const m = Number(mm);
+  if (!Number.isFinite(y) || !Number.isFinite(m)) return monthKey;
+  return new Intl.DateTimeFormat('th-TH-u-ca-gregory-nu-latn', {
+    month: 'long',
+    year: 'numeric',
+  }).format(new Date(y, m - 1, 1));
+}
+
+function analyticsMonthOptions(count = 15): AnalyticsMonthOption[] {
+  const out: AnalyticsMonthOption[] = [];
+  const base = new Date();
+  for (let i = 0; i < count; i += 1) {
+    const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+    const key = monthKeyOf(d);
+    const period = attendancePeriodFromMonthKey(key);
+    out.push({
+      key,
+      label: formatMonthOptionLabel(key),
+      rangeLabel: `${period.from} - ${period.to}`,
+    });
+  }
+  return out;
+}
+
 function parseYmdToDate(ymd: string): Date | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
   if (!m) return null;
@@ -191,6 +357,144 @@ function parseYmdToDate(ymd: string): Date | null {
   const dt = new Date(y, mo - 1, d);
   if (Number.isNaN(dt.getTime())) return null;
   return dt;
+}
+
+function ymdToBangkokDate(ymd: string): Date {
+  return new Date(`${ymd}T12:00:00+07:00`);
+}
+
+function enumerateYmdRange(from: string, to: string): string[] {
+  const out: string[] = [];
+  const d = ymdToBangkokDate(from);
+  const end = ymdToBangkokDate(to).getTime();
+  while (d.getTime() <= end) {
+    out.push(ymdOf(d));
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
+function countInclusiveDays(from: string, to: string): number {
+  const start = ymdToBangkokDate(from).getTime();
+  const end = ymdToBangkokDate(to).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+  return Math.floor((end - start) / 86_400_000) + 1;
+}
+
+function overlapInclusiveDays(
+  startsOn: string,
+  endsOn: string,
+  periodFrom: string,
+  periodTo: string
+): number {
+  const start = startsOn > periodFrom ? startsOn : periodFrom;
+  const end = endsOn < periodTo ? endsOn : periodTo;
+  return countInclusiveDays(start, end);
+}
+
+function bangkokYmdFromIso(iso: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(iso));
+}
+
+function shortThaiDayLabel(ymd: string): string {
+  return new Intl.DateTimeFormat('th-TH', {
+    day: 'numeric',
+    month: 'short',
+  }).format(ymdToBangkokDate(ymd));
+}
+
+function formatDurationMinutes(minutes: number): string {
+  const safe = Math.max(0, Math.round(minutes));
+  const h = Math.floor(safe / 60);
+  const m = safe % 60;
+  if (h > 0 && m > 0) return `${h} ชม. ${m} นาที`;
+  if (h > 0) return `${h} ชม.`;
+  return `${m} นาที`;
+}
+
+function MiniBarChart({
+  points,
+  maxValue,
+  valueSuffix,
+  color = c.primaryMuted,
+}: {
+  points: ChartPoint[];
+  maxValue?: number;
+  valueSuffix?: string;
+  color?: string;
+}) {
+  const max = maxValue ?? Math.max(1, ...points.map((p) => p.value));
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      <View style={styles.analyticsChartRow}>
+        {points.map((point) => {
+          const height = point.value <= 0 ? 4 : Math.max(8, (point.value / max) * 112);
+          return (
+            <View key={point.key} style={styles.analyticsBarCol}>
+              <View style={styles.analyticsBarTrack}>
+                <View style={[styles.analyticsBarFill, { height, backgroundColor: color }]} />
+              </View>
+              <Text style={styles.analyticsBarLabel} numberOfLines={2}>
+                {point.label}
+              </Text>
+              <Text style={styles.analyticsBarValue} numberOfLines={1}>
+                {point.value > 0
+                  ? `${point.value.toFixed(point.value % 1 ? 1 : 0)}${valueSuffix ?? ''}`
+                  : '—'}
+              </Text>
+              {point.sub ? (
+                <Text style={styles.analyticsBarSub} numberOfLines={1}>
+                  {point.sub}
+                </Text>
+              ) : null}
+            </View>
+          );
+        })}
+      </View>
+    </ScrollView>
+  );
+}
+
+function lateRequestMinutesByWorkDate(
+  rows: Array<{ work_date: string; minutes_late: number }>
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const row of rows) {
+    const ymd = String(row.work_date).slice(0, 10);
+    const minutes = Number(row.minutes_late);
+    if (!ymd || !Number.isFinite(minutes) || minutes <= 0) continue;
+    map.set(ymd, (map.get(ymd) ?? 0) + minutes);
+  }
+  return map;
+}
+
+function parseAssignmentRowsWithUser(rows: unknown[]): Array<AssignmentWithShiftTimes & { user_id: string }> {
+  const parsed: Array<AssignmentWithShiftTimes & { user_id: string }> = [];
+  for (const row of rows) {
+    const r = row as {
+      id?: string;
+      user_id?: string;
+      work_date?: string;
+      work_shifts?: unknown;
+    };
+    let ws = r.work_shifts as AssignmentWithShiftTimes['work_shifts'] | null;
+    if (Array.isArray(r.work_shifts)) {
+      ws = (r.work_shifts[0] as AssignmentWithShiftTimes['work_shifts']) ?? null;
+    }
+    if (!r.id || !r.user_id || !r.work_date) continue;
+    parsed.push({
+      id: String(r.id),
+      user_id: String(r.user_id),
+      work_date: String(r.work_date),
+      work_shifts: ws,
+    });
+  }
+  return parsed;
 }
 
 /** แปลงค่าจาก app_settings เป็น array ช่องแก้ไข — อย่างน้อย 1 ช่องว่าง */
@@ -208,6 +512,7 @@ function breakMessagesToEditorLines(raw: unknown): string[] {
 export default function AdminScreen() {
   const toast = useCuteToast();
   const { session } = useAuth();
+  const [activeSection, setActiveSection] = useState<AdminSectionKey | null>(null);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [legacyAuth, setLegacyAuth] = useState<AdminEmployeePasswordRow[]>([]);
@@ -228,10 +533,16 @@ export default function AdminScreen() {
   const [announcementUrlDraft, setAnnouncementUrlDraft] = useState('');
   const [announcementUploading, setAnnouncementUploading] = useState(false);
   const [announcementSlideHeightPx, setAnnouncementSlideHeightPx] = useState(160);
+  const [announcementTransitionMode, setAnnouncementTransitionMode] =
+    useState<AnnouncementTransitionMode>('slide');
   const [breakStartLines, setBreakStartLines] = useState<string[]>(['']);
   const [breakEndLines, setBreakEndLines] = useState<string[]>(['']);
   const [kpiSettingsText, setKpiSettingsText] = useState(DEFAULT_KPI_SETTINGS_TEXT);
   const [kpiSettingsSaving, setKpiSettingsSaving] = useState(false);
+  const [payrollCompanyName, setPayrollCompanyName] = useState('');
+  const [payrollCompanyAddressText, setPayrollCompanyAddressText] = useState('');
+  const [payrollCompanyJuristicId, setPayrollCompanyJuristicId] = useState('');
+  const [payrollCompanySaving, setPayrollCompanySaving] = useState(false);
   const [editEmployeeId, setEditEmployeeId] = useState<string | null>(null);
   const [editPreview, setEditPreview] = useState<AdminEmployeePasswordRow | null>(
     null
@@ -257,8 +568,12 @@ export default function AdminScreen() {
     url: string;
     name: string | null;
   } | null>(null);
+  const [expenseApprovalPrompt, setExpenseApprovalPrompt] =
+    useState<ExpenseClaimRow | null>(null);
   const [employeeSearch, setEmployeeSearch] = useState('');
   const [employeeActionBusyId, setEmployeeActionBusyId] = useState<string | null>(null);
+  const [employeeConfirmAction, setEmployeeConfirmAction] =
+    useState<EmployeeConfirmAction | null>(null);
   const [claimHistoryKind, setClaimHistoryKind] = useState<ClaimHistoryKind | null>(null);
   const [claimHistoryStatusFilter, setClaimHistoryStatusFilter] =
     useState<ClaimHistoryStatusFilter>('all');
@@ -266,6 +581,16 @@ export default function AdminScreen() {
   const [claimDateFrom, setClaimDateFrom] = useState('');
   const [claimDateTo, setClaimDateTo] = useState('');
   const [datePickerTarget, setDatePickerTarget] = useState<'from' | 'to' | null>(null);
+  const [analyticsMonthFilter, setAnalyticsMonthFilter] = useState(monthKeyOf(new Date()));
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  const [lateRankSortMode, setLateRankSortMode] = useState<LateRankSortMode>('count');
+  const [workAnalytics, setWorkAnalytics] = useState<WorkAnalyticsData>({
+    wellbeingRows: [],
+    lateRows: [],
+    sickLeaveRows: [],
+  });
+  const analyticsMonthChoices = useMemo(() => analyticsMonthOptions(18), []);
 
   const fetchAdminEmployeePasswordList = useCallback(async () => {
     const { data, error } = await supabase.rpc('admin_list_employee_passwords');
@@ -323,6 +648,7 @@ export default function AdminScreen() {
       { data: breakStartRow },
       { data: breakEndRow },
       { data: kpiRow },
+      { data: payrollCompanyRow },
     ] =
       await Promise.all([
         supabase
@@ -345,9 +671,15 @@ export default function AdminScreen() {
           .select('value')
           .eq('key', ATTENDANCE_KPI_SETTINGS_KEY)
           .maybeSingle(),
+        supabase
+          .from('app_settings')
+          .select('value')
+          .eq('key', PAYROLL_COMPANY_INFO_KEY)
+          .maybeSingle(),
       ]);
     const annParsed = parseAnnouncementSettings(annRow?.value);
     setAnnouncementSlideHeightPx(annParsed.slideHeightPx);
+    setAnnouncementTransitionMode(annParsed.transitionMode);
     setAnnouncementItems(
       annParsed.slides.map((slide, i) => ({
         key: newDraftKey(`s${i}`),
@@ -361,7 +693,122 @@ export default function AdminScreen() {
     setKpiSettingsText(
       JSON.stringify(parseAttendanceKpiSettings(kpiRow?.value), null, 2)
     );
+    const payrollCompanyInfo = parsePayrollCompanyInfo(payrollCompanyRow?.value);
+    setPayrollCompanyName(payrollCompanyInfo.name);
+    setPayrollCompanyAddressText(payrollCompanyInfo.addressLines.join('\n'));
+    setPayrollCompanyJuristicId(payrollCompanyInfo.juristicId);
   }, [fetchAdminEmployeePasswordList]);
+
+  const analyticsPeriod = useMemo(
+    () => attendancePeriodFromMonthKey(analyticsMonthFilter),
+    [analyticsMonthFilter]
+  );
+
+  const loadWorkAnalytics = useCallback(async () => {
+    const { fromIso, toIso } = payrollPeriodCheckInIsoRange(
+      analyticsPeriod.from,
+      analyticsPeriod.to
+    );
+    setAnalyticsLoading(true);
+    setAnalyticsError(null);
+    try {
+      const [
+        wellbeingRes,
+        assignmentRes,
+        legacyScheduleRes,
+        checkInRes,
+        lateRequestRes,
+        sickLeaveRes,
+      ] = await Promise.all([
+        supabase
+          .from('wellbeing_checkins')
+          .select('user_id, score, created_at')
+          .gte('created_at', fromIso)
+          .lte('created_at', toIso)
+          .order('created_at', { ascending: true }),
+        supabase
+          .from('work_schedule_assignments')
+          .select('id, user_id, work_date, work_shifts(name, start_time, end_time)')
+          .gte('work_date', analyticsPeriod.from)
+          .lte('work_date', analyticsPeriod.to)
+          .order('work_date', { ascending: true }),
+        supabase
+          .from('work_schedules')
+          .select('id, user_id, start_at, end_at, title, created_by')
+          .lte('start_at', toIso)
+          .gte('end_at', fromIso)
+          .order('start_at', { ascending: true }),
+        supabase
+          .from('attendance_logs')
+          .select('user_id, created_at')
+          .eq('kind', 'check_in')
+          .gte('created_at', fromIso)
+          .lte('created_at', toIso)
+          .order('created_at', { ascending: true }),
+        supabase
+          .from('late_requests')
+          .select('user_id, work_date, minutes_late')
+          .gte('work_date', analyticsPeriod.from)
+          .lte('work_date', analyticsPeriod.to),
+        supabase
+          .from('leave_requests')
+          .select('user_id, leave_type, starts_on, ends_on, status')
+          .eq('leave_type', 'sick')
+          .eq('status', 'approved')
+          .lte('starts_on', analyticsPeriod.to)
+          .gte('ends_on', analyticsPeriod.from)
+          .order('starts_on', { ascending: true }),
+      ]);
+      if (wellbeingRes.error) throw new Error(wellbeingRes.error.message);
+      if (assignmentRes.error) throw new Error(assignmentRes.error.message);
+      if (legacyScheduleRes.error) throw new Error(legacyScheduleRes.error.message);
+      if (checkInRes.error) throw new Error(checkInRes.error.message);
+      if (lateRequestRes.error) throw new Error(lateRequestRes.error.message);
+      if (sickLeaveRes.error) throw new Error(sickLeaveRes.error.message);
+      const assignments = parseAssignmentRowsWithUser((assignmentRes.data as unknown[]) ?? []);
+      const legacySchedules = (legacyScheduleRes.data as WorkScheduleRow[]) ?? [];
+      const checkIns =
+        (checkInRes.data as Array<{ user_id: string; created_at: string }>) ?? [];
+      const lateRequests =
+        (lateRequestRes.data as Array<{
+          user_id: string;
+          work_date: string;
+          minutes_late: number;
+        }>) ?? [];
+      const userIds = Array.from(
+        new Set([
+          ...assignments.map((row) => row.user_id),
+          ...legacySchedules.map((row) => row.user_id),
+          ...checkIns.map((row) => row.user_id),
+        ])
+      ).filter(Boolean);
+      const lateRows: AnalyticsLateRow[] = [];
+      for (const userId of userIds) {
+        const userLateRequests = lateRequests.filter((row) => row.user_id === userId);
+        const computed = computeLateFromAttendanceData({
+          startYmd: analyticsPeriod.from,
+          endYmd: analyticsPeriod.to,
+          assignments: assignments.filter((row) => row.user_id === userId),
+          legacySchedules: legacySchedules.filter((row) => row.user_id === userId),
+          checkIns: checkIns
+            .filter((row) => row.user_id === userId)
+            .map((row) => ({ created_at: row.created_at })),
+          lateRequestMinutesByYmd: lateRequestMinutesByWorkDate(userLateRequests),
+        });
+        lateRows.push(...computed.map((row) => ({ ...row, user_id: userId })));
+      }
+      setWorkAnalytics({
+        wellbeingRows: (wellbeingRes.data as WorkAnalyticsData['wellbeingRows']) ?? [],
+        lateRows,
+        sickLeaveRows: (sickLeaveRes.data as WorkAnalyticsData['sickLeaveRows']) ?? [],
+      });
+    } catch (e) {
+      setAnalyticsError(e instanceof Error ? e.message : String(e));
+      setWorkAnalytics({ wellbeingRows: [], lateRows: [], sickLeaveRows: [] });
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  }, [analyticsPeriod.from, analyticsPeriod.to]);
 
   function money(v: number | null | undefined) {
     return Number(v ?? 0).toLocaleString('th-TH', {
@@ -450,7 +897,8 @@ export default function AdminScreen() {
 
   async function updateExpenseClaimStatus(
     row: ExpenseClaimRow,
-    status: 'approved' | 'rejected' | 'paid'
+    status: 'approved' | 'rejected' | 'paid',
+    payrollHandling?: ExpensePayrollHandling
   ) {
     const busyKey = `expense-${row.id}-${status}`;
     setClaimActionBusyKey(busyKey);
@@ -458,6 +906,7 @@ export default function AdminScreen() {
     const note = noteDraft === undefined ? row.review_note : noteDraft.trim() || null;
     const actorId = session?.user?.id ?? null;
     const reviewedAt = new Date().toISOString();
+    const handlingDecided = payrollHandling === 'payroll' || payrollHandling === 'direct';
     const { error } = await supabase
       .from('expense_claims')
       .update({
@@ -465,6 +914,13 @@ export default function AdminScreen() {
         review_note: note,
         reviewed_at: reviewedAt,
         reviewed_by: actorId,
+        ...(handlingDecided
+          ? {
+              payroll_handling: payrollHandling,
+              payroll_handling_decided_by: actorId,
+              payroll_handling_decided_at: reviewedAt,
+            }
+          : {}),
       })
       .eq('id', row.id);
     if (error) {
@@ -482,6 +938,13 @@ export default function AdminScreen() {
               review_note: note,
               reviewed_at: reviewedAt,
               reviewed_by: actorId,
+              ...(handlingDecided
+                ? {
+                    payroll_handling: payrollHandling,
+                    payroll_handling_decided_by: actorId,
+                    payroll_handling_decided_at: reviewedAt,
+                  }
+                : {}),
             }
           : it
       )
@@ -491,6 +954,16 @@ export default function AdminScreen() {
       'อัปเดตสถานะแล้ว',
       `คำขอเบิกค่าใช้จ่ายถูกย้ายไปประวัติ (${claimStatusLabelTh(status)})`
     );
+  }
+
+  async function approveExpenseClaimWithHandling(
+    handling: Extract<ExpensePayrollHandling, 'payroll' | 'direct'>
+  ) {
+    const claim = expenseApprovalPrompt;
+    if (!claim) return;
+    const nextStatus: 'approved' | 'paid' = handling === 'payroll' ? 'approved' : 'paid';
+    setExpenseApprovalPrompt(null);
+    await updateExpenseClaimStatus(claim, nextStatus, handling);
   }
 
   async function exportSalaryClaimCsv() {
@@ -822,6 +1295,162 @@ export default function AdminScreen() {
       resignedPct: Math.round((resigned * 1000) / total) / 10,
     };
   }, [mergedEmployeeRows]);
+  const activeSectionMeta = useMemo(
+    () => ADMIN_SECTIONS.find((section) => section.key === activeSection) ?? null,
+    [activeSection]
+  );
+
+  const employeeNameByProfile = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of profiles) {
+      map.set(p.id, p.full_name?.trim() || p.email?.trim() || p.id.slice(0, 8));
+    }
+    for (const row of mergedEmployeeRows) {
+      if (!row.profile?.id) continue;
+      const nickname = String((row.employee as { nickname?: unknown }).nickname ?? '').trim();
+      const display = row.employee.display_name?.trim();
+      const profileName = row.profile.full_name?.trim() || row.profile.email?.trim();
+      map.set(row.profile.id, nickname || display || profileName || row.profile.id.slice(0, 8));
+    }
+    return map;
+  }, [mergedEmployeeRows, profiles]);
+
+  const workAnalyticsSummary = useMemo(() => {
+    const days = enumerateYmdRange(analyticsPeriod.from, analyticsPeriod.to);
+    const wellbeingBuckets = new Map<string, { sum: number; count: number }>();
+    for (const row of workAnalytics.wellbeingRows) {
+      const ymd = bangkokYmdFromIso(row.created_at);
+      const bucket = wellbeingBuckets.get(ymd) ?? { sum: 0, count: 0 };
+      bucket.sum += Number(row.score) || 0;
+      bucket.count += 1;
+      wellbeingBuckets.set(ymd, bucket);
+    }
+    const wellbeingPoints = days.map((ymd) => {
+      const bucket = wellbeingBuckets.get(ymd);
+      const value = bucket && bucket.count > 0 ? bucket.sum / bucket.count : 0;
+      return {
+        key: `wellbeing-${ymd}`,
+        label: shortThaiDayLabel(ymd),
+        value: Math.round(value * 10) / 10,
+      };
+    });
+    const wellbeingValues = wellbeingPoints.map((p) => p.value).filter((v) => v > 0);
+    const wellbeingAverage =
+      wellbeingValues.length > 0
+        ? wellbeingValues.reduce((sum, v) => sum + v, 0) / wellbeingValues.length
+        : 0;
+
+    const lateBuckets = new Map<string, { count: number; minutes: number }>();
+    const lateRank = new Map<string, { count: number; minutes: number }>();
+    for (const row of workAnalytics.lateRows) {
+      const minutes = Number(row.minutes_late) || 0;
+      const daily = lateBuckets.get(row.work_date) ?? { count: 0, minutes: 0 };
+      daily.count += 1;
+      daily.minutes += minutes;
+      lateBuckets.set(row.work_date, daily);
+      const ranked = lateRank.get(row.user_id) ?? { count: 0, minutes: 0 };
+      ranked.count += 1;
+      ranked.minutes += minutes;
+      lateRank.set(row.user_id, ranked);
+    }
+    const latePoints = days.map((ymd) => {
+      const bucket = lateBuckets.get(ymd);
+      return {
+        key: `late-${ymd}`,
+        label: shortThaiDayLabel(ymd),
+        value: bucket?.minutes ?? 0,
+        sub: bucket?.count ? `${bucket.count} ครั้ง` : undefined,
+      };
+    });
+    const lateActiveDays = latePoints.filter((p) => p.value > 0);
+    const lateTotalMinutes = workAnalytics.lateRows.reduce(
+      (sum, row) => sum + (Number(row.minutes_late) || 0),
+      0
+    );
+    const lateTotalCount = workAnalytics.lateRows.length;
+    const lateAverageMinutes = lateTotalCount > 0 ? lateTotalMinutes / lateTotalCount : 0;
+    const lateMaxDay = lateActiveDays.reduce(
+      (best, row) => (!best || row.value > best.value ? row : best),
+      null as ChartPoint | null
+    );
+    const lateMinDay = lateActiveDays.reduce(
+      (best, row) => (!best || row.value < best.value ? row : best),
+      null as ChartPoint | null
+    );
+    const topLateEmployees: RankRow[] = [...lateRank.entries()]
+      .map(([userId, value]) => ({
+        userId,
+        name: employeeNameByProfile.get(userId) ?? userId.slice(0, 8),
+        count: value.count,
+        minutes: value.minutes,
+      }))
+      .sort((a, b) =>
+        lateRankSortMode === 'minutes'
+          ? (b.minutes ?? 0) - (a.minutes ?? 0) || b.count - a.count
+          : b.count - a.count || (b.minutes ?? 0) - (a.minutes ?? 0)
+      )
+      .slice(0, 10);
+
+    const sickDaily = new Map<string, number>();
+    const sickRank = new Map<string, { count: number; days: number }>();
+    for (const row of workAnalytics.sickLeaveRows) {
+      const daysCount = overlapInclusiveDays(
+        row.starts_on,
+        row.ends_on,
+        analyticsPeriod.from,
+        analyticsPeriod.to
+      );
+      if (daysCount <= 0) continue;
+      const ranked = sickRank.get(row.user_id) ?? { count: 0, days: 0 };
+      ranked.count += 1;
+      ranked.days += daysCount;
+      sickRank.set(row.user_id, ranked);
+      for (const ymd of enumerateYmdRange(
+        row.starts_on > analyticsPeriod.from ? row.starts_on : analyticsPeriod.from,
+        row.ends_on < analyticsPeriod.to ? row.ends_on : analyticsPeriod.to
+      )) {
+        sickDaily.set(ymd, (sickDaily.get(ymd) ?? 0) + 1);
+      }
+    }
+    const sickLeavePoints = days.map((ymd) => ({
+      key: `sick-${ymd}`,
+      label: shortThaiDayLabel(ymd),
+      value: sickDaily.get(ymd) ?? 0,
+    }));
+    const topSickLeaveEmployees: RankRow[] = [...sickRank.entries()]
+      .map(([userId, value]) => ({
+        userId,
+        name: employeeNameByProfile.get(userId) ?? userId.slice(0, 8),
+        count: value.count,
+        days: value.days,
+      }))
+      .sort((a, b) => b.count - a.count || (b.days ?? 0) - (a.days ?? 0))
+      .slice(0, 10);
+
+    return {
+      wellbeingPoints,
+      wellbeingAverage,
+      latePoints,
+      lateTotalCount,
+      lateTotalMinutes,
+      lateAverageMinutes,
+      lateMaxDay,
+      lateMinDay,
+      topLateEmployees,
+      sickLeavePoints,
+      sickLeaveRequestCount: workAnalytics.sickLeaveRows.length,
+      sickLeaveTotalDays: [...sickRank.values()].reduce((sum, row) => sum + row.days, 0),
+      topSickLeaveEmployees,
+    };
+  }, [
+    analyticsPeriod.from,
+    analyticsPeriod.to,
+    employeeNameByProfile,
+    lateRankSortMode,
+    workAnalytics.lateRows,
+    workAnalytics.sickLeaveRows,
+    workAnalytics.wellbeingRows,
+  ]);
 
   const deleteEmployeeRecord = useCallback(
     async (row: AdminEmployeePasswordRow) => {
@@ -866,45 +1495,48 @@ export default function AdminScreen() {
     [load, toast]
   );
 
+  const closeEmployeeConfirmAction = useCallback(() => {
+    if (employeeActionBusyId !== null) return;
+    setEmployeeConfirmAction(null);
+  }, [employeeActionBusyId]);
+
+  const employeeConfirmTitle =
+    employeeConfirmAction?.kind === 'delete' ? 'ลบข้อมูลพนักงาน?' : 'บันทึกการลาออก?';
+  const employeeConfirmMessage =
+    employeeConfirmAction?.kind === 'delete'
+      ? 'จะลบแถวใน employee ถาวร — ข้อมูลที่อ้างอิง employee จะถูกปลดตามกฎ FK เช่น profiles.employee_id แต่บัญชี Auth ไม่ถูกลบ'
+      : 'จะบันทึกประวัติใน employee_resignations และตั้ง employee.status เป็นลาออก';
+  const employeeConfirmName = employeeConfirmAction
+    ? [
+        employeeConfirmAction.row.employee_no
+          ? `#${employeeConfirmAction.row.employee_no}`
+          : null,
+        employeeConfirmAction.row.display_name?.trim() || employeeConfirmAction.row.legacy_user_id,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : '';
+  const employeeConfirmBusy =
+    employeeConfirmAction != null && employeeActionBusyId === employeeConfirmAction.row.id;
+  const employeeConfirmDanger = employeeConfirmAction?.kind === 'delete';
+
   function confirmDeleteEmployee(row: AdminEmployeePasswordRow) {
-    const title = 'ลบข้อมูลพนักงาน?';
-    const msg =
-      'จะลบแถวใน employee ถาวร — ข้อมูลที่อ้างอิง employee จะถูกปลดตามกฎ FK (เช่น profiles.employee_id) บัญชี Auth ไม่ถูกลบ';
-    if (Platform.OS === 'web') {
-      if (
-        typeof globalThis !== 'undefined' &&
-        typeof (globalThis as unknown as { confirm?: (m: string) => boolean }).confirm ===
-          'function'
-      ) {
-        const ok = (globalThis as unknown as Window).confirm(`${title}\n\n${msg}`);
-        if (ok) void deleteEmployeeRecord(row);
-      }
-    } else {
-      Alert.alert(title, msg, [
-        { text: 'ยกเลิก', style: 'cancel' },
-        { text: 'ลบ', style: 'destructive', onPress: () => void deleteEmployeeRecord(row) },
-      ]);
-    }
+    setEmployeeConfirmAction({ kind: 'delete', row });
   }
 
   function confirmResignEmployee(row: AdminEmployeePasswordRow) {
-    const title = 'บันทึกการลาออก?';
-    const msg = 'จะบันทึกประวัติใน employee_resignations และตั้ง employee.status เป็นลาออก';
-    if (Platform.OS === 'web') {
-      if (
-        typeof globalThis !== 'undefined' &&
-        typeof (globalThis as unknown as { confirm?: (m: string) => boolean }).confirm ===
-          'function'
-      ) {
-        const ok = (globalThis as unknown as Window).confirm(`${title}\n\n${msg}`);
-        if (ok) void resignEmployeeRecord(row);
-      }
+    setEmployeeConfirmAction({ kind: 'resign', row });
+  }
+
+  async function runEmployeeConfirmAction() {
+    if (!employeeConfirmAction || employeeConfirmBusy) return;
+    const { kind, row } = employeeConfirmAction;
+    if (kind === 'delete') {
+      await deleteEmployeeRecord(row);
     } else {
-      Alert.alert(title, msg, [
-        { text: 'ยกเลิก', style: 'cancel' },
-        { text: 'ยืนยัน', onPress: () => void resignEmployeeRecord(row) },
-      ]);
+      await resignEmployeeRecord(row);
     }
+    setEmployeeConfirmAction(null);
   }
 
   const announcementPreviewUri = useMemo(() => {
@@ -1049,9 +1681,18 @@ export default function AdminScreen() {
 
   async function saveSetting() {
     if (!setKey.trim()) return;
+    let value: unknown = { text: setVal };
+    const trimmed = setVal.trim();
+    if (trimmed) {
+      try {
+        value = JSON.parse(trimmed) as unknown;
+      } catch {
+        value = { text: setVal };
+      }
+    }
     const { error } = await supabase.from('app_settings').upsert({
       key: setKey.trim(),
-      value: { text: setVal },
+      value,
     });
     if (error) {
       toast.error('บันทึกการตั้งค่าไม่สำเร็จ', error.message);
@@ -1059,6 +1700,31 @@ export default function AdminScreen() {
     }
     toast.success('บันทึกการตั้งค่าแล้ว', 'ค่าระบบอัปเดตแล้วนะ ✨');
     await load();
+  }
+
+  async function savePayrollCompanyInfo() {
+    setPayrollCompanySaving(true);
+    try {
+      const value = {
+        name: payrollCompanyName.trim(),
+        address_lines: payrollCompanyAddressText
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean),
+        juristic_id: payrollCompanyJuristicId.trim(),
+      };
+      const { error } = await supabase.from('app_settings').upsert({
+        key: PAYROLL_COMPANY_INFO_KEY,
+        value,
+      });
+      if (error) throw new Error(error.message);
+      toast.success('บันทึกข้อมูลบริษัทแล้ว', 'หัวสลิปเงินเดือนจะใช้ข้อมูลนี้ในการพิมพ์/ดาวน์โหลด PDF');
+      await load();
+    } catch (e) {
+      toast.error('บันทึกข้อมูลบริษัทไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setPayrollCompanySaving(false);
+    }
   }
 
   async function uploadAndSaveAnnouncementSlides() {
@@ -1079,7 +1745,8 @@ export default function AdminScreen() {
       }
       const value = buildAnnouncementSettingsValue(
         slides,
-        announcementSlideHeightPx
+        announcementSlideHeightPx,
+        announcementTransitionMode
       );
       const { error } = await supabase.from('app_settings').upsert({
         key: ANNOUNCEMENT_SETTINGS_KEY,
@@ -1094,9 +1761,16 @@ export default function AdminScreen() {
           durationSeconds: announcementDurationSecondsText(slide.duration_ms),
         }))
       );
+      const transitionLabel = value.transition_mode === 'fade' ? 'Fade' : 'Slide';
+      const durationList =
+        value.slides.length > 0
+          ? value.slides
+              .map((slide, i) => `#${i + 1} ${Math.round(slide.duration_ms / 1000)}s`)
+              .join(', ')
+          : 'ไม่มีภาพ';
       toast.success(
         'บันทึกภาพประกาศแล้ว',
-        'สไลด์จะแสดงที่หน้าเข้า-ออกงาน 🌱'
+        `อัปเดต ${value.slides.length} ภาพ · Transition: ${transitionLabel} · Height: ${value.slide_height_px}px · Duration: ${durationList}`
       );
       await load();
     } catch (e) {
@@ -1223,9 +1897,10 @@ export default function AdminScreen() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดหน้าแอดมิน"
+        subtitle="กำลังเตรียมข้อมูล HR สาขา สิทธิ์ผู้จัดการ และการตั้งค่าระบบ"
+      />
     );
   }
 
@@ -1236,6 +1911,8 @@ export default function AdminScreen() {
         style={styles.screen}
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled">
+        {activeSection === null ? (
+          <>
         <View style={styles.adminEmpDashboard}>
           <Text style={styles.adminEmpDashboardTitle}>สรุปพนักงาน (ตาราง employee)</Text>
           <Text style={styles.muted}>
@@ -1270,6 +1947,72 @@ export default function AdminScreen() {
           )}
         </View>
 
+        <View style={styles.adminMenuWrap}>
+          <Text style={styles.adminMenuTitle}>เลือกเมนูแอดมิน</Text>
+          <Text style={styles.adminMenuSub}>
+            แตะการ์ดเพื่อเปิดเฉพาะหมวดที่ต้องการจัดการ
+          </Text>
+          <View style={styles.adminMenuGrid}>
+            {ADMIN_SECTIONS.map((section) => {
+              const on = activeSection === section.key;
+              return (
+                <Pressable
+                  key={section.key}
+                  style={[styles.adminMenuCard, on && styles.adminMenuCardOn]}
+                  onPress={() => setActiveSection(section.key)}>
+                  <View style={styles.adminMenuCardTop}>
+                    <View style={[styles.adminMenuIcon, on && styles.adminMenuIconOn]}>
+                      <FontAwesome
+                        name={section.icon}
+                        size={18}
+                        color={on ? c.canvas : c.primaryDark}
+                      />
+                    </View>
+                    <Text style={[styles.adminMenuNo, on && styles.adminMenuNoOn]}>
+                      {section.no}
+                    </Text>
+                  </View>
+                  <View style={styles.adminMenuTextBox}>
+                    <Text
+                      style={[styles.adminMenuCardTitle, on && styles.adminMenuCardTitleOn]}
+                      numberOfLines={2}>
+                      {section.title}
+                    </Text>
+                    <Text
+                      style={[styles.adminMenuCardSub, on && styles.adminMenuCardSubOn]}
+                      numberOfLines={2}>
+                      {section.subtitle}
+                    </Text>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+          </>
+        ) : null}
+
+        {activeSectionMeta ? (
+          <View style={styles.adminSectionHeader}>
+            <Pressable style={styles.adminBackBtn} onPress={() => setActiveSection(null)}>
+              <FontAwesome name="arrow-left" size={14} color={c.primaryDark} />
+              <Text style={styles.adminBackBtnText}>กลับสู่เมนูแอดมิน</Text>
+            </Pressable>
+            <View style={styles.adminSectionHeaderTitleRow}>
+              <View style={styles.adminSectionHeaderIcon}>
+                <FontAwesome name={activeSectionMeta.icon} size={18} color={c.canvas} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.adminSectionHeaderNo}>หมวด {activeSectionMeta.no}</Text>
+                <Text style={styles.adminSectionHeaderTitle}>{activeSectionMeta.title}</Text>
+                <Text style={styles.adminSectionHeaderSub}>{activeSectionMeta.subtitle}</Text>
+              </View>
+            </View>
+          </View>
+        ) : null}
+
+        {activeSection === 'announcements' ? (
+          <View style={styles.adminSectionCard}>
         <Text style={styles.h2}>1 · รูปประกาศหน้าเข้า-ออกงาน</Text>
         <Text style={styles.muted}>
           เลือกรูปหรือ URL ก่อน — ลากลำดับด้วยปุ่มขึ้น/ลงได้ — ตั้งเวลาเฉพาะภาพได้
@@ -1292,6 +2035,32 @@ export default function AdminScreen() {
             }>
             <Text style={styles.annHeightBtnText}>+</Text>
           </Pressable>
+        </View>
+        <Text style={styles.label}>Transition</Text>
+        <View style={styles.annTransitionRow}>
+          {(
+            [
+              { key: 'slide', label: 'Slide' },
+              { key: 'fade', label: 'Fade' },
+            ] as const
+          ).map((option) => {
+            const on = announcementTransitionMode === option.key;
+            return (
+              <Pressable
+                key={option.key}
+                style={[styles.annTransitionChip, on && styles.annTransitionChipOn]}
+                onPress={() => setAnnouncementTransitionMode(option.key)}
+                disabled={announcementUploading}>
+                <Text
+                  style={[
+                    styles.annTransitionChipText,
+                    on && styles.annTransitionChipTextOn,
+                  ]}>
+                  {option.label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
         <Text style={styles.label}>ตัวอย่าง (สไลด์แรก)</Text>
         <View
@@ -1409,7 +2178,11 @@ export default function AdminScreen() {
             <Text style={styles.btnText}>อัปโหลดและบันทึกสไลด์</Text>
           )}
         </Pressable>
+          </View>
+        ) : null}
 
+        {activeSection === 'employees' ? (
+          <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 28 }]}>2 · พนักงาน (employee + profiles)</Text>
         <Text style={styles.warn}>
           รายชื่อจาก RPC admin_list_employee_passwords — เชื่อมกับ profiles ตาม employee_id,
@@ -1553,11 +2326,15 @@ export default function AdminScreen() {
             </ScrollView>
           </View>
         ) : null}
+          </View>
+        ) : null}
 
+        {activeSection === 'managers' ? (
+          <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 24 }]}>3 · ผู้จัดการ (สิทธิ์ & ลูกทีม)</Text>
         <Text style={styles.muted}>
-          กำหนดว่าใครอนุมัติลา / จัดตารางกะให้ลูกทีมได้ — เฉพาะพนักงานที่เลือกและเชื่อม employee
-          จึงจะเห็นในหน้า «ทีม» ของผู้จัดการ
+          กำหนดว่าใครอนุมัติลา / จัดตารางกะ / มอบหมายงานให้คนในทีมได้ — สามารถเลือก
+          Admin/HR เข้าทีมเพื่อให้ manager มอบหมายงานได้
         </Text>
         {profiles.filter((p) => p.role === 'manager').length === 0 ? (
           <Text style={styles.muted}>ยังไม่มีบัญชีที่บทบาทเป็น manager</Text>
@@ -1577,7 +2354,11 @@ export default function AdminScreen() {
               </View>
             ))
         )}
+          </View>
+        ) : null}
 
+        {activeSection === 'salaryClaims' ? (
+          <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 24 }]}>4 · คำขอเบิกเงินเดือน (Claim Salary)</Text>
         <Text style={styles.muted}>
           รายการรอดำเนินการจากหน้าโปรไฟล์ช่วงวันที่ 10-14 ของเดือน
@@ -1659,7 +2440,11 @@ export default function AdminScreen() {
         <Pressable style={styles.btn} onPress={() => void exportSalaryClaimCsv()}>
           <Text style={styles.btnText}>ส่งออกคิว Claim Salary เป็น CSV</Text>
         </Pressable>
+          </View>
+        ) : null}
 
+        {activeSection === 'expenseClaims' ? (
+          <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 24 }]}>5 · คำขอเบิกเงิน (Expense Claim)</Text>
         <Text style={styles.muted}>
           รายการรอดำเนินการ แสดงแยกรายการตามหลักฐานการเบิก
@@ -1716,7 +2501,7 @@ export default function AdminScreen() {
                   <Pressable
                     style={[styles.claimBtn, styles.claimBtnApprove, claimActionBusyKey !== null && styles.disabledSoft]}
                     disabled={claimActionBusyKey !== null}
-                    onPress={() => void updateExpenseClaimStatus(claim, 'approved')}>
+                    onPress={() => setExpenseApprovalPrompt(claim)}>
                     <Text style={styles.claimBtnText}>อนุมัติ</Text>
                   </Pressable>
                   <Pressable
@@ -1728,10 +2513,13 @@ export default function AdminScreen() {
                   <Pressable
                     style={[styles.claimBtn, styles.claimBtnPaid, claimActionBusyKey !== null && styles.disabledSoft]}
                     disabled={claimActionBusyKey !== null}
-                    onPress={() => void updateExpenseClaimStatus(claim, 'paid')}>
-                    <Text style={styles.claimBtnText}>จ่ายแล้ว</Text>
+                    onPress={() => void updateExpenseClaimStatus(claim, 'paid', 'direct')}>
+                    <Text style={styles.claimBtnText}>จ่ายแยก</Text>
                   </Pressable>
                 </View>
+                <Text style={styles.expensePayrollHint}>
+                  การอนุมัติจะถามก่อนว่าจะลง Payroll / สลิปเงินเดือน หรือจ่ายแยกไม่ลงเงินเดือน
+                </Text>
                 {items.length === 0 ? (
                   <Text style={styles.rowSub}>ยังไม่มีรายการย่อย</Text>
                 ) : (
@@ -1796,8 +2584,19 @@ export default function AdminScreen() {
         <Pressable style={styles.btn} onPress={() => void exportExpenseClaimCsv()}>
           <Text style={styles.btnText}>ส่งออกคิว Expense Claim เป็น CSV</Text>
         </Pressable>
+          </View>
+        ) : null}
 
-        <Text style={[styles.h2, { marginTop: 24 }]}>6 · สาขา (branch_information)</Text>
+        {activeSection === 'payroll' ? (
+          <View style={styles.adminSectionCard}>
+        <Text style={[styles.h2, { marginTop: 24 }]}>6 · Payroll / สลิปเงินเดือน</Text>
+        <AdminPayrollPanel />
+          </View>
+        ) : null}
+
+        {activeSection === 'branches' ? (
+          <View style={styles.adminSectionCard}>
+        <Text style={[styles.h2, { marginTop: 24 }]}>7 · สาขา (branch_information)</Text>
         <Text style={styles.muted}>
           รหัสสาขา (id) ต้องไม่ซ้ำ — ดึงจากตารางเดิมของคุณ
         </Text>
@@ -1884,6 +2683,11 @@ export default function AdminScreen() {
             </View>
           </View>
         ))}
+          </View>
+        ) : null}
+
+        {activeSection === 'breakMessages' ? (
+          <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 24 }]}>ข้อความการ์ดพักเบรก</Text>
         <Text style={styles.muted}>
           แต่ละช่อง = ข้อความหนึ่งแบบที่อาจถูกสุ่มแสดงบนป๊อปอัพ — กด «เพิ่มข้อความ» เพื่อเพิ่มตัวเลือก
@@ -1981,7 +2785,11 @@ export default function AdminScreen() {
         <Pressable style={styles.btn} onPress={saveBreakMessages}>
           <Text style={styles.btnText}>บันทึกข้อความพักเบรก</Text>
         </Pressable>
+          </View>
+        ) : null}
 
+        {activeSection === 'kpi' ? (
+          <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 24 }]}>ตั้งค่า KPI ลา / ขอเข้าสาย</Text>
         <Text style={styles.muted}>
           เกณฑ์นี้ใช้คำนวณการ์ด KPI ในหน้าโปรไฟล์แบบรายไตรมาสและภาพรวมปี — แก้ตัวเลขใน JSON ได้ทั้งหมด
@@ -2013,16 +2821,62 @@ export default function AdminScreen() {
           </Pressable>
         </View>
 
-        <Text style={[styles.h2, { marginTop: 24 }]}>ตั้งค่าระบบ (JSON text)</Text>
+        <View style={styles.payrollCompanyCard}>
+          <Text style={styles.h2}>ข้อมูลบริษัทบนหัวสลิปเงินเดือน</Text>
+          <Text style={styles.muted}>
+            ข้อมูลนี้จะแสดงมุมซ้ายบนของ PDF สลิปเงินเดือน ส่วนชื่อเอกสารและรอบเงินเดือนอยู่มุมขวา
+          </Text>
+          <Text style={styles.label}>ชื่อบริษัท</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="เช่น บริษัท ตัวอย่าง จำกัด"
+            placeholderTextColor={c.textMuted}
+            value={payrollCompanyName}
+            onChangeText={setPayrollCompanyName}
+          />
+          <Text style={styles.label}>ที่อยู่บริษัท</Text>
+          <TextInput
+            style={[styles.input, styles.companyAddressInput]}
+            placeholder={'กรอกที่อยู่ได้หลายบรรทัด\nเช่น 123 ถนนสุขุมวิท แขวง... เขต... กรุงเทพฯ'}
+            placeholderTextColor={c.textMuted}
+            value={payrollCompanyAddressText}
+            onChangeText={setPayrollCompanyAddressText}
+            multiline
+            textAlignVertical="top"
+          />
+          <Text style={styles.label}>เลขนิติบุคคล</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="เช่น 010555..."
+            placeholderTextColor={c.textMuted}
+            value={payrollCompanyJuristicId}
+            onChangeText={setPayrollCompanyJuristicId}
+          />
+          <Pressable
+            style={[styles.btn, payrollCompanySaving && styles.disabledSoft]}
+            disabled={payrollCompanySaving}
+            onPress={() => void savePayrollCompanyInfo()}>
+            {payrollCompanySaving ? (
+              <ActivityIndicator color={NatureTheme.colors.onAccent} />
+            ) : (
+              <Text style={styles.btnText}>บันทึกข้อมูลบริษัทบนสลิป</Text>
+            )}
+          </Pressable>
+        </View>
+
+        <Text style={[styles.h2, { marginTop: 24 }]}>ตั้งค่าระบบขั้นสูง (JSON text)</Text>
+        <Text style={styles.muted}>
+          ใช้สำหรับ key อื่น ๆ ที่ยังไม่มีฟอร์มเฉพาะ ถ้ากรอกเป็น JSON ที่ถูกต้อง ระบบจะบันทึกเป็น JSON โดยตรง
+        </Text>
         <TextInput
           style={styles.input}
-          placeholder="key"
+          placeholder="key เช่น payroll_company_info"
           value={setKey}
           onChangeText={setSetKey}
         />
         <TextInput
           style={[styles.input, styles.tall]}
-          placeholder="ค่า (เก็บเป็น { text: ... })"
+          placeholder={'ค่า JSON เช่น {"name":"ชื่อบริษัท","address_lines":["ที่อยู่บรรทัด 1"],"juristic_id":"เลขนิติบุคคล"}'}
           value={setVal}
           onChangeText={setSetVal}
           multiline
@@ -2030,7 +2884,73 @@ export default function AdminScreen() {
         <Pressable style={styles.btn} onPress={saveSetting}>
           <Text style={styles.btnText}>บันทึกการตั้งค่า</Text>
         </Pressable>
+          </View>
+        ) : null}
       </ScrollView>
+
+      <Modal
+        visible={expenseApprovalPrompt !== null}
+        transparent
+        animationType="fade"
+        presentationStyle="overFullScreen"
+        onRequestClose={() => setExpenseApprovalPrompt(null)}>
+        <Pressable
+          style={[styles.linkBackdrop, WEB_MODAL_BACKDROP]}
+          onPress={() => setExpenseApprovalPrompt(null)}>
+          <Pressable style={styles.expenseApprovalCard} onPress={() => {}}>
+            <Text style={styles.linkModalTitle}>อนุมัติ Expense Claim</Text>
+            <Text style={styles.linkModalSub}>
+              เลือกว่าจะนำยอดเบิกนี้เข้า Payroll / สลิปเงินเดือน หรือบันทึกเป็นการจ่ายแยก
+            </Text>
+            {expenseApprovalPrompt ? (
+              <View style={styles.expenseApprovalSummary}>
+                <Text style={styles.rowTitle}>
+                  {expenseApprovalPrompt.full_name || expenseApprovalPrompt.user_id.slice(0, 8)}
+                </Text>
+                <Text style={styles.rowSub}>
+                  ยอดรวม {money(expenseApprovalPrompt.total_amount)} บาท · บัญชี{' '}
+                  {expenseApprovalPrompt.bank_name ?? '-'} /{' '}
+                  {expenseApprovalPrompt.account_number ?? '-'}
+                </Text>
+              </View>
+            ) : null}
+            <View style={styles.expenseApprovalOptions}>
+              <Pressable
+                style={[styles.expenseApprovalOption, claimActionBusyKey !== null && styles.disabledSoft]}
+                disabled={claimActionBusyKey !== null}
+                onPress={() => void approveExpenseClaimWithHandling('payroll')}>
+                <Text style={styles.expenseApprovalOptionTitle}>
+                  ลง Payroll / สลิปเงินเดือน
+                </Text>
+                <Text style={styles.expenseApprovalOptionSub}>
+                  สถานะจะเป็นอนุมัติแล้ว และยอดนี้จะถูกดึงเข้าเงินคืน/เบิกจ่ายตอนคำนวณสลิป
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.expenseApprovalOption,
+                  styles.expenseApprovalOptionDirect,
+                  claimActionBusyKey !== null && styles.disabledSoft,
+                ]}
+                disabled={claimActionBusyKey !== null}
+                onPress={() => void approveExpenseClaimWithHandling('direct')}>
+                <Text style={styles.expenseApprovalOptionTitle}>
+                  บันทึกจ่ายแยก ไม่ลงเงินเดือน
+                </Text>
+                <Text style={styles.expenseApprovalOptionSub}>
+                  สถานะจะเป็นจ่ายแล้วทันที และยอดนี้จะไม่ถูกนำไปรวมใน Payroll / สลิปเงินเดือน
+                </Text>
+              </Pressable>
+            </View>
+            <Pressable
+              style={styles.expenseApprovalCancel}
+              disabled={claimActionBusyKey !== null}
+              onPress={() => setExpenseApprovalPrompt(null)}>
+              <Text style={styles.btnSecondaryText}>ยกเลิก</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal
         visible={claimHistoryKind !== null}
@@ -2210,6 +3130,9 @@ export default function AdminScreen() {
                         สถานะ: {claimStatusLabelTh(claim.status)} · ส่งเมื่อ {claim.created_at}
                       </Text>
                       <Text style={styles.rowSub}>
+                        การจ่าย: {expensePayrollHandlingLabelTh(claim.payroll_handling)}
+                      </Text>
+                      <Text style={styles.rowSub}>
                         บัญชี: {claim.bank_name ?? '-'} / {claim.account_number ?? '-'} · สาขา{' '}
                         {claim.branch_name ?? '-'}
                       </Text>
@@ -2228,7 +3151,13 @@ export default function AdminScreen() {
                               claimActionBusyKey !== null && styles.disabledSoft,
                             ]}
                             disabled={claimActionBusyKey !== null}
-                            onPress={() => void updateExpenseClaimStatus(claim, 'paid')}>
+                            onPress={() =>
+                              void updateExpenseClaimStatus(
+                                claim,
+                                'paid',
+                                claim.payroll_handling === 'direct' ? 'direct' : 'payroll'
+                              )
+                            }>
                             <Text style={styles.claimBtnText}>จ่ายแล้ว</Text>
                           </Pressable>
                         </View>
@@ -2418,11 +3347,84 @@ export default function AdminScreen() {
         </Pressable>
       </Modal>
 
+      <Modal
+        visible={employeeConfirmAction !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={closeEmployeeConfirmAction}>
+        <Pressable
+          style={[styles.employeeConfirmBackdrop, WEB_MODAL_BACKDROP]}
+          onPress={closeEmployeeConfirmAction}>
+          <Pressable style={styles.employeeConfirmCard} onPress={() => {}}>
+            <View
+              style={[
+                styles.employeeConfirmIcon,
+                employeeConfirmDanger
+                  ? styles.employeeConfirmIconDelete
+                  : styles.employeeConfirmIconResign,
+              ]}>
+              <FontAwesome
+                name={employeeConfirmDanger ? 'trash' : 'user-times'}
+                size={18}
+                color={employeeConfirmDanger ? c.error : c.warningTitle}
+              />
+            </View>
+            <Text style={styles.employeeConfirmTitle}>{employeeConfirmTitle}</Text>
+            <Text style={styles.employeeConfirmName} numberOfLines={2}>
+              {employeeConfirmName || employeeConfirmAction?.row.id.slice(0, 8) || 'พนักงาน'}
+            </Text>
+            <Text style={styles.employeeConfirmMessage}>{employeeConfirmMessage}</Text>
+            <View style={styles.employeeConfirmInfoBox}>
+              <Text style={styles.employeeConfirmInfoText}>
+                {employeeConfirmDanger
+                  ? 'การลบเป็นการลบข้อมูล employee ถาวร ควรใช้เฉพาะกรณีข้อมูลซ้ำหรือคีย์ผิด'
+                  : 'การลาออกจะเก็บประวัติไว้และยังตรวจสอบย้อนหลังได้จากข้อมูล HR'}
+              </Text>
+            </View>
+            <View style={styles.employeeConfirmActions}>
+              <Pressable
+                style={[
+                  styles.employeeConfirmCancelBtn,
+                  employeeConfirmBusy && styles.empActionBtnDisabled,
+                ]}
+                onPress={closeEmployeeConfirmAction}
+                disabled={employeeConfirmBusy}>
+                <Text style={styles.employeeConfirmCancelText}>ยกเลิก</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.employeeConfirmPrimaryBtn,
+                  employeeConfirmDanger
+                    ? styles.employeeConfirmDeleteBtn
+                    : styles.employeeConfirmResignBtn,
+                  employeeConfirmBusy && styles.empActionBtnDisabled,
+                ]}
+                onPress={() => void runEmployeeConfirmAction()}
+                disabled={employeeConfirmBusy}>
+                {employeeConfirmBusy ? (
+                  <ActivityIndicator color={employeeConfirmDanger ? c.error : c.warningTitle} />
+                ) : (
+                  <Text
+                    style={[
+                      styles.employeeConfirmPrimaryText,
+                      employeeConfirmDanger
+                        ? styles.employeeConfirmDeleteText
+                        : styles.employeeConfirmResignText,
+                    ]}>
+                    {employeeConfirmDanger ? 'ลบพนักงาน' : 'ยืนยันลาออก'}
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <AdminManagerDelegationModal
         visible={!!managerModalProfile}
         manager={managerModalProfile}
         candidateProfiles={profiles.filter(
-          (p) => p.role !== 'admin' && p.id !== managerModalProfile?.id
+          (p) => p.id !== managerModalProfile?.id
         )}
         onClose={() => setManagerModalProfile(null)}
         onSaved={() => {
@@ -2564,6 +3566,323 @@ const styles = StyleSheet.create({
     minWidth: 2,
     backgroundColor: c.textMuted,
   },
+  adminMenuWrap: {
+    marginBottom: 18,
+    padding: 14,
+    borderRadius: r.xl,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  adminMenuTitle: { fontSize: 18, fontWeight: '900', color: c.text, letterSpacing: 0.1 },
+  adminMenuSub: { marginTop: 5, marginBottom: 14, fontSize: 12, color: c.textMuted },
+  adminMenuGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    alignItems: 'stretch',
+  },
+  adminMenuCard: {
+    flexGrow: 0,
+    flexShrink: 0,
+    flexBasis: '47%',
+    maxWidth: '47%',
+    minWidth: 0,
+    minHeight: 148,
+    justifyContent: 'space-between',
+    padding: 14,
+    borderRadius: 18,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    shadowColor: c.shadow,
+    shadowOpacity: 0.18,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 2,
+  },
+  adminMenuCardOn: {
+    backgroundColor: c.primaryLight,
+    borderColor: c.primaryMuted,
+  },
+  adminMenuCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  adminMenuIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  adminMenuIconOn: {
+    backgroundColor: c.primary,
+    borderColor: c.primary,
+  },
+  adminMenuTextBox: { flex: 1, minWidth: 0 },
+  adminMenuNo: {
+    minWidth: 26,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: c.surfaceMuted,
+    color: c.primaryDark,
+    fontSize: 11,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  adminMenuNoOn: { backgroundColor: c.accentWarmLight, color: c.primaryDark },
+  adminMenuCardTitle: { color: c.text, fontSize: 14, lineHeight: 18, fontWeight: '900' },
+  adminMenuCardTitleOn: { color: c.text },
+  adminMenuCardSub: { marginTop: 6, color: c.textMuted, fontSize: 11.5, lineHeight: 16 },
+  adminMenuCardSubOn: { color: c.textSecondary },
+  adminSectionCard: {
+    marginTop: 4,
+    padding: 14,
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  adminSectionHeader: {
+    marginBottom: 12,
+    padding: 14,
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  adminBackBtn: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    marginBottom: 12,
+  },
+  adminBackBtnText: { color: c.primaryDark, fontSize: 12, fontWeight: '900' },
+  adminSectionHeaderTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  adminSectionHeaderIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: c.primary,
+  },
+  adminSectionHeaderNo: { color: c.primaryDark, fontSize: 11, fontWeight: '900' },
+  adminSectionHeaderTitle: { marginTop: 2, color: c.text, fontSize: 19, fontWeight: '900' },
+  adminSectionHeaderSub: { marginTop: 3, color: c.textMuted, fontSize: 12 },
+  analyticsPanel: {
+    marginBottom: 24,
+    padding: 14,
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  analyticsHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginBottom: 8,
+  },
+  analyticsMonthRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingBottom: 8,
+    marginBottom: 2,
+  },
+  analyticsMonthChip: {
+    minWidth: 148,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: r.md,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  analyticsMonthChipOn: {
+    backgroundColor: c.primaryLight,
+    borderColor: c.primary,
+  },
+  analyticsMonthChipText: { color: c.textSecondary, fontWeight: '800', fontSize: 13 },
+  analyticsMonthChipTextOn: { color: c.primaryDark },
+  analyticsMonthChipSub: { color: c.textMuted, fontSize: 10, marginTop: 3 },
+  analyticsMonthChipSubOn: { color: c.text },
+  analyticsStatGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  analyticsStatCard: {
+    flexGrow: 1,
+    flexBasis: '48%',
+    minWidth: 142,
+    padding: 12,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    borderLeftWidth: 4,
+  },
+  analyticsStatCardWellbeing: { borderLeftColor: c.checkIn },
+  analyticsStatCardLate: { borderLeftColor: c.lateNoticeBar },
+  analyticsStatCardSick: { borderLeftColor: '#9B86C4' },
+  analyticsStatHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginBottom: 6,
+  },
+  analyticsStatIconBubble: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  analyticsStatIconWellbeing: {
+    backgroundColor: 'rgba(166, 184, 116, 0.16)',
+    borderColor: 'rgba(166, 184, 116, 0.38)',
+  },
+  analyticsStatIconLate: {
+    backgroundColor: c.lateNoticeBg,
+    borderColor: 'rgba(224, 138, 79, 0.42)',
+  },
+  analyticsStatIconSick: {
+    backgroundColor: c.leaveSickBg,
+    borderColor: 'rgba(155, 134, 196, 0.42)',
+  },
+  analyticsStatLabel: { fontSize: 11, color: c.textMuted, fontWeight: '700', flexShrink: 1 },
+  analyticsStatValue: { fontSize: 18, color: c.primaryDark, fontWeight: '900', marginTop: 2 },
+  analyticsStatSub: { fontSize: 11, color: c.textSecondary, marginTop: 2 },
+  analyticsSectionTitle: {
+    marginTop: 14,
+    marginBottom: 8,
+    fontSize: 14,
+    fontWeight: '800',
+    color: c.text,
+  },
+  analyticsChartRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    paddingVertical: 6,
+    paddingRight: 8,
+  },
+  analyticsBarCol: {
+    width: 42,
+    alignItems: 'center',
+  },
+  analyticsBarTrack: {
+    height: 112,
+    width: 30,
+    justifyContent: 'flex-end',
+    alignItems: 'stretch',
+    backgroundColor: c.surfaceMuted,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  analyticsBarFill: {
+    width: '100%',
+    backgroundColor: c.primaryMuted,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+  },
+  analyticsBarLabel: {
+    marginTop: 5,
+    fontSize: 10,
+    color: c.textMuted,
+    textAlign: 'center',
+    minHeight: 26,
+  },
+  analyticsBarValue: {
+    fontSize: 10,
+    color: c.textSecondary,
+    fontVariant: ['tabular-nums'],
+    textAlign: 'center',
+  },
+  analyticsBarSub: {
+    fontSize: 9,
+    color: c.textMuted,
+    textAlign: 'center',
+  },
+  analyticsRankGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 14,
+  },
+  analyticsRankCard: {
+    flex: 1,
+    minWidth: 280,
+    padding: 10,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  analyticsRankTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: c.text,
+    marginBottom: 8,
+  },
+  analyticsSortRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 8,
+  },
+  analyticsSortChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 9,
+    borderRadius: 999,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  analyticsSortChipOn: {
+    backgroundColor: c.lateNoticeBg,
+    borderColor: c.lateNoticeBar,
+  },
+  analyticsSortChipText: { fontSize: 11, color: c.textMuted, fontWeight: '800' },
+  analyticsSortChipTextOn: { color: c.lateNoticeBar },
+  analyticsRankRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 6,
+    borderTopWidth: 1,
+    borderTopColor: c.borderSoft,
+  },
+  analyticsRankNo: {
+    width: 34,
+    fontSize: 12,
+    fontWeight: '900',
+    color: c.primaryDark,
+  },
+  analyticsRankName: { fontSize: 13, color: c.text, fontWeight: '700' },
+  analyticsRankMeta: { fontSize: 11, color: c.textMuted, marginTop: 2 },
   empCardActions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -2607,6 +3926,26 @@ const styles = StyleSheet.create({
   },
   annHeightBtnText: { fontSize: 20, fontWeight: '700', color: c.text },
   annHeightVal: { fontSize: 15, fontWeight: '700', color: c.text, minWidth: 56 },
+  annTransitionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  annTransitionChip: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.surfaceElevated,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+  },
+  annTransitionChipOn: {
+    borderColor: c.primaryMuted,
+    backgroundColor: c.primaryLight,
+  },
+  annTransitionChipText: { color: c.textSecondary, fontSize: 13, fontWeight: '700' },
+  annTransitionChipTextOn: { color: c.primaryDark, fontWeight: '800' },
   annPreviewBox: {
     borderRadius: r.sm,
     borderWidth: 1,
@@ -2634,6 +3973,16 @@ const styles = StyleSheet.create({
     color: c.text,
   },
   tall: { minHeight: 72, textAlignVertical: 'top' },
+  payrollCompanyCard: {
+    marginTop: 24,
+    marginBottom: 18,
+    padding: 14,
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  companyAddressInput: { minHeight: 96, textAlignVertical: 'top' },
   kpiSettingsInput: {
     minHeight: 320,
     fontFamily: Platform.select({ web: 'monospace', default: undefined }),
@@ -2775,6 +4124,63 @@ const styles = StyleSheet.create({
   claimBtnReject: { backgroundColor: c.error },
   claimBtnPaid: { backgroundColor: c.link },
   claimBtnText: { color: c.onAccent, fontWeight: '700' },
+  expensePayrollHint: {
+    marginTop: 6,
+    color: c.textMuted,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  expenseApprovalCard: {
+    width: '92%',
+    maxWidth: 520,
+    maxHeight: '86%',
+    alignSelf: 'center',
+    borderRadius: r.xl,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: 16,
+  },
+  expenseApprovalSummary: {
+    marginTop: 12,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  expenseApprovalOptions: {
+    gap: 10,
+  },
+  expenseApprovalOption: {
+    padding: 13,
+    borderRadius: r.md,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    backgroundColor: c.primaryLight,
+  },
+  expenseApprovalOptionDirect: {
+    borderColor: c.link,
+    backgroundColor: c.linkLight,
+  },
+  expenseApprovalOptionTitle: {
+    color: c.text,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  expenseApprovalOptionSub: {
+    marginTop: 4,
+    color: c.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  expenseApprovalCancel: {
+    alignSelf: 'flex-start',
+    marginTop: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
   claimFilterWrap: {
     borderWidth: 1,
     borderColor: c.borderSoft,
@@ -2928,6 +4334,118 @@ const styles = StyleSheet.create({
     color: 'rgba(248,250,252,0.72)',
     fontSize: 12,
   },
+  employeeConfirmBackdrop: {
+    flex: 1,
+    backgroundColor: c.overlay,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 18,
+  },
+  employeeConfirmCard: {
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: r.xl,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: 18,
+    alignItems: 'center',
+    shadowColor: c.shadow,
+    shadowOpacity: 0.28,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 14 },
+    elevation: 12,
+  },
+  employeeConfirmIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  employeeConfirmIconResign: {
+    backgroundColor: c.warningBg,
+    borderColor: c.warningBorder,
+  },
+  employeeConfirmIconDelete: {
+    backgroundColor: c.errorBg,
+    borderColor: 'rgba(229, 115, 115, 0.35)',
+  },
+  employeeConfirmTitle: {
+    fontSize: 19,
+    fontWeight: '900',
+    color: c.text,
+    textAlign: 'center',
+  },
+  employeeConfirmName: {
+    marginTop: 6,
+    fontSize: 14,
+    fontWeight: '800',
+    color: c.primaryDark,
+    textAlign: 'center',
+  },
+  employeeConfirmMessage: {
+    marginTop: 10,
+    fontSize: 13,
+    color: c.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  employeeConfirmInfoBox: {
+    alignSelf: 'stretch',
+    marginTop: 14,
+    borderRadius: r.sm,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surfaceMuted,
+    padding: 10,
+  },
+  employeeConfirmInfoText: {
+    fontSize: 12,
+    color: c.textMuted,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  employeeConfirmActions: {
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 16,
+  },
+  employeeConfirmCancelBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: r.sm,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  employeeConfirmCancelText: { color: c.textSecondary, fontWeight: '800', fontSize: 14 },
+  employeeConfirmPrimaryBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: r.sm,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  employeeConfirmResignBtn: {
+    backgroundColor: c.warningBg,
+    borderColor: c.warningBorder,
+  },
+  employeeConfirmDeleteBtn: {
+    backgroundColor: c.errorBg,
+    borderColor: 'rgba(229, 115, 115, 0.35)',
+  },
+  employeeConfirmPrimaryText: { fontWeight: '900', fontSize: 14 },
+  employeeConfirmResignText: { color: c.warningTitle },
+  employeeConfirmDeleteText: { color: c.error },
   linkBackdrop: {
     flex: 1,
     backgroundColor: c.overlay,

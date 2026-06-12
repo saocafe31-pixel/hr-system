@@ -4,6 +4,7 @@ import {
   Image,
   NativeSyntheticEvent,
   ImageLoadEventData,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -47,6 +48,11 @@ export function CommunityFeedPostImage({
       ? 16 / 9
       : remoteAspectCache.get(uri) ?? fallback
   );
+  const [webVideoActive, setWebVideoActive] = useState(false);
+
+  useEffect(() => {
+    setWebVideoActive(false);
+  }, [uri, mediaType]);
 
   useEffect(() => {
     if (mediaType === 'video') {
@@ -94,12 +100,21 @@ export function CommunityFeedPostImage({
         <Pressable
           style={StyleSheet.absoluteFillObject}
           onPress={() => onPressImage(postId)}>
-          <ZoomableImage
-            source={{ uri }}
-            style={styles.fill}
-            resizeMode="contain"
-            onLoad={onImageLoad}
-          />
+          {Platform.OS === 'web' ? (
+            <Image
+              source={{ uri }}
+              style={styles.fill}
+              resizeMode="contain"
+              onLoad={onImageLoad}
+            />
+          ) : (
+            <ZoomableImage
+              source={{ uri }}
+              style={styles.fill}
+              resizeMode="contain"
+              onLoad={onImageLoad}
+            />
+          )}
           {heartFlashPostId === postId ? (
             <Animated.View
               pointerEvents="none"
@@ -107,6 +122,15 @@ export function CommunityFeedPostImage({
               <Text style={styles.burstText}>♥</Text>
             </Animated.View>
           ) : null}
+        </Pressable>
+      ) : Platform.OS === 'web' && !webVideoActive ? (
+        <Pressable
+          style={[styles.fill, styles.videoPlaceholder]}
+          onPress={() => setWebVideoActive(true)}
+          accessibilityRole="button"
+          accessibilityLabel="โหลดวิดีโอ">
+          <Text style={styles.videoPlayIcon}>▶</Text>
+          <Text style={styles.videoPlaceholderText}>แตะเพื่อโหลดวิดีโอ</Text>
         </Pressable>
       ) : (
         <Video
@@ -129,6 +153,22 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   fill: { width: '100%', height: '100%' },
+  videoPlaceholder: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#111827',
+    gap: 8,
+  },
+  videoPlayIcon: {
+    color: '#FFFFFF',
+    fontSize: 42,
+    fontWeight: '900',
+  },
+  videoPlaceholderText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
   burst: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'center',

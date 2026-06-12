@@ -122,7 +122,7 @@ export type WorkScheduleRow = {
   created_by: string | null;
 };
 
-export type LeaveRequestType = 'sick' | 'personal' | 'vacation';
+export type LeaveRequestType = 'sick' | 'personal' | 'vacation' | 'unpaid';
 
 export type LeaveRequestRow = {
   id: string;
@@ -136,6 +136,9 @@ export type LeaveRequestRow = {
   supplementary_document_url: string | null;
   status: 'pending' | 'approved' | 'rejected';
   created_at: string;
+  is_kpi_exempt?: boolean | null;
+  admin_adjusted_by?: string | null;
+  admin_adjusted_at?: string | null;
 };
 
 export type VacationGrantRow = {
@@ -317,6 +320,9 @@ export type ExpenseClaimRow = {
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_note: string | null;
+  payroll_handling: 'undecided' | 'payroll' | 'direct';
+  payroll_handling_decided_by: string | null;
+  payroll_handling_decided_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -332,6 +338,71 @@ export type ExpenseClaimItemRow = {
   created_at: string;
 };
 
+export type PayrollCompensationRow = {
+  user_id: string;
+  base_salary: number;
+  position_allowance: number;
+  special_allowance: number;
+  diligence_allowance: number;
+  travel_allowance: number;
+  commission: number;
+  other_income: number;
+  overtime_hourly_rate_mode?: 'auto' | 'manual';
+  overtime_manual_hourly_rate?: number | null;
+  overtime_multiplier?: number | null;
+  social_security_mode: 'auto' | 'manual';
+  social_security_manual_amount: number | null;
+  withholding_tax_mode: 'auto' | 'manual';
+  withholding_tax_manual_amount: number | null;
+  notes: string | null;
+  updated_by: string | null;
+  updated_at: string;
+};
+
+export type PayrollSlipRow = {
+  id: string;
+  user_id: string;
+  employee_id: string | null;
+  cycle_key: string;
+  period_start: string;
+  period_end: string;
+  status: 'draft' | 'confirmed' | 'paid' | 'voided';
+  taxable_income: number;
+  reimbursement_total: number;
+  income_total: number;
+  deduction_total: number;
+  net_pay: number;
+  generated_by: string | null;
+  generated_at: string;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  paid_by?: string | null;
+  paid_at?: string | null;
+  voided_by?: string | null;
+  voided_at?: string | null;
+  void_reason?: string | null;
+  reissued_from_slip_id?: string | null;
+  employee_confirmed_by?: string | null;
+  employee_confirmed_at?: string | null;
+  notes: string | null;
+};
+
+export type PayrollItemKind = 'income' | 'deduction' | 'reimbursement';
+
+export type PayrollItemRow = {
+  id: string;
+  slip_id: string;
+  item_kind: PayrollItemKind;
+  item_code: string;
+  label: string;
+  amount: number;
+  taxable: boolean;
+  source_table: string | null;
+  source_id: string | null;
+  sort_order: number;
+  created_at: string;
+};
+
 export type FinanceClaimNotificationRow = {
   id: string;
   recipient_id: string;
@@ -343,4 +414,42 @@ export type FinanceClaimNotificationRow = {
   body: string;
   read_at: string | null;
   created_at: string;
+};
+
+export type StatusNotificationRow = {
+  id: string;
+  recipient_id: string;
+  actor_id: string | null;
+  event_type: 'leave_status' | 'overtime_status';
+  entity_kind: 'leave' | 'overtime';
+  entity_id: string;
+  status: string;
+  body: string;
+  read_at: string | null;
+  created_at: string;
+};
+
+export type AttendanceOvertimeRequestRow = {
+  id: string;
+  user_id: string;
+  work_date: string;
+  source: 'shift' | 'legacy' | 'manual';
+  overtime_kind?: 'after_work' | 'before_work' | 'manual';
+  plan_title: string | null;
+  plan_start_at: string;
+  plan_end_at: string;
+  prompt_at: string;
+  response_deadline_at: string;
+  status: 'pending' | 'accepted' | 'declined' | 'auto_checked_out';
+  responded_at: string | null;
+  auto_checked_out_at: string | null;
+  approval_status?: 'pending' | 'approved' | 'rejected';
+  approved_by?: string | null;
+  approved_at?: string | null;
+  approval_note?: string | null;
+  reason?: string | null;
+  manual_minutes?: number | null;
+  manual_created_by?: string | null;
+  created_at: string;
+  updated_at: string;
 };

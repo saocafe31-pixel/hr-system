@@ -376,6 +376,7 @@ export function LeaveRequestModal({
                     ['personal', 'ลากิจ'],
                     ['sick', 'ลาป่วย'],
                     ['vacation', 'ลาพักร้อน'],
+                    ['unpaid', 'ลาไม่รับเงิน'],
                   ] as const
                 ).map(([t, lab]) => (
                   <Pressable
@@ -398,6 +399,11 @@ export function LeaveRequestModal({
                 ลากิจเหลือ {personalRemaining} วัน · พักร้อนเหลือ{' '}
                 {vacationLeft.toFixed(1)} วัน
               </Text>
+              {leaveType === 'unpaid' ? (
+                <Text style={styles.warnBox}>
+                  ลาไม่รับเงินจะไม่ใช้โควต้าลา แต่จะถูกนำไปหักในสลิปเงินเดือนหลังอนุมัติ
+                </Text>
+              ) : null}
 
               <DatePickerField
                 label={`วันเริ่ม (ปี ${quotaYear})`}

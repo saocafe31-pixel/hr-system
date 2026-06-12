@@ -39,6 +39,13 @@ import type {
 const CREATE_ROLES: UserRole[] = ['employee', 'manager', 'admin'];
 const ROLE_CHIPS: UserRole[] = ['employee', 'manager', 'admin'];
 
+function branchLabel(branch: Branch): string {
+  const code = branch.branch_code?.trim();
+  const name = branch.branch_name?.trim();
+  if (name && code) return `${name} (${code})`;
+  return name || code || `สาขา #${branch.id}`;
+}
+
 function hrFormToDirectoryStub(
   f: EmployeeHrForm,
   empId: string
@@ -237,7 +244,7 @@ export function AdminEmployeeEditModal({
         toast.error('โหลดโควตาวันลาไม่สำเร็จ', vgRes.error.message);
       }
       const leaveRows = (lrRes.data ?? []) as Array<{
-        leave_type: 'sick' | 'personal' | 'vacation';
+        leave_type: 'sick' | 'personal' | 'vacation' | 'unpaid';
         starts_on: string;
         ends_on: string;
         status: string;
@@ -512,6 +519,18 @@ export function AdminEmployeeEditModal({
       });
       return;
     }
+    let profileBranchUpdateMessage = '';
+    if (targetUserId && !usedBranchFallback) {
+      const { error: profileBranchErr } = await supabase
+        .from('profiles')
+        .update({ branch_id: hr.branch_id })
+        .eq('id', targetUserId);
+      if (profileBranchErr) {
+        profileBranchUpdateMessage =
+          '\n\nหมายเหตุ: บันทึก employee แล้ว แต่ยัง sync profiles.branch_id ไม่สำเร็จ: ' +
+          profileBranchErr.message;
+      }
+    }
     if (usedBranchFallback) {
       setFeedback({
         variant: 'info',
@@ -522,7 +541,7 @@ export function AdminEmployeeEditModal({
     setFeedback({
       variant: 'success',
       title: 'อัปเดตข้อมูลพนักงานแล้ว',
-      message: 'ข้อมูล HR ถูกบันทึกแล้ว',
+      message: `ข้อมูล HR ถูกบันทึกแล้ว${profileBranchUpdateMessage}`,
     });
     onSaved();
   }
@@ -827,14 +846,14 @@ export function AdminEmployeeEditModal({
               {field('surname', 'นามสกุล')}
               {field('nickname', 'ชื่อเล่น')}
               {field('position', 'ตำแหน่ง')}
-              <Text style={styles.fieldLabel}>สาขา (UUID ในระบบ)</Text>
+              <Text style={styles.fieldLabel}>สาขา (เชื่อม branch_information)</Text>
               <ScrollView horizontal style={styles.branchPick} nestedScrollEnabled>
                 <Pressable
                   style={[
                     styles.chip,
                     !hr.branch_id && styles.chipOn,
                   ]}
-                  onPress={() => setHr((s) => ({ ...s, branch_id: null }))}>
+                  onPress={() => setHr((s) => ({ ...s, branch_id: null, branch: '' }))}>
                   <Text style={!hr.branch_id ? styles.chipTextOn : styles.chipText}>
                     ไม่ระบุ
                   </Text>
@@ -857,12 +876,14 @@ export function AdminEmployeeEditModal({
                       style={
                         hr.branch_id === b.id ? styles.chipTextOn : styles.chipText
                       }>
-                      {b.branch_name ?? b.branch_code ?? `#${b.id}`}
+                      {branchLabel(b)}
                     </Text>
                   </Pressable>
                 ))}
               </ScrollView>
-              {field('branch', 'ชื่อสาขา (ข้อความ)')}
+              <Text style={styles.fieldHint}>
+                ระบบจะเติม employee.branch และ branch_code จากข้อมูลสาขาจริงหลังบันทึก
+              </Text>
               {field('phone', 'เบอร์โทร')}
               {field('start_date', 'วันเริ่มงาน')}
               {field('national_id', 'เลขบัตร ปชช.')}
@@ -1168,6 +1189,13 @@ const styles = StyleSheet.create({
     color: tc.textSecondary,
     marginBottom: 4,
     marginTop: 6,
+  },
+  fieldHint: {
+    color: tc.textMuted,
+    fontSize: 12,
+    marginTop: -2,
+    marginBottom: 8,
+    lineHeight: 17,
   },
   btnPw: {
     backgroundColor: tc.accentWarm,

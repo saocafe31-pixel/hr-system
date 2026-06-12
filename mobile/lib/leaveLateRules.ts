@@ -191,7 +191,7 @@ export function monthBoundsFromWorkYmd(workYmd: string): { lo: string; hi: strin
   return { lo, hi };
 }
 
-export type LeaveType = 'sick' | 'personal' | 'vacation';
+export type LeaveType = 'sick' | 'personal' | 'vacation' | 'unpaid';
 
 export type LeaveInterval = { starts_on: string; ends_on: string };
 

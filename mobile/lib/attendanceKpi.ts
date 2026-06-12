@@ -2,6 +2,7 @@ import type { LateActualFromScheduleRow } from '@/lib/computeLateFromAttendance'
 import type { LeaveRequestRow } from '@/lib/types';
 
 export const ATTENDANCE_KPI_SETTINGS_KEY = 'attendance_kpi_settings';
+const DEFAULT_WORK_START_TIME = '09:00:00';
 
 export type AttendanceKpiSettings = {
   leaveMaxScore: number;
@@ -189,8 +190,8 @@ function clampScore(score: number, max: number): number {
   return Math.max(0, Math.min(max, score));
 }
 
-function ymdToBangkokStartMs(ymd: string): number {
-  return new Date(`${ymd}T00:00:00+07:00`).getTime();
+function ymdToBangkokDefaultWorkStartMs(ymd: string): number {
+  return new Date(`${ymd}T${DEFAULT_WORK_START_TIME}+07:00`).getTime();
 }
 
 function noticeHours(
@@ -201,7 +202,7 @@ function noticeHours(
   const workStartIso = workStartByYmd[row.starts_on];
   const startMs = workStartIso
     ? new Date(workStartIso).getTime()
-    : ymdToBangkokStartMs(row.starts_on);
+    : ymdToBangkokDefaultWorkStartMs(row.starts_on);
   const createdMs = new Date(row.created_at).getTime();
   if (!Number.isFinite(startMs) || !Number.isFinite(createdMs)) return null;
   return (startMs - createdMs) / 3600000;
@@ -234,6 +235,7 @@ export function computeAttendanceKpi(params: {
   const quarters = quarterBoundsForYear(year).map((q) => {
     const leaveDeductions: AttendanceKpiDeduction[] = [];
     for (const row of leaveRows) {
+      if (row.is_kpi_exempt) continue;
       if (!rowInQuarter(row, q.startYmd, q.endYmd)) continue;
       const hours = noticeHours(row, workStartByYmd);
       if (hours == null) continue;

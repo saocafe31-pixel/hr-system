@@ -1,5 +1,6 @@
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import FontAwesome from '@expo/vector-icons/FontAwesome';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import * as ImageManipulator from 'expo-image-manipulator';
 import {
   ActivityIndicator,
@@ -18,7 +19,9 @@ import {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
 import { AdminEmployeeEditModal } from '@/components/AdminEmployeeEditModal';
+import { LateRequestHistoryCard } from '@/components/LateRequestHistoryCard';
 import { ProfileClaimsCard } from '@/components/ProfileClaimsCard';
+import { ProfilePayslipCard } from '@/components/ProfilePayslipCard';
 import { UserAvatar } from '@/components/UserAvatar';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
@@ -81,6 +84,76 @@ import type {
   WorkScheduleRow,
 } from '@/lib/types';
 
+type ProfileSectionKey =
+  | 'profile'
+  | 'notifications'
+  | 'leaveLate'
+  | 'hr'
+  | 'finance'
+  | 'teamDirectory'
+  | 'adminDirectory'
+  | 'security';
+
+const PROFILE_SECTIONS: Array<{
+  key: ProfileSectionKey;
+  title: string;
+  subtitle: string;
+  icon: ComponentProps<typeof FontAwesome>['name'];
+  managerOnly?: boolean;
+  adminOnly?: boolean;
+}> = [
+  {
+    key: 'profile',
+    title: 'โปรไฟล์',
+    subtitle: 'รูป ชื่อ เบอร์โทร และสุขภาวะ',
+    icon: 'user',
+  },
+  {
+    key: 'notifications',
+    title: 'การแจ้งเตือน',
+    subtitle: 'Permission, badge และตั้งค่าแจ้งเตือน',
+    icon: 'bell',
+  },
+  {
+    key: 'leaveLate',
+    title: 'ลา & เข้าสาย',
+    subtitle: 'โควตา ประวัติ KPI และสรุปมาสาย',
+    icon: 'calendar-check-o',
+  },
+  {
+    key: 'hr',
+    title: 'ข้อมูล HR',
+    subtitle: 'ข้อมูลพนักงานจาก employee_directory',
+    icon: 'id-card-o',
+  },
+  {
+    key: 'finance',
+    title: 'สลิป / เบิกเงิน',
+    subtitle: 'สลิปเงินเดือน Claim Salary และ Expense Claim',
+    icon: 'money',
+  },
+  {
+    key: 'teamDirectory',
+    title: 'พนักงานในสาขา',
+    subtitle: 'รายการทีม/สาขาสำหรับผู้จัดการ',
+    icon: 'users',
+    managerOnly: true,
+  },
+  {
+    key: 'adminDirectory',
+    title: 'พนักงานทั้งหมด',
+    subtitle: 'รายการ HR สำหรับแอดมิน',
+    icon: 'address-book-o',
+    adminOnly: true,
+  },
+  {
+    key: 'security',
+    title: 'บัญชีและความปลอดภัย',
+    subtitle: 'เปลี่ยนรหัสผ่านและออกจากระบบ',
+    icon: 'lock',
+  },
+];
+
 function formatWorkDateTh(ymd: string): string {
   const p = ymd.trim().split('-').map(Number);
   if (p.length !== 3 || p.some((n) => !Number.isFinite(n))) return ymd;
@@ -108,6 +181,7 @@ function leaveTypeLabelTh(type: LeaveRequestRow['leave_type']): string {
   if (type === 'sick') return 'ลาป่วย';
   if (type === 'personal') return 'ลากิจ';
   if (type === 'vacation') return 'ลาพักร้อน';
+  if (type === 'unpaid') return 'ลาไม่รับเงิน';
   return type;
 }
 
@@ -209,9 +283,9 @@ function buildWorkStartByYmd(
   const map: Record<string, string> = {};
   const assignedDays = new Set<string>();
   for (const assignment of assignments) {
-    assignedDays.add(assignment.work_date);
     const shift = assignment.work_shifts;
     if (!shift) continue;
+    assignedDays.add(assignment.work_date);
     map[assignment.work_date] = new Date(
       bangkokShiftStartMs(assignment.work_date, shift.start_time)
     ).toISOString();
@@ -238,6 +312,7 @@ export default function ProfileScreen() {
   const [pw1, setPw1] = useState('');
   const [pw2, setPw2] = useState('');
   const [showPw, setShowPw] = useState(false);
+  const [activeSection, setActiveSection] = useState<ProfileSectionKey | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [avatarPreviewUri, setAvatarPreviewUri] = useState<string | null>(null);
   const [avatarDraftUri, setAvatarDraftUri] = useState<string | null>(null);
@@ -1041,6 +1116,41 @@ export default function ProfileScreen() {
     return { count: latePayrollRows.length, minutes };
   }, [latePayrollRows]);
 
+  const visibleProfileSections = useMemo(
+    () =>
+      PROFILE_SECTIONS.filter((section) => {
+        if (section.adminOnly) return admin;
+        if (section.managerOnly) return profile?.role === 'manager';
+        return true;
+      }),
+    [admin, profile?.role]
+  );
+
+  const activeSectionMeta = useMemo(
+    () => visibleProfileSections.find((section) => section.key === activeSection) ?? null,
+    [activeSection, visibleProfileSections]
+  );
+
+  const payslipEmployeeName = useMemo(
+    () =>
+      myHr
+        ? directoryDisplayName(myHr)
+        : profile?.full_name?.trim() || profile?.email?.trim() || session?.user?.email || '',
+    [myHr, profile?.email, profile?.full_name, session?.user?.email]
+  );
+
+  const payslipEmployeeMeta = useMemo(() => {
+    const parts = [
+      profile?.email ?? session?.user?.email ?? '',
+      myHr?.employee_no != null ? `รหัส ${myHr.employee_no}` : profile?.employee_code ? `รหัส ${profile.employee_code}` : '',
+      myHr?.position ?? '',
+      myHr?.branch ?? '',
+    ]
+      .map((part) => String(part).trim())
+      .filter(Boolean);
+    return parts.join(' · ');
+  }, [myHr, profile?.email, profile?.employee_code, session?.user?.email]);
+
   const attendanceKpi = useMemo(
     () =>
       computeAttendanceKpi({
@@ -1071,6 +1181,71 @@ export default function ProfileScreen() {
             titleColor={NatureTheme.colors.textMuted}
           />
         }>
+        {activeSection === null ? (
+          <>
+            <View style={styles.profileMenuHero}>
+              <View style={styles.profileMenuHeroTop}>
+                <UserAvatar
+                  uri={avatarUriForDisplay}
+                  label={avatarLabel}
+                  size={64}
+                />
+                <View style={styles.profileMenuHeroText}>
+                  <Text style={styles.profileMenuHeroTitle} numberOfLines={1}>
+                    {fullName.trim() || profile?.full_name || profile?.email || 'โปรไฟล์'}
+                  </Text>
+                  <Text style={styles.profileMenuHeroSub} numberOfLines={1}>
+                    {profile?.email ?? session?.user?.email ?? 'ยังไม่มีอีเมล'}
+                  </Text>
+                  <Text style={styles.profileMenuHeroRole}>
+                    {profile?.role ?? 'employee'}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.profileMenuHeroHint}>
+                เลือกหมวดที่ต้องการจัดการ เพื่อเปิดรายละเอียดเฉพาะส่วนนั้น
+              </Text>
+            </View>
+
+            <View style={styles.profileMenuGrid}>
+              {visibleProfileSections.map((section) => (
+                <Pressable
+                  key={section.key}
+                  style={styles.profileMenuCard}
+                  onPress={() => setActiveSection(section.key)}>
+                  <View style={styles.profileMenuIcon}>
+                    <FontAwesome name={section.icon} size={22} color={c.primaryDark} />
+                  </View>
+                  <Text style={styles.profileMenuTitle}>{section.title}</Text>
+                  <Text style={styles.profileMenuSub}>{section.subtitle}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </>
+        ) : (
+          <>
+            {activeSectionMeta ? (
+              <View style={styles.profileSectionHeader}>
+                <Pressable
+                  style={styles.profileBackBtn}
+                  onPress={() => setActiveSection(null)}>
+                  <FontAwesome name="chevron-left" size={13} color={c.primaryDark} />
+                  <Text style={styles.profileBackBtnText}>กลับสู่เมนูโปรไฟล์</Text>
+                </Pressable>
+                <View style={styles.profileSectionTitleRow}>
+                  <View style={styles.profileSectionIcon}>
+                    <FontAwesome name={activeSectionMeta.icon} size={20} color={c.onAccent} />
+                  </View>
+                  <View style={styles.profileSectionTitleText}>
+                    <Text style={styles.profileSectionTitle}>{activeSectionMeta.title}</Text>
+                    <Text style={styles.profileSectionSub}>{activeSectionMeta.subtitle}</Text>
+                  </View>
+                </View>
+              </View>
+            ) : null}
+
+        {activeSection === 'profile' ? (
+          <>
         <View style={styles.avatarRow}>
           <UserAvatar
             uri={avatarUriForDisplay}
@@ -1130,7 +1305,11 @@ export default function ProfileScreen() {
             จากคำตอบตอนเข้า-ออกงาน
           </Text>
         </Pressable>
+          </>
+        ) : null}
 
+        {activeSection === 'notifications' ? (
+          <>
         <Text style={styles.sectionTitle}>สถานะแจ้งเตือน</Text>
         <Text style={styles.sectionSub}>
           ตรวจสอบ permission, ความสามารถ badge และขอสิทธิ์ใหม่ได้ทันที
@@ -1194,7 +1373,11 @@ export default function ProfileScreen() {
             />
           </View>
         </View>
+          </>
+        ) : null}
 
+        {activeSection === 'leaveLate' ? (
+          <>
         <Text style={styles.sectionTitle}>ลา & เข้าสาย</Text>
         <Text style={styles.sectionSub}>
           สรุปโควตาปี {quotaY} · นับวันลาเฉพาะที่อนุมัติแล้ว · ขอเข้าสายจำกัดตามรอบ 26–25
@@ -1383,6 +1566,9 @@ export default function ProfileScreen() {
                     <Text style={styles.leaveHistoryCreated}>
                       ส่งคำขอ {formatCreatedAtTh(row.created_at)}
                     </Text>
+                    {row.is_kpi_exempt ? (
+                      <Text style={styles.leaveHistoryAttach}>ปรับโดยแอดมิน/HR · ไม่นับ KPI</Text>
+                    ) : null}
                   </View>
                 </View>
               );
@@ -1394,6 +1580,8 @@ export default function ProfileScreen() {
             </Text>
           ) : null}
         </View>
+
+        <LateRequestHistoryCard userId={session?.user?.id} />
 
         <View style={styles.kpiCard}>
           <View style={styles.kpiHeaderRow}>
@@ -1527,7 +1715,11 @@ export default function ProfileScreen() {
             ))
           )}
         </View>
+          </>
+        ) : null}
 
+        {activeSection === 'hr' ? (
+          <>
         <Text style={styles.sectionTitle}>ข้อมูลพนักงาน (HR)</Text>
         <Text style={styles.sectionSub}>
           ข้อมูลพนักงานพื้นฐานจากระบบ HR
@@ -1558,6 +1750,20 @@ export default function ProfileScreen() {
             ไม่พบข้อมูล HR สำหรับรหัสนี้ หรือสิทธิ์การอ่านถูกจำกัด
           </Text>
         )}
+          </>
+        ) : null}
+
+        {activeSection === 'finance' ? (
+          <>
+        <ProfilePayslipCard
+          userId={session?.user?.id ?? null}
+          employeeId={profile?.employee_id ?? null}
+          employeeName={payslipEmployeeName}
+          employeeMeta={payslipEmployeeMeta}
+          paymentMethod={myHr?.bank || myHr?.account_number ? 'โอนผ่านบัญชีธนาคาร' : null}
+          bankName={myHr?.bank ?? null}
+          bankAccount={myHr?.account_number ?? null}
+        />
 
         <ProfileClaimsCard
           userId={session?.user?.id ?? null}
@@ -1567,8 +1773,10 @@ export default function ProfileScreen() {
             void onPullRefresh();
           }}
         />
+          </>
+        ) : null}
 
-        {managerScope && profile?.role === 'manager' ? (
+        {activeSection === 'teamDirectory' && managerScope && profile?.role === 'manager' ? (
           <>
             <Text style={styles.sectionTitle}>พนักงานในสาขา</Text>
             <Text style={styles.sectionSub}>
@@ -1591,7 +1799,7 @@ export default function ProfileScreen() {
           </>
         ) : null}
 
-        {admin ? (
+        {activeSection === 'adminDirectory' && admin ? (
           <>
             <Text style={styles.sectionTitle}>พนักงานทั้งหมด (แอดมิน)</Text>
             <Text style={styles.sectionSub}>
@@ -1617,6 +1825,8 @@ export default function ProfileScreen() {
           </>
         ) : null}
 
+        {activeSection === 'security' ? (
+          <>
         <Pressable style={styles.secondary} onPress={() => setShowPw((v) => !v)}>
           <Text style={styles.secondaryText}>
             {showPw ? 'ปิดการเปลี่ยนรหัส' : 'เปลี่ยนรหัสผ่าน'}
@@ -1648,6 +1858,10 @@ export default function ProfileScreen() {
         <Pressable style={styles.logout} onPress={logout}>
           <Text style={styles.logoutText}>ออกจากระบบ</Text>
         </Pressable>
+          </>
+        ) : null}
+          </>
+        )}
       </ScrollView>
 
       <Modal
@@ -1734,6 +1948,9 @@ export default function ProfileScreen() {
                         <Text style={styles.leaveHistoryCreated}>
                           ส่งคำขอ {formatCreatedAtTh(row.created_at)}
                         </Text>
+                        {row.is_kpi_exempt ? (
+                          <Text style={styles.leaveHistoryAttach}>ปรับโดยแอดมิน/HR · ไม่นับ KPI</Text>
+                        ) : null}
                         {row.medical_certificate_url || row.supplementary_document_url ? (
                           <Text style={styles.leaveHistoryAttach}>มีเอกสารแนบ</Text>
                         ) : null}
@@ -1853,6 +2070,140 @@ const s = NatureTheme.spacing;
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: c.canvas },
   screenContent: { padding: s.screen, paddingBottom: s.scrollBottom },
+  profileMenuHero: {
+    padding: 16,
+    borderRadius: r.xl,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    marginBottom: 14,
+  },
+  profileMenuHeroTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  profileMenuHeroText: { flex: 1, minWidth: 0 },
+  profileMenuHeroTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: c.text,
+  },
+  profileMenuHeroSub: {
+    marginTop: 3,
+    fontSize: 13,
+    color: c.textMuted,
+  },
+  profileMenuHeroRole: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: c.primaryLight,
+    color: c.primaryDark,
+    fontSize: 12,
+    fontWeight: '800',
+    overflow: 'hidden',
+  },
+  profileMenuHeroHint: {
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: c.borderSoft,
+    fontSize: 12,
+    lineHeight: 18,
+    color: c.textMuted,
+  },
+  profileMenuGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  profileMenuCard: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    minWidth: 156,
+    padding: 14,
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    minHeight: 148,
+  },
+  profileMenuIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  profileMenuTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: c.text,
+  },
+  profileMenuSub: {
+    marginTop: 6,
+    fontSize: 12,
+    lineHeight: 17,
+    color: c.textMuted,
+  },
+  profileSectionHeader: {
+    padding: 14,
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    marginBottom: 14,
+  },
+  profileBackBtn: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingVertical: 8,
+    paddingHorizontal: 11,
+    borderRadius: 999,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    marginBottom: 12,
+  },
+  profileBackBtnText: {
+    color: c.primaryDark,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  profileSectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  profileSectionIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: c.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileSectionTitleText: { flex: 1, minWidth: 0 },
+  profileSectionTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: c.text,
+  },
+  profileSectionSub: {
+    marginTop: 3,
+    fontSize: 12,
+    lineHeight: 17,
+    color: c.textMuted,
+  },
   avatarRow: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -102,7 +102,7 @@ export function DatePickerField({
   }
 
   return (
-    <View>
+    <View style={styles.root}>
       <Text style={styles.label}>{label}</Text>
       <Pressable
         style={[styles.field, disabled && styles.fieldDisabled]}
@@ -208,7 +208,13 @@ const styles = StyleSheet.create({
     marginBottom: 6,
     marginTop: 8,
   },
+  root: {
+    alignSelf: 'stretch',
+    minWidth: 0,
+  },
   field: {
+    alignSelf: 'stretch',
+    minWidth: 0,
     borderWidth: 1,
     borderColor: c.border,
     borderRadius: r.sm,
@@ -227,9 +233,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   sheet: {
+    alignSelf: 'center',
+    width: '92%',
+    maxWidth: 420,
+    marginBottom: 10,
     backgroundColor: c.surfaceElevated,
-    borderTopLeftRadius: r.xl,
-    borderTopRightRadius: r.xl,
+    borderRadius: r.xl,
     padding: 16,
     paddingBottom: 28,
     borderWidth: 1,
@@ -244,12 +253,20 @@ const styles = StyleSheet.create({
   },
   sheetActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginTop: 12,
-    gap: 12,
+    gap: 10,
   },
-  sheetRight: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  sheetRight: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 10,
+    flexShrink: 1,
+  },
   textBtn: { paddingVertical: 8, paddingHorizontal: 4 },
   linkText: { color: c.link, fontWeight: '600' },
   cancelText: { color: c.textMuted, fontWeight: '600' },
@@ -261,12 +278,17 @@ const styles = StyleSheet.create({
   },
   okText: { color: c.onAccent, fontWeight: '700' },
   pickerWrap: {
+    alignSelf: 'center',
     width: '100%',
+    maxWidth: 360,
+    minWidth: 0,
     minHeight: 56,
     marginVertical: 8,
+    alignItems: 'center',
     justifyContent: 'center',
   },
   iosPicker: {
+    alignSelf: 'center',
     width: '100%',
     minHeight: 340,
   },

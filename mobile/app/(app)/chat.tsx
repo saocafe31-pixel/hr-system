@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 
 import { DatePickerField } from '@/components/DatePickerField';
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { EmployeeScheduleCalendarCard } from '@/components/EmployeeScheduleCalendarCard';
 import { FriendlyConfirmModal } from '@/components/FriendlyNoticeModal';
 import { TaskNotificationsHeaderButton } from '@/components/TaskNotificationsHeaderButton';
@@ -113,15 +114,21 @@ function ymdToDateBangkok(ymd: string): Date {
   return new Date(`${ymd}T12:00:00+07:00`);
 }
 
-function listYmdInclusive(startYmd: string, endYmd: string): string[] {
-  const out: string[] = [];
-  const d = ymdToDateBangkok(startYmd);
-  const end = ymdToDateBangkok(endYmd).getTime();
-  while (d.getTime() <= end) {
-    out.push(ymdFromDateBangkok(d));
-    d.setDate(d.getDate() + 1);
-  }
-  return out;
+function bangkokDayIsoRange(ymd: string): { startIso: string; endIso: string } {
+  return {
+    startIso: new Date(`${ymd}T00:00:00+07:00`).toISOString(),
+    endIso: new Date(`${ymd}T23:59:59.999+07:00`).toISOString(),
+  };
+}
+
+function fmtBangkokDateTitle(ymd: string): string {
+  return new Intl.DateTimeFormat('th-TH', {
+    timeZone: 'Asia/Bangkok',
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(ymdToDateBangkok(ymd));
 }
 
 function csvEscape(v: string): string {
@@ -333,6 +340,7 @@ export default function AttendanceChatScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMoreOlder, setHasMoreOlder] = useState(true);
+  const [selectedChatDate, setSelectedChatDate] = useState<Date | null>(() => new Date());
   const listRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
   const displayByUserRef = useRef<UserDisplayCache>(new Map());
@@ -362,6 +370,16 @@ export default function AttendanceChatScreen() {
   const [profileLabel, setProfileLabel] = useState('');
   const [pruneChatConfirmOpen, setPruneChatConfirmOpen] = useState(false);
   const [pruneBusy, setPruneBusy] = useState(false);
+
+  const selectedChatYmd = useMemo(
+    () => ymdFromDateBangkok(selectedChatDate ?? new Date()),
+    [selectedChatDate]
+  );
+  const selectedChatDayRange = useMemo(
+    () => bangkokDayIsoRange(selectedChatYmd),
+    [selectedChatYmd]
+  );
+  const selectedChatIsToday = selectedChatYmd === ymdFromDateBangkok(new Date());
 
   useEffect(() => {
     itemsRef.current = items;
@@ -412,7 +430,10 @@ export default function AttendanceChatScreen() {
     const { data, error } = await supabase
       .from('attendance_chat_messages')
       .select('id, user_id, body, created_at')
+      .gte('created_at', selectedChatDayRange.startIso)
+      .lte('created_at', selectedChatDayRange.endIso)
       .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
       .limit(CHAT_PAGE_SIZE);
     if (error) {
       toast.error('โหลดแชทไม่สำเร็จ', error.message);
@@ -425,7 +446,7 @@ export default function AttendanceChatScreen() {
     snapToBottomPendingRef.current = true;
     setItems(rows);
     setHasMoreOlder(raw.length === CHAT_PAGE_SIZE);
-  }, [toast]);
+  }, [selectedChatDayRange.endIso, selectedChatDayRange.startIso, toast]);
 
   const scheduleResumeStartReached = useCallback(() => {
     if (olderResumeStartReachedTimerRef.current) {
@@ -450,6 +471,8 @@ export default function AttendanceChatScreen() {
       const { data, error } = await supabase
         .from('attendance_chat_messages')
         .select('id, user_id, body, created_at')
+        .gte('created_at', selectedChatDayRange.startIso)
+        .lte('created_at', selectedChatDayRange.endIso)
         .lt('created_at', oldest.created_at)
         .order('created_at', { ascending: false })
         .order('id', { ascending: false })
@@ -480,10 +503,11 @@ export default function AttendanceChatScreen() {
       setLoadingOlder(false);
       scheduleResumeStartReached();
     }
-  }, [hasMoreOlder, scheduleResumeStartReached, toast]);
+  }, [hasMoreOlder, scheduleResumeStartReached, selectedChatDayRange.endIso, selectedChatDayRange.startIso, toast]);
 
   const mergeIncomingMessage = useCallback(
     async (m: ChatMessage) => {
+      if (ymdFromDateBangkok(new Date(m.created_at)) !== selectedChatYmd) return;
       try {
         const row = await resolveRowForMessage(m, displayByUserRef.current);
         let appended = false;
@@ -498,7 +522,7 @@ export default function AttendanceChatScreen() {
         await load();
       }
     },
-    [load]
+    [load, selectedChatYmd]
   );
 
   const scrollChatToBottom = useCallback((animated: boolean) => {
@@ -811,6 +835,11 @@ export default function AttendanceChatScreen() {
   async function send() {
     if (!session?.user?.id || !body.trim()) return;
     const text = body.trim();
+    const today = new Date();
+    const todayYmd = ymdFromDateBangkok(today);
+    if (selectedChatYmd !== todayYmd) {
+      setSelectedChatDate(today);
+    }
     const { data: inserted, error } = await supabase
       .from('attendance_chat_messages')
       .insert({
@@ -876,14 +905,7 @@ export default function AttendanceChatScreen() {
       const startIso = new Date(`${startYmd}T00:00:00+07:00`).toISOString();
       const endIso = new Date(`${endYmd}T23:59:59+07:00`).toISOString();
 
-      const [logsRes, branchesRes, idRes] = await Promise.all([
-        supabase
-          .from('attendance_logs')
-          .select('*')
-          .gte('created_at', startIso)
-          .lte('created_at', endIso)
-          .in('kind', ['check_in', 'check_out'])
-          .order('created_at', { ascending: true }),
+      const [branchesRes, idRes] = await Promise.all([
         supabase
           .from('branch_information')
           .select('id,branch_name,branch_code')
@@ -891,11 +913,28 @@ export default function AttendanceChatScreen() {
         supabase.rpc('admin_attendance_export_identity_map'),
       ]);
 
-      if (logsRes.error) throw new Error(logsRes.error.message);
       if (branchesRes.error) throw new Error(branchesRes.error.message);
       if (idRes.error) throw new Error(idRes.error.message);
 
-      const logRows = (logsRes.data as AttendanceLog[]) ?? [];
+      const logRows: AttendanceLog[] = [];
+      const pageSize = 1000;
+      for (let from = 0; ; from += pageSize) {
+        const to = from + pageSize - 1;
+        const { data, error } = await supabase
+          .from('attendance_logs')
+          .select('*')
+          .gte('created_at', startIso)
+          .lte('created_at', endIso)
+          .in('kind', ['check_in', 'check_out'])
+          .order('created_at', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, to);
+        if (error) throw new Error(error.message);
+        const page = (data as AttendanceLog[]) ?? [];
+        logRows.push(...page);
+        if (page.length < pageSize) break;
+      }
+
       const branches = (branchesRes.data as Branch[]) ?? [];
       const branchById = new Map(branches.map((b) => [b.id, b]));
 
@@ -949,9 +988,20 @@ export default function AttendanceChatScreen() {
         byUserDay.set(k, cur);
       }
 
-      const userIds = [...new Set(logRows.map((l) => l.user_id))].filter(Boolean);
-      const days = listYmdInclusive(startYmd, endYmd);
-      if (!userIds.length) {
+      const exportRows = [...byUserDay.entries()]
+        .map(([key, agg]) => {
+          const [uid, ymd] = key.split('|');
+          return { uid, ymd, agg };
+        })
+        .filter((row) => row.uid && row.ymd && (row.agg.checkIn || row.agg.checkOut))
+        .sort((a, b) => {
+          if (a.ymd !== b.ymd) return a.ymd.localeCompare(b.ymd);
+          const aCode = employeeCodeForUser(a.uid);
+          const bCode = employeeCodeForUser(b.uid);
+          if (aCode !== bCode) return aCode.localeCompare(bCode, 'th');
+          return nicknameForUser(a.uid).localeCompare(nicknameForUser(b.uid), 'th');
+        });
+      if (!exportRows.length) {
         toast.info('ไม่มีข้อมูล', 'ไม่พบบันทึกเข้า-ออกในช่วงวันที่ที่เลือก');
         return;
       }
@@ -966,28 +1016,24 @@ export default function AttendanceChatScreen() {
       ];
       const lines = [header.map(csvEscape).join(',')];
 
-      for (const uid of userIds) {
-        for (const ymd of days) {
-          const k = keyOf(uid, ymd);
-          const agg = byUserDay.get(k);
-          const checkInIso = agg?.checkIn?.created_at;
-          const checkOutIso = agg?.checkOut?.created_at;
-          const checkInCell = checkInIso ? fmtBangkokDateTimeCsv(checkInIso) : '';
-          const checkOutCell = checkOutIso ? fmtBangkokDateTimeCsv(checkOutIso) : '';
+      for (const { uid, ymd, agg } of exportRows) {
+        const checkInIso = agg.checkIn?.created_at;
+        const checkOutIso = agg.checkOut?.created_at;
+        const checkInCell = checkInIso ? fmtBangkokDateTimeCsv(checkInIso) : '';
+        const checkOutCell = checkOutIso ? fmtBangkokDateTimeCsv(checkOutIso) : '';
 
-          lines.push(
-            [
-              fmtBangkokDateCsv(ymd),
-              checkInCell,
-              checkOutCell,
-              employeeCodeForUser(uid),
-              nicknameForUser(uid),
-              checkInLocation(agg),
-            ]
-              .map(csvEscape)
-              .join(',')
-          );
-        }
+        lines.push(
+          [
+            fmtBangkokDateCsv(ymd),
+            checkInCell,
+            checkOutCell,
+            employeeCodeForUser(uid),
+            nicknameForUser(uid),
+            checkInLocation(agg),
+          ]
+            .map(csvEscape)
+            .join(',')
+        );
       }
 
       const content = `\uFEFF${lines.join('\n')}`;
@@ -1053,9 +1099,10 @@ export default function AttendanceChatScreen() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดแชทเข้า-ออก"
+        subtitle="กำลังดึงข้อความ โปรไฟล์พนักงาน และสถานะเวลาเข้า-ออกล่าสุด"
+      />
     );
   }
 
@@ -1201,6 +1248,28 @@ export default function AttendanceChatScreen() {
           ) : null}
         </Pressable>
       </Modal>
+      <View style={styles.chatDateFilter}>
+        <View style={styles.chatDateFilterTop}>
+          <View style={styles.chatDateFilterTextBox}>
+            <Text style={styles.chatDateFilterTitle}>ข้อความประจำวันที่</Text>
+            <Text style={styles.chatDateFilterSub}>{fmtBangkokDateTitle(selectedChatYmd)}</Text>
+          </View>
+          <Pressable
+            style={[styles.todayBtn, selectedChatIsToday && styles.todayBtnDisabled]}
+            disabled={selectedChatIsToday}
+            onPress={() => setSelectedChatDate(new Date())}>
+            <Text style={[styles.todayBtnText, selectedChatIsToday && styles.todayBtnTextDisabled]}>
+              วันนี้
+            </Text>
+          </Pressable>
+        </View>
+        <DatePickerField
+          label="เลือกวันที่แสดงในแชท"
+          value={selectedChatDate}
+          onChange={(date) => setSelectedChatDate(date ?? new Date())}
+          maximumDate={new Date()}
+        />
+      </View>
       <FlatList
         ref={listRef}
         data={items}
@@ -1236,14 +1305,21 @@ export default function AttendanceChatScreen() {
             } as const)
           : {})}
         ListHeaderComponent={
-          loadingOlder ? (
+          <>
+            {loadingOlder ? (
             <View style={styles.listHeaderLoading}>
               <ActivityIndicator
                 size="small"
                 color={NatureTheme.colors.primary}
               />
             </View>
-          ) : null
+            ) : null}
+            {!loadingOlder && items.length === 0 ? (
+              <Text style={styles.chatEmpty}>
+                ยังไม่มีข้อความแชทเข้า-ออกงานในวันที่เลือก
+              </Text>
+            ) : null}
+          </>
         }
         renderItem={({ item: m }) => {
           const kind = attendanceBubbleKind(m.body);
@@ -1430,6 +1506,60 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  chatDateFilter: {
+    paddingHorizontal: s.screen,
+    paddingTop: 10,
+    paddingBottom: 8,
+    backgroundColor: c.canvas,
+    borderBottomWidth: 1,
+    borderBottomColor: c.borderSoft,
+  },
+  chatDateFilterTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  chatDateFilterTextBox: { flex: 1, minWidth: 0 },
+  chatDateFilterTitle: {
+    color: c.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  chatDateFilterSub: {
+    marginTop: 2,
+    color: c.text,
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  todayBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+  },
+  todayBtnDisabled: {
+    backgroundColor: c.surfaceMuted,
+    borderColor: c.borderSoft,
+    opacity: 0.72,
+  },
+  todayBtnText: { color: c.primaryDark, fontSize: 12, fontWeight: '900' },
+  todayBtnTextDisabled: { color: c.textMuted },
+  chatEmpty: {
+    marginHorizontal: s.screen,
+    marginTop: s.gap,
+    padding: s.card,
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    color: c.textMuted,
+    textAlign: 'center',
+    fontSize: 13,
+    lineHeight: 19,
   },
   mentionSheet: {
     maxHeight: 200,

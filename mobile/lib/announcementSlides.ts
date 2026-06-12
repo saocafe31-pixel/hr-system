@@ -7,6 +7,7 @@ export function parseAnnouncementUrls(value: unknown): string[] {
 export type AnnouncementSettingsParsed = {
   urls: string[];
   slides: AnnouncementSlide[];
+  transitionMode: AnnouncementTransitionMode;
   /** ความสูงรูปสไลด์ที่หน้าเข้า-ออก (px) */
   slideHeightPx: number;
 };
@@ -16,12 +17,15 @@ export type AnnouncementSlide = {
   durationMs: number;
 };
 
+export type AnnouncementTransitionMode = 'slide' | 'fade';
+
 const SLIDE_H_MIN = 100;
 const SLIDE_H_MAX = 320;
 const SLIDE_H_DEFAULT = 160;
 export const ANNOUNCEMENT_DEFAULT_DURATION_MS = 4000;
 const ANNOUNCEMENT_DURATION_MIN_MS = 1000;
 const ANNOUNCEMENT_DURATION_MAX_MS = 60000;
+const ANNOUNCEMENT_DEFAULT_TRANSITION_MODE: AnnouncementTransitionMode = 'slide';
 
 function clampDurationMs(raw: unknown): number {
   const n = Number(raw);
@@ -40,9 +44,15 @@ function parseSlideDurationMs(raw: Record<string, unknown>): number {
   return ANNOUNCEMENT_DEFAULT_DURATION_MS;
 }
 
+function parseTransitionMode(raw: unknown): AnnouncementTransitionMode {
+  return raw === 'fade' || raw === 'slide' ? raw : ANNOUNCEMENT_DEFAULT_TRANSITION_MODE;
+}
+
 export function parseAnnouncementSettings(value: unknown): AnnouncementSettingsParsed {
   const slides: AnnouncementSlide[] = [];
+  let transitionMode: AnnouncementTransitionMode = ANNOUNCEMENT_DEFAULT_TRANSITION_MODE;
   if (value != null && typeof value === 'object') {
+    transitionMode = parseTransitionMode((value as { transition_mode?: unknown }).transition_mode);
     const rawSlides = (value as { slides?: unknown }).slides;
     if (Array.isArray(rawSlides)) {
       for (const x of rawSlides) {
@@ -72,13 +82,19 @@ export function parseAnnouncementSettings(value: unknown): AnnouncementSettingsP
       slideHeightPx = Math.min(SLIDE_H_MAX, Math.max(SLIDE_H_MIN, Math.round(h)));
     }
   }
-  return { urls: slides.map((slide) => slide.url), slides, slideHeightPx };
+  return { urls: slides.map((slide) => slide.url), slides, transitionMode, slideHeightPx };
 }
 
 export function buildAnnouncementSettingsValue(
   slidesOrUrls: (AnnouncementSlide | string)[],
-  slideHeightPx: number
-): { urls: string[]; slides: { url: string; duration_ms: number }[]; slide_height_px: number } {
+  slideHeightPx: number,
+  transitionMode: AnnouncementTransitionMode = ANNOUNCEMENT_DEFAULT_TRANSITION_MODE
+): {
+  urls: string[];
+  slides: { url: string; duration_ms: number }[];
+  slide_height_px: number;
+  transition_mode: AnnouncementTransitionMode;
+} {
   const slides = slidesOrUrls
     .map((item) => {
       if (typeof item === 'string') {
@@ -91,5 +107,10 @@ export function buildAnnouncementSettingsValue(
     })
     .filter((item) => item.url.length > 0);
   const h = Math.min(SLIDE_H_MAX, Math.max(SLIDE_H_MIN, Math.round(slideHeightPx)));
-  return { urls: slides.map((slide) => slide.url), slides, slide_height_px: h };
+  return {
+    urls: slides.map((slide) => slide.url),
+    slides,
+    slide_height_px: h,
+    transition_mode: parseTransitionMode(transitionMode),
+  };
 }

@@ -16,6 +16,7 @@ import {
 import Svg, { Circle, G } from 'react-native-svg';
 
 import { DatePickerField } from '@/components/DatePickerField';
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { FriendlyConfirmModal } from '@/components/FriendlyNoticeModal';
 import { FriendlyNoticeModal } from '@/components/FriendlyNoticeModal';
 import { TaskProgressBar } from '@/components/TaskProgressBar';
@@ -722,6 +723,33 @@ export default function TasksScreen() {
       nextAssign = normalizeAssignPickRows(rpcData);
       if (subordinateFilter) {
         nextAssign = nextAssign.filter((r) => subordinateFilter.has(r.profile_id));
+        const missingIds = [...subordinateFilter].filter(
+          (id) => !nextAssign.some((row) => row.profile_id === id)
+        );
+        if (missingIds.length > 0) {
+          const { data: missingProfiles } = await supabase
+            .from('profiles')
+            .select('id, email, full_name, employee_id')
+            .in('id', missingIds);
+          nextAssign = [
+            ...nextAssign,
+            ...(((missingProfiles as {
+              id: string;
+              email: string | null;
+              full_name: string | null;
+              employee_id?: string | null;
+            }[]) ?? []).map((p) => ({
+              profile_id: p.id,
+              account_email: p.email,
+              hr_user_id: null,
+              full_name: p.full_name,
+              employee_id: p.employee_id ?? null,
+              hr_name: null,
+              hr_surname: null,
+              hr_nickname: null,
+            }))),
+          ];
+        }
       }
     } else if (subordinateFilter) {
       const ids = [...subordinateFilter];
@@ -1230,9 +1258,10 @@ export default function TasksScreen() {
 
   if (loading || !uid) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดหน้างาน"
+        subtitle="กำลังจัดเรียงงาน มอบหมายล่าสุด และแจ้งเตือนของทีม"
+      />
     );
   }
 
@@ -2100,14 +2129,14 @@ export default function TasksScreen() {
               <Text style={styles.mgrLabel}>มอบหมายงานให้ *</Text>
               <Text style={styles.assignHint}>
                 แตะแถวเพื่อเลือก/ยกเลิกหลายคน — แสดงชื่อจาก HR / โปรไฟล์ แจ้งเตือนไปที่บัญชีล็อกอิน
-                {admin ? '' : ' (เฉพาะลูกทีมที่แอดมินกำหนดใน manager_direct_reports)'} ·
+                {admin ? '' : ' (เฉพาะคนในทีมที่แอดมินกำหนด รวม Admin/HR ได้)'} ·
                 ค้นหาได้จากชื่อ นามสกุล ชื่อเล่น หรืออีเมล
               </Text>
               {assignOptions.length === 0 ? (
                 <Text style={styles.assignEmpty}>
                   {admin
                     ? 'ยังไม่มีรายชื่อพนักงาน — ตรวจสอบว่ามีบทบาท employee ในระบบ และ (ถ้าใช้ RPC ใหม่) รัน migration บน Supabase แล้ว'
-                    : 'ยังไม่มีรายชื่อลูกทีม — ให้แอดมินกำหนดลูกทีม (manager_direct_reports) และเชื่อม employee กับโปรไฟล์'}
+                    : 'ยังไม่มีรายชื่อในทีม — ให้แอดมินกำหนดคนในทีม (manager_direct_reports) รวม Admin/HR ได้'}
                 </Text>
               ) : (
                 <>

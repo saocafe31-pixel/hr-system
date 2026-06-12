@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -8,6 +7,7 @@ import {
   View,
 } from 'react-native';
 
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { useAuth } from '@/contexts/AuthContext';
 import { NatureTheme } from '@/constants/Theme';
 import {
@@ -200,9 +200,10 @@ export default function TasksAssignedScreen() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดสถานะงาน"
+        subtitle="กำลังรวบรวมงานที่ได้รับมอบหมายและความคืบหน้าล่าสุด"
+      />
     );
   }
 

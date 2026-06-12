@@ -21,6 +21,7 @@ import {
 } from 'react-native';
 
 import { AnnouncementCarousel } from '@/components/AnnouncementCarousel';
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { DatePickerField } from '@/components/DatePickerField';
 import { FriendlyNoticeModal } from '@/components/FriendlyNoticeModal';
 import { LeaveRequestModal } from '@/components/LeaveRequestModal';
@@ -30,19 +31,36 @@ import { WellbeingMoodModal } from '@/components/WellbeingMoodModal';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { NatureTheme } from '@/constants/Theme';
-import { parseAnnouncementSettings, type AnnouncementSlide } from '@/lib/announcementSlides';
+import {
+  parseAnnouncementSettings,
+  type AnnouncementSlide,
+  type AnnouncementTransitionMode,
+} from '@/lib/announcementSlides';
 import { onLeaveStatusChanged } from '@/lib/appSignals';
 import { presentBackgroundAwareNotification } from '@/lib/appNotifications';
 import {
   computeLateFromAttendanceData,
   type AssignmentWithShiftTimes,
 } from '@/lib/computeLateFromAttendance';
+import {
+  calculateBreakMinutes,
+  calculateOvertimeMinutes,
+  calculateWorkMinutes,
+  formatDurationMinutesTh,
+  overtimeSummaryStatusLabel,
+} from '@/lib/attendanceDurations';
 import { currentYearBangkok } from '@/lib/leaveLateRules';
 import { distanceMeters } from '@/lib/geo';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
 import { priorityColor, sortByPriorityThenCreated } from '@/lib/taskHelpers';
 import { supabase } from '@/lib/supabase';
-import type { AttendanceLog, Branch, TaskPriority, WorkScheduleRow } from '@/lib/types';
+import type {
+  AttendanceLog,
+  AttendanceOvertimeRequestRow,
+  Branch,
+  TaskPriority,
+  WorkScheduleRow,
+} from '@/lib/types';
 import {
   fetchLatestTodayEmojiByUserIds,
   nameWithMoodEmoji,
@@ -79,12 +97,16 @@ type AttendanceSummaryRow = {
   employeeCode: string;
   checkInLocation: string;
   note: string;
+  workMinutes: number;
+  breakMinutes: number;
+  overtimeMinutes: number;
+  overtimeApprovalStatus: string;
 };
 
 type SummaryLeaveRow = {
   starts_on: string;
   ends_on: string;
-  leave_type: 'sick' | 'personal' | 'vacation';
+  leave_type: 'sick' | 'personal' | 'vacation' | 'unpaid';
   status: 'pending' | 'approved';
 };
 
@@ -119,8 +141,10 @@ type TodayWorkPlan = {
 type OvertimeRequestRow = {
   id: string;
   status: 'pending' | 'accepted' | 'declined' | 'auto_checked_out';
+  overtime_kind?: 'after_work' | 'before_work';
   response_deadline_at: string;
   work_date: string;
+  reason?: string | null;
 };
 
 type MyScheduleCalendarRow = {
@@ -292,6 +316,7 @@ function leaveTypeLabelTh(type: SummaryLeaveRow['leave_type']): string {
   if (type === 'sick') return 'ลาป่วย';
   if (type === 'personal') return 'ลากิจ';
   if (type === 'vacation') return 'ลาพักร้อน';
+  if (type === 'unpaid') return 'ลาไม่รับเงิน';
   return 'ลา';
 }
 
@@ -377,6 +402,8 @@ export default function AttendanceScreen() {
   const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
   const [announcementUrls, setAnnouncementUrls] = useState<string[]>([]);
   const [announcementSlides, setAnnouncementSlides] = useState<AnnouncementSlide[]>([]);
+  const [announcementTransitionMode, setAnnouncementTransitionMode] =
+    useState<AnnouncementTransitionMode>('slide');
   const [announcementSlideHeightPx, setAnnouncementSlideHeightPx] = useState(160);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -418,6 +445,7 @@ export default function AttendanceScreen() {
   const [summaryLateRequests, setSummaryLateRequests] = useState<SummaryLateRequestRow[]>([]);
   const [summaryAssignments, setSummaryAssignments] = useState<AssignmentWithShiftTimes[]>([]);
   const [summaryLegacySchedules, setSummaryLegacySchedules] = useState<WorkScheduleRow[]>([]);
+  const [summaryOvertimeRequests, setSummaryOvertimeRequests] = useState<AttendanceOvertimeRequestRow[]>([]);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [todayPlanLabel, setTodayPlanLabel] = useState<string | null>(null);
@@ -425,6 +453,13 @@ export default function AttendanceScreen() {
   const [pendingOvertimeRequest, setPendingOvertimeRequest] = useState<OvertimeRequestRow | null>(
     null
   );
+  const [otReason, setOtReason] = useState('');
+  const [earlyOvertimePrompt, setEarlyOvertimePrompt] = useState<{
+    minutes: number;
+    startLabel: string;
+  } | null>(null);
+  const [earlyOvertimeReason, setEarlyOvertimeReason] = useState('');
+  const [earlyOvertimeSaving, setEarlyOvertimeSaving] = useState(false);
   const [notifPrefs, setNotifPrefs] = useState<{
     task_enabled: boolean;
     mention_enabled: boolean;
@@ -529,9 +564,10 @@ export default function AttendanceScreen() {
       uid != null && uid !== ''
         ? supabase
             .from('attendance_overtime_requests')
-            .select('id,status,response_deadline_at,work_date')
+            .select('id,status,overtime_kind,response_deadline_at,work_date,reason')
             .eq('user_id', uid)
             .eq('work_date', todayYmdForLeave)
+            .eq('overtime_kind', 'after_work')
             .eq('status', 'pending')
             .maybeSingle()
         : Promise.resolve({ data: null as OvertimeRequestRow | null });
@@ -602,6 +638,7 @@ export default function AttendanceScreen() {
     const annParsed = parseAnnouncementSettings(annRow?.value);
     setAnnouncementUrls(annParsed.urls);
     setAnnouncementSlides(annParsed.slides);
+    setAnnouncementTransitionMode(annParsed.transitionMode);
     setAnnouncementSlideHeightPx(annParsed.slideHeightPx);
     setBreakStartMessages(
       parseSettingsMessages(breakStartRow?.value, BREAK_START_MESSAGES_DEFAULT)
@@ -893,6 +930,7 @@ export default function AttendanceScreen() {
       setSummaryLateRequests([]);
       setSummaryAssignments([]);
       setSummaryLegacySchedules([]);
+      setSummaryOvertimeRequests([]);
       return;
     }
     setSummaryLoading(true);
@@ -905,6 +943,7 @@ export default function AttendanceScreen() {
         { data: lateRows },
         { data: assignmentRows },
         { data: legacyRows },
+        { data: overtimeRows },
       ] = await Promise.all([
         supabase
           .from('attendance_logs')
@@ -912,7 +951,7 @@ export default function AttendanceScreen() {
           .eq('user_id', uid)
           .gte('created_at', startIso)
           .lte('created_at', endIso)
-          .in('kind', ['check_in', 'check_out'])
+          .in('kind', ['check_in', 'check_out', 'break_start', 'break_end'])
           .order('created_at', { ascending: true }),
         supabase
           .from('leave_requests')
@@ -939,6 +978,16 @@ export default function AttendanceScreen() {
           .eq('user_id', uid)
           .lte('start_at', endIso)
           .gte('end_at', startIso),
+        supabase
+          .from('attendance_overtime_requests')
+          .select(
+            'id,user_id,work_date,source,overtime_kind,plan_title,plan_start_at,plan_end_at,prompt_at,response_deadline_at,status,responded_at,auto_checked_out_at,approval_status,approved_by,approved_at,approval_note,reason,manual_minutes,manual_created_by,created_at,updated_at'
+          )
+          .eq('user_id', uid)
+          .eq('status', 'accepted')
+          .gte('work_date', period.startYmd)
+          .lte('work_date', period.endYmd)
+          .order('work_date', { ascending: false }),
       ]);
       const assignments: AssignmentWithShiftTimes[] = [];
       for (const row of (assignmentRows as unknown[]) ?? []) {
@@ -963,6 +1012,7 @@ export default function AttendanceScreen() {
       setSummaryLateRequests((lateRows as SummaryLateRequestRow[]) ?? []);
       setSummaryAssignments(assignments);
       setSummaryLegacySchedules((legacyRows as WorkScheduleRow[]) ?? []);
+      setSummaryOvertimeRequests((overtimeRows as AttendanceOvertimeRequestRow[]) ?? []);
     } finally {
       setSummaryLoading(false);
     }
@@ -1118,10 +1168,21 @@ export default function AttendanceScreen() {
         leaveNotesByYmd.set(ymd, arr);
       }
     }
-    const byYmd = new Map<string, { checkIn?: AttendanceLog; checkOut?: AttendanceLog }>();
+    const overtimeByYmd = new Map<string, AttendanceOvertimeRequestRow[]>();
+    for (const row of summaryOvertimeRequests) {
+      if (row.status !== 'accepted' || !row.reason?.trim()) continue;
+      const arr = overtimeByYmd.get(row.work_date) ?? [];
+      arr.push(row);
+      overtimeByYmd.set(row.work_date, arr);
+    }
+    const byYmd = new Map<
+      string,
+      { checkIn?: AttendanceLog; checkOut?: AttendanceLog; logs: AttendanceLog[] }
+    >();
     for (const lg of summaryLogs) {
       const ymd = bangkokYmd(new Date(lg.created_at));
-      const entry = byYmd.get(ymd) ?? {};
+      const entry = byYmd.get(ymd) ?? { logs: [] };
+      entry.logs.push(lg);
       if (lg.kind === 'check_in' && !entry.checkIn) entry.checkIn = lg;
       if (lg.kind === 'check_out') entry.checkOut = lg;
       byYmd.set(ymd, entry);
@@ -1164,6 +1225,10 @@ export default function AttendanceScreen() {
           employeeCode,
           checkInLocation: 'ลา',
           note,
+          workMinutes: 0,
+          breakMinutes: 0,
+          overtimeMinutes: 0,
+          overtimeApprovalStatus: '-',
         };
       }
       const checkInAt = day?.checkIn?.created_at
@@ -1185,6 +1250,29 @@ export default function AttendanceScreen() {
               String(day.checkIn.branch_id)
             : '')
         : '';
+      const overtimeRows = overtimeByYmd.get(ymd) ?? [];
+      const breakMinutes = calculateBreakMinutes(day?.logs ?? [], day?.checkOut?.created_at);
+      const workMinutes = calculateWorkMinutes(
+        day?.checkIn?.created_at,
+        day?.checkOut?.created_at,
+        breakMinutes
+      );
+      const eligibleOvertimeRows = overtimeRows
+        .map((overtime) => ({
+          overtime,
+          minutes: calculateOvertimeMinutes(
+            overtime,
+            day?.checkOut?.created_at,
+            day?.checkIn?.created_at
+          ),
+        }))
+        .filter((row) =>
+          row.overtime.overtime_kind === 'manual' ? row.minutes > 0 : row.minutes >= 60
+        );
+      const overtimeMinutes = eligibleOvertimeRows.reduce(
+        (sum, row) => sum + row.minutes,
+        0
+      );
       return {
         dateYmd: ymd,
         checkIn: checkInAt,
@@ -1194,6 +1282,14 @@ export default function AttendanceScreen() {
         employeeCode,
         checkInLocation: location ?? '',
         note,
+        workMinutes,
+        breakMinutes,
+        overtimeMinutes,
+        overtimeApprovalStatus:
+          eligibleOvertimeRows
+            .map((row) => overtimeSummaryStatusLabel(row.overtime))
+            .filter((x) => x !== '-')
+            .join(' / ') || '-',
       };
     });
   }, [
@@ -1206,7 +1302,21 @@ export default function AttendanceScreen() {
     summaryLeaves,
     summaryLegacySchedules,
     summaryLogs,
+    summaryOvertimeRequests,
   ]);
+
+  const summaryTotals = useMemo(
+    () =>
+      summaryRows.reduce(
+        (acc, row) => ({
+          workMinutes: acc.workMinutes + row.workMinutes,
+          breakMinutes: acc.breakMinutes + row.breakMinutes,
+          overtimeMinutes: acc.overtimeMinutes + row.overtimeMinutes,
+        }),
+        { workMinutes: 0, breakMinutes: 0, overtimeMinutes: 0 }
+      ),
+    [summaryRows]
+  );
 
   const exportCsv = useCallback(async () => {
     if (summaryRows.length === 0) return;
@@ -1216,6 +1326,10 @@ export default function AttendanceScreen() {
         'วันที่',
         'เวลาเข้างาน',
         'เวลาออกงาน',
+        'เวลารวมทำงาน',
+        'เวลาพัก',
+        'OT',
+        'สถานะอนุมัติ OT',
         'รหัสพนักงาน',
         'สถานที่เข้างาน',
         'หมายเหตุ',
@@ -1233,6 +1347,10 @@ export default function AttendanceScreen() {
             row.dateYmd,
             checkInCell,
             checkOutCell,
+            formatDurationMinutesTh(row.workMinutes),
+            formatDurationMinutesTh(row.breakMinutes),
+            formatDurationMinutesTh(row.overtimeMinutes),
+            row.overtimeApprovalStatus,
             row.employeeCode,
             row.checkInLocation,
             row.note,
@@ -1279,6 +1397,10 @@ export default function AttendanceScreen() {
             <td>${htmlEscape(row.dateYmd)}</td>
             <td>${htmlEscape(row.checkIn || '')}</td>
             <td>${htmlEscape(row.checkOut || '')}</td>
+            <td>${htmlEscape(formatDurationMinutesTh(row.workMinutes))}</td>
+            <td>${htmlEscape(formatDurationMinutesTh(row.breakMinutes))}</td>
+            <td>${htmlEscape(formatDurationMinutesTh(row.overtimeMinutes))}</td>
+            <td>${htmlEscape(row.overtimeApprovalStatus)}</td>
             <td>${htmlEscape(row.employeeCode || '')}</td>
             <td>${htmlEscape(row.checkInLocation || '')}</td>
             <td>${htmlEscape(row.note || '')}</td>
@@ -1307,6 +1429,10 @@ export default function AttendanceScreen() {
               <th>วันที่</th>
               <th>เวลาเข้างาน</th>
               <th>เวลาออกงาน</th>
+              <th>เวลารวมทำงาน</th>
+              <th>เวลาพัก</th>
+              <th>OT</th>
+              <th>สถานะอนุมัติ OT</th>
               <th>รหัสพนักงาน</th>
               <th>สถานที่เข้างาน</th>
               <th>หมายเหตุ</th>
@@ -1630,6 +1756,7 @@ export default function AttendanceScreen() {
         }
       }
 
+      let earlyOvertimeMinutes = 0;
       if (todayWorkPlan) {
         const nowMs = Date.now();
         const planStartMs = new Date(todayWorkPlan.startIso).getTime();
@@ -1641,6 +1768,8 @@ export default function AttendanceScreen() {
               `ช้ากว่าตารางประมาณ ${lateMin} นาที (เวลาเริ่ม ${todayWorkPlan.startLabel} น.)`
             );
           }
+        } else if (Number.isFinite(planStartMs) && planStartMs - nowMs >= 60 * 60_000) {
+          earlyOvertimeMinutes = Math.floor((planStartMs - nowMs) / 60000);
         }
       }
 
@@ -1656,7 +1785,14 @@ export default function AttendanceScreen() {
       setMoodOpen(false);
       setPendingCheckIn(null);
       setMyTodayEmoji(opt.emoji);
-      setPostCheckInOpen(true);
+      if (earlyOvertimeMinutes >= 60 && todayWorkPlan) {
+        setEarlyOvertimePrompt({
+          minutes: earlyOvertimeMinutes,
+          startLabel: todayWorkPlan.startLabel,
+        });
+      } else {
+        setPostCheckInOpen(true);
+      }
       void Promise.all([load(), loadSummary()]);
     } catch (e) {
       toast.error('ผิดพลาด', e instanceof Error ? e.message : 'ไม่ทราบสาเหตุ');
@@ -1835,8 +1971,8 @@ export default function AttendanceScreen() {
   useEffect(() => {
     if (!pendingOvertimeRequest || !notifPrefs.checkout_enabled) return;
     void presentBackgroundAwareNotification(
-      'เลยเวลาออกงาน 30 นาที',
-      'โปรดยืนยันว่าต้องการทำงานล่วงเวลาหรือไม่'
+      'ถึงเวลาออกงานแล้ว',
+      'โปรดยืนยันว่าจะทำ OT ต่อหรือออกงานเลย'
     );
   }, [pendingOvertimeRequest?.id, notifPrefs.checkout_enabled]);
 
@@ -2023,13 +2159,53 @@ export default function AttendanceScreen() {
     setScheduleSelectedYmd(fallbackYmd);
   }, [scheduleCalendarOpen, scheduleMonthPeriod, scheduleSelectedYmd]);
 
+  useEffect(() => {
+    if (!pendingOvertimeRequest) setOtReason('');
+  }, [pendingOvertimeRequest]);
+
+  function closeEarlyOvertimePrompt() {
+    setEarlyOvertimePrompt(null);
+    setEarlyOvertimeReason('');
+    setPostCheckInOpen(true);
+  }
+
+  async function submitEarlyOvertimeRequest() {
+    const reason = earlyOvertimeReason.trim();
+    if (!reason) {
+      toast.info('เหตุผล OT', 'กรุณาระบุเหตุผลในการทำงานล่วงเวลาก่อนเวลา');
+      return;
+    }
+    setEarlyOvertimeSaving(true);
+    try {
+      const { error } = await supabase.rpc('request_early_overtime', {
+        p_reason: reason,
+      });
+      if (error) throw error;
+      toast.success('ส่งคำขอ OT แล้ว', 'คำขอเข้างานก่อนเวลาถูกส่งให้หัวหน้า/HR อนุมัติ');
+      setEarlyOvertimePrompt(null);
+      setEarlyOvertimeReason('');
+      setPostCheckInOpen(true);
+      await loadSummary();
+    } catch (e) {
+      toast.error('ส่งคำขอ OT ไม่สำเร็จ', e instanceof Error ? e.message : 'ไม่ทราบสาเหตุ');
+    } finally {
+      setEarlyOvertimeSaving(false);
+    }
+  }
+
   async function respondOvertime(accept: boolean) {
     if (!pendingOvertimeRequest?.id) return;
+    const reason = otReason.trim();
+    if (accept && !reason) {
+      toast.info('เหตุผล OT', 'กรุณาระบุเหตุผลในการทำงานล่วงเวลาก่อนส่งคำขอ');
+      return;
+    }
     setOtResponding(true);
     try {
       const { error } = await supabase.rpc('respond_overtime_request', {
         p_request_id: pendingOvertimeRequest.id,
         p_accept: accept,
+        p_reason: accept ? reason : null,
       });
       if (error) throw error;
       if (accept) {
@@ -2037,6 +2213,7 @@ export default function AttendanceScreen() {
       } else {
         toast.info('บันทึกแล้ว', 'ระบบออกงานให้เรียบร้อย');
       }
+      setOtReason('');
       await Promise.all([load(), loadSummary()]);
     } catch (e) {
       toast.error('ยืนยัน OT ไม่สำเร็จ', e instanceof Error ? e.message : 'ไม่ทราบสาเหตุ');
@@ -2047,9 +2224,10 @@ export default function AttendanceScreen() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดเวลาเข้า-ออก"
+        subtitle="กำลังตรวจตารางงาน ตำแหน่งสาขา และสถานะการเข้างานล่าสุด"
+      />
     );
   }
 
@@ -2278,6 +2456,54 @@ export default function AttendanceScreen() {
       </Modal>
 
       <Modal
+        visible={!!earlyOvertimePrompt}
+        transparent
+        animationType="fade"
+        onRequestClose={closeEarlyOvertimePrompt}>
+        <Pressable style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]} onPress={() => {}}>
+          <Pressable style={styles.sheetCard} onPress={() => {}}>
+            <Text style={styles.sheetTitle}>ขออนุมัติ OT ก่อนเวลา?</Text>
+            <Text style={styles.sheetBody}>
+              คุณเข้างานก่อนเวลางาน 1 ชั่วโมง ต้องการขออนุมัติโอทีหรือไม่
+            </Text>
+            {earlyOvertimePrompt ? (
+              <Text style={styles.otHintText}>
+                เวลาเริ่มงานตามตาราง {earlyOvertimePrompt.startLabel} น. · ก่อนเวลาประมาณ{' '}
+                {earlyOvertimePrompt.minutes} นาที
+              </Text>
+            ) : null}
+            <Text style={styles.offSiteLabel}>เหตุผลในการทำงานล่วงเวลา</Text>
+            <TextInput
+              style={styles.offSiteInput}
+              value={earlyOvertimeReason}
+              onChangeText={setEarlyOvertimeReason}
+              placeholder="เช่น เตรียมงานเปิดร้าน / รับออเดอร์ด่วน / เคลียร์งานค้าง"
+              multiline
+            />
+            <View style={styles.sheetActions}>
+              <Pressable
+                style={[styles.sheetSecondaryBtn, earlyOvertimeSaving && styles.disabled]}
+                disabled={earlyOvertimeSaving}
+                onPress={closeEarlyOvertimePrompt}>
+                <Text style={styles.sheetSecondaryBtnText}>ไม่ขอ OT</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.sheetPrimaryBtn,
+                  (earlyOvertimeSaving || !earlyOvertimeReason.trim()) && styles.disabled,
+                ]}
+                disabled={earlyOvertimeSaving || !earlyOvertimeReason.trim()}
+                onPress={() => void submitEarlyOvertimeRequest()}>
+                <Text style={styles.sheetPrimaryBtnText}>
+                  {earlyOvertimeSaving ? 'กำลังส่ง...' : 'ส่งคำขอ OT'}
+                </Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
         visible={!!pendingOvertimeRequest}
         transparent
         animationType="fade"
@@ -2286,11 +2512,19 @@ export default function AttendanceScreen() {
           <Pressable style={styles.sheetCard} onPress={() => {}}>
             <Text style={styles.sheetTitle}>ทำงานล่วงเวลา?</Text>
             <Text style={styles.sheetBody}>
-              เลยเวลาออกงาน 30 นาทีแล้ว ต้องการทำงานล่วงเวลาต่อหรือไม่
+              ถึงเวลาออกงานตามตารางแล้ว ต้องการทำ OT ต่อหรือออกงานเลย?
             </Text>
             <Text style={styles.otHintText}>
-              ถ้าทำ OT ต่อ ระบบจะนับเวลาทำงานต่อจนกว่าจะกดออกงานเอง
+              ถ้าทำ OT ต่อ ต้องระบุเหตุผล และระบบจะส่งคำขอให้หัวหน้า/HR หลังคุณกดออกงาน
             </Text>
+            <Text style={styles.offSiteLabel}>เหตุผลในการทำงานล่วงเวลา</Text>
+            <TextInput
+              style={styles.offSiteInput}
+              value={otReason}
+              onChangeText={setOtReason}
+              placeholder="เช่น เคลียร์งานปิดร้าน / ลูกค้าเยอะ / งานด่วน"
+              multiline
+            />
             {pendingOvertimeRequest?.response_deadline_at ? (
               <Text style={styles.otCountdownText}>
                 ระบบจะออกงานอัตโนมัติใน{' '}
@@ -2310,13 +2544,16 @@ export default function AttendanceScreen() {
                 style={[styles.sheetSecondaryBtn, otResponding && styles.disabled]}
                 disabled={otResponding}
                 onPress={() => void respondOvertime(false)}>
-                <Text style={styles.sheetSecondaryBtnText}>ไม่ทำ OT (ออกงาน)</Text>
+                <Text style={styles.sheetSecondaryBtnText}>ออกงานเลย</Text>
               </Pressable>
               <Pressable
-                style={[styles.sheetPrimaryBtn, otResponding && styles.disabled]}
-                disabled={otResponding}
+                style={[
+                  styles.sheetPrimaryBtn,
+                  (otResponding || !otReason.trim()) && styles.disabled,
+                ]}
+                disabled={otResponding || !otReason.trim()}
                 onPress={() => void respondOvertime(true)}>
-                <Text style={styles.sheetPrimaryBtnText}>ต้องการทำ OT</Text>
+                <Text style={styles.sheetPrimaryBtnText}>ทำโอที</Text>
               </Pressable>
             </View>
           </Pressable>
@@ -2589,6 +2826,7 @@ export default function AttendanceScreen() {
             <AnnouncementCarousel
               urls={announcementUrls}
               slides={announcementSlides}
+              transitionMode={announcementTransitionMode}
               slideHeightPx={announcementSlideHeightPx}
             />
             <View style={styles.userStrip}>
@@ -2835,6 +3073,26 @@ export default function AttendanceScreen() {
               <Text style={styles.summaryPeriodText}>
                 ช่วงที่แสดง: {period.startYmd} - {period.endYmd}
               </Text>
+              <View style={styles.durationSummaryGrid}>
+                <View style={styles.durationSummaryCard}>
+                  <Text style={styles.durationSummaryLabel}>เวลาทำงานรวม</Text>
+                  <Text style={styles.durationSummaryValue}>
+                    {formatDurationMinutesTh(summaryTotals.workMinutes)}
+                  </Text>
+                </View>
+                <View style={styles.durationSummaryCard}>
+                  <Text style={styles.durationSummaryLabel}>เวลาพักรวม</Text>
+                  <Text style={styles.durationSummaryValue}>
+                    {formatDurationMinutesTh(summaryTotals.breakMinutes)}
+                  </Text>
+                </View>
+                <View style={styles.durationSummaryCard}>
+                  <Text style={styles.durationSummaryLabel}>OT รวม</Text>
+                  <Text style={styles.durationSummaryValue}>
+                    {formatDurationMinutesTh(summaryTotals.overtimeMinutes)}
+                  </Text>
+                </View>
+              </View>
               <View style={styles.summaryExportRow}>
                 <Pressable
                   style={[styles.summaryExportBtn, exporting && styles.disabled]}
@@ -2867,6 +3125,18 @@ export default function AttendanceScreen() {
                       <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colTime]}>
                         เวลาออกงาน
                       </Text>
+                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
+                        เวลารวมทำงาน
+                      </Text>
+                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
+                        เวลาพัก
+                      </Text>
+                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
+                        OT
+                      </Text>
+                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colOtStatus]}>
+                        สถานะ OT
+                      </Text>
                       <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colEmp]}>
                         รหัสพนักงาน
                       </Text>
@@ -2882,6 +3152,18 @@ export default function AttendanceScreen() {
                         <Text style={[styles.summaryCell, styles.colDate]}>{row.dateYmd}</Text>
                         <Text style={[styles.summaryCell, styles.colTime]}>{row.checkIn}</Text>
                         <Text style={[styles.summaryCell, styles.colTime]}>{row.checkOut}</Text>
+                        <Text style={[styles.summaryCell, styles.colDuration]}>
+                          {formatDurationMinutesTh(row.workMinutes)}
+                        </Text>
+                        <Text style={[styles.summaryCell, styles.colDuration]}>
+                          {formatDurationMinutesTh(row.breakMinutes)}
+                        </Text>
+                        <Text style={[styles.summaryCell, styles.colDuration]}>
+                          {formatDurationMinutesTh(row.overtimeMinutes)}
+                        </Text>
+                        <Text style={[styles.summaryCell, styles.colOtStatus]}>
+                          {row.overtimeApprovalStatus}
+                        </Text>
                         <Text style={[styles.summaryCell, styles.colEmp]}>{row.employeeCode}</Text>
                         <Text style={[styles.summaryCell, styles.colLocation]}>{row.checkInLocation}</Text>
                         <Text style={[styles.summaryCell, styles.colNote]}>{row.note}</Text>
@@ -3215,6 +3497,23 @@ const styles = StyleSheet.create({
   summaryTitle: { fontSize: 16, fontWeight: '700', color: c.text },
   summaryHint: { fontSize: 12, color: c.textMuted, marginBottom: 2 },
   summaryPeriodText: { fontSize: 12, color: c.textSecondary },
+  durationSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+  },
+  durationSummaryCard: {
+    flexGrow: 1,
+    minWidth: 145,
+    padding: 10,
+    borderRadius: r.md,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  durationSummaryLabel: { color: c.textMuted, fontSize: 11, fontWeight: '700' },
+  durationSummaryValue: { color: c.primaryDark, fontSize: 16, fontWeight: '900', marginTop: 3 },
   summaryExportRow: { flexDirection: 'row', gap: 8 },
   summaryExportBtn: {
     flex: 1,
@@ -3256,6 +3555,8 @@ const styles = StyleSheet.create({
   summaryHeaderCell: { fontWeight: '700' },
   colDate: { width: 110 },
   colTime: { width: 94 },
+  colDuration: { width: 125 },
+  colOtStatus: { width: 135 },
   colEmp: { width: 110 },
   colLocation: { width: 220 },
   colNote: { width: 260 },

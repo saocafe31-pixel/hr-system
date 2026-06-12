@@ -6,6 +6,7 @@ export function leaveTypeLabelTh(t: string): string {
   if (t === 'sick') return 'ลาป่วย';
   if (t === 'personal') return 'ลากิจ';
   if (t === 'vacation') return 'ลาพักร้อน';
+  if (t === 'unpaid') return 'ลาไม่รับเงิน';
   return t;
 }
 

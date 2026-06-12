@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { DatePickerField } from '@/components/DatePickerField';
 import { UserAvatar } from '@/components/UserAvatar';
 import { NatureTheme } from '@/constants/Theme';
@@ -37,6 +38,8 @@ type AssignmentWithShift = WorkScheduleAssignmentRow & {
 /** select เดียวกันทั้งโหลดรายการหลักและโหลดรายละเอียดตามพนักงาน */
 const WORK_SCHEDULE_ASSIGNMENT_SELECT =
   'id, user_id, work_date, shift_id, allowed_branch_id, created_by, created_at, work_shifts(name, start_time, end_time)';
+const ASSIGNMENT_PAGE_SIZE = 1000;
+const WEEKDAY_LABELS_TH = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
 
 type SchedulePerson = Profile & { avatar_url?: string | null; employee_id?: string | null };
 type EmployeeLite = { id: string; position?: string | null; nickname?: string | null };
@@ -72,6 +75,69 @@ function toPgTime(hhmm: string): string {
   const h = String(Number(m[1])).padStart(2, '0');
   const min = m[2];
   return `${h}:${min}:00`;
+}
+
+function ymdOfDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate()
+  ).padStart(2, '0')}`;
+}
+
+function dateFromYmd(ymd: string): Date {
+  return new Date(`${ymd}T12:00:00+07:00`);
+}
+
+function daysInMonth(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+}
+
+function monthTitleTh(d: Date): string {
+  return new Intl.DateTimeFormat('th-TH-u-ca-gregory-nu-latn', {
+    month: 'long',
+    year: 'numeric',
+  }).format(d);
+}
+
+function formatSelectedDateTh(ymd: string): string {
+  return new Intl.DateTimeFormat('th-TH-u-ca-gregory-nu-latn', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  }).format(dateFromYmd(ymd));
+}
+
+function calendarCellsForMonth(month: Date): Array<string | null> {
+  const first = new Date(month.getFullYear(), month.getMonth(), 1);
+  const pad = first.getDay();
+  const total = daysInMonth(first);
+  const cells: Array<string | null> = [];
+  for (let i = 0; i < pad; i += 1) cells.push(null);
+  for (let day = 1; day <= total; day += 1) {
+    cells.push(ymdOfDate(new Date(first.getFullYear(), first.getMonth(), day)));
+  }
+  while (cells.length % 7 !== 0) cells.push(null);
+  return cells;
+}
+
+async function fetchAllScheduleAssignments(): Promise<{
+  data: AssignmentWithShift[] | null;
+  error: { message?: string; code?: string } | null;
+}> {
+  const all: AssignmentWithShift[] = [];
+  for (let from = 0; ; from += ASSIGNMENT_PAGE_SIZE) {
+    const to = from + ASSIGNMENT_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from('work_schedule_assignments')
+      .select(WORK_SCHEDULE_ASSIGNMENT_SELECT)
+      .order('work_date', { ascending: false })
+      .range(from, to);
+    if (error) return { data: null, error };
+    const page = ((data ?? []) as unknown as AssignmentWithShift[]);
+    all.push(...page);
+    if (page.length < ASSIGNMENT_PAGE_SIZE) break;
+  }
+  return { data: all, error: null };
 }
 
 const WEB_MODAL_BACKDROP = Platform.select({
@@ -166,6 +232,14 @@ export default function ScheduleScreen() {
   const [bulkEditAsnSaving, setBulkEditAsnSaving] = useState(false);
   const [bulkDeleteAsnConfirmOpen, setBulkDeleteAsnConfirmOpen] = useState(false);
   const [bulkDeleteAsnSaving, setBulkDeleteAsnSaving] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [selectedCalendarYmd, setSelectedCalendarYmd] = useState(() =>
+    dateToBangkokYmd(new Date())
+  );
+  const [calendarDetailOpen, setCalendarDetailOpen] = useState(false);
 
   const load = useCallback(async () => {
     const { data, error } = await supabase
@@ -182,10 +256,7 @@ export default function ScheduleScreen() {
       .from('work_shifts')
       .select('*')
       .order('name');
-    const { data: asn, error: asnErr } = await supabase
-      .from('work_schedule_assignments')
-      .select(WORK_SCHEDULE_ASSIGNMENT_SELECT)
-      .order('work_date', { ascending: false });
+    const { data: asn, error: asnErr } = await fetchAllScheduleAssignments();
 
     const missing =
       looksLikeMissingShiftsMigration(shErr) ||
@@ -202,7 +273,7 @@ export default function ScheduleScreen() {
         toast.error('โหลดกะไม่สำเร็จ', shErr.message);
       }
       if (!asnErr) {
-        setAssignments((asn ?? []) as unknown as AssignmentWithShift[]);
+        setAssignments(asn ?? []);
       } else {
         toast.error('โหลดมอบหมายไม่สำเร็จ', asnErr.message);
       }
@@ -296,6 +367,7 @@ export default function ScheduleScreen() {
     }
     return m;
   }, [people]);
+  const peopleById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
   const branchLabel = useMemo(() => {
     const m = new Map<number, string>();
     for (const b of branches) {
@@ -308,6 +380,51 @@ export default function ScheduleScreen() {
     () => assignments.filter((a) => visiblePeopleIds.has(a.user_id)),
     [assignments, visiblePeopleIds]
   );
+  const assignmentsByDate = useMemo(() => {
+    const map = new Map<string, AssignmentWithShift[]>();
+    for (const row of visibleAssignments) {
+      map.set(row.work_date, [...(map.get(row.work_date) ?? []), row]);
+    }
+    for (const [ymd, list] of map.entries()) {
+      map.set(
+        ymd,
+        [...list].sort((a, b) => {
+          const aTime = a.work_shifts?.start_time ?? '';
+          const bTime = b.work_shifts?.start_time ?? '';
+          return (
+            aTime.localeCompare(bTime) ||
+            (peopleLabel.get(a.user_id) ?? '').localeCompare(
+              peopleLabel.get(b.user_id) ?? '',
+              'th'
+            )
+          );
+        })
+      );
+    }
+    return map;
+  }, [peopleLabel, visibleAssignments]);
+  const calendarCells = useMemo(() => calendarCellsForMonth(calendarMonth), [calendarMonth]);
+  const selectedDayAssignments = useMemo(
+    () => assignmentsByDate.get(selectedCalendarYmd) ?? [],
+    [assignmentsByDate, selectedCalendarYmd]
+  );
+  const selectedDayAssignmentGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      { branchName: string; assignments: AssignmentWithShift[] }
+    >();
+    for (const row of selectedDayAssignments) {
+      const key = row.allowed_branch_id != null ? String(row.allowed_branch_id) : 'none';
+      const branchName =
+        row.allowed_branch_id != null
+          ? branchLabel.get(row.allowed_branch_id) ?? `สาขา #${row.allowed_branch_id}`
+          : 'ไม่จำกัดสาขา';
+      const current = groups.get(key) ?? { branchName, assignments: [] };
+      current.assignments.push(row);
+      groups.set(key, current);
+    }
+    return [...groups.values()].sort((a, b) => a.branchName.localeCompare(b.branchName, 'th'));
+  }, [branchLabel, selectedDayAssignments]);
   const assignmentUsers = useMemo(
     () =>
       people
@@ -375,6 +492,25 @@ export default function ScheduleScreen() {
   const allDetailRowsSelected =
     assignmentDetailRows.length > 0 &&
     assignmentDetailRows.every((a) => selectedDetailAssignmentIds[a.id]);
+
+  function shiftCalendarMonth(delta: number) {
+    setCalendarMonth((prev) => {
+      const next = new Date(prev.getFullYear(), prev.getMonth() + delta, 1);
+      setSelectedCalendarYmd((selected) => {
+        const selectedDay = dateFromYmd(selected).getDate();
+        const day = Math.min(selectedDay, daysInMonth(next));
+        return ymdOfDate(new Date(next.getFullYear(), next.getMonth(), day));
+      });
+      return next;
+    });
+  }
+
+  function jumpCalendarToday() {
+    const now = new Date();
+    setCalendarMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+    setSelectedCalendarYmd(dateToBangkokYmd(now));
+    setCalendarDetailOpen(true);
+  }
 
   function openAssignmentDetail(userId: string) {
     setSelectedDetailAssignmentIds({});
@@ -793,9 +929,10 @@ export default function ScheduleScreen() {
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={NatureTheme.colors.primary} />
-      </View>
+      <AppLoadingScreen
+        title="กำลังโหลดตารางงาน"
+        subtitle="กำลังเตรียมกะ รายชื่อพนักงาน และสาขาที่เข้าได้"
+      />
     );
   }
 
@@ -819,7 +956,7 @@ export default function ScheduleScreen() {
           />
         }>
       <Text style={styles.hint}>
-        ตารางแบบ ISO (เดิม) กับกะ template + มอบหมายรายวัน (ใหม่)
+        จัดการกะ template + มอบหมายรายวัน และดูปฏิทินว่าพนักงานเข้าเวลากะไหน/สาขาใด
       </Text>
 
       {shiftModuleMissing ? (
@@ -835,9 +972,6 @@ export default function ScheduleScreen() {
 
       {mgr ? (
         <View style={styles.mgrRow}>
-          <Pressable style={styles.addBtn} onPress={() => setOpen(true)}>
-            <Text style={styles.addBtnText}>+ ตาราง ISO</Text>
-          </Pressable>
           <Pressable
             style={[styles.addBtnAlt, shiftModuleMissing && styles.btnDisabled]}
             onPress={() => {
@@ -872,6 +1006,92 @@ export default function ScheduleScreen() {
           มอบหมายกะรายวันและแก้กะ — เฉพาะผู้จัดการ/แอดมิน
         </Text>
       )}
+
+      <Text style={styles.section}>ปฏิทินตารางงานรายวัน</Text>
+      <View style={styles.calendarCard}>
+        <View style={styles.calendarHeader}>
+          <Pressable style={styles.calendarNavBtn} onPress={() => shiftCalendarMonth(-1)}>
+            <Text style={styles.calendarNavText}>‹</Text>
+          </Pressable>
+          <View style={styles.calendarHeaderCenter}>
+            <Text style={styles.calendarTitle}>{monthTitleTh(calendarMonth)}</Text>
+            <Text style={styles.calendarSubtitle}>
+              เลือกวันที่เพื่อดูพนักงาน กะ และสาขาที่เข้าได้
+            </Text>
+          </View>
+          <Pressable style={styles.calendarNavBtn} onPress={() => shiftCalendarMonth(1)}>
+            <Text style={styles.calendarNavText}>›</Text>
+          </Pressable>
+        </View>
+        <Pressable style={styles.calendarTodayBtn} onPress={jumpCalendarToday}>
+          <Text style={styles.calendarTodayText}>วันนี้</Text>
+        </Pressable>
+        <View style={styles.calendarWeekRow}>
+          {WEEKDAY_LABELS_TH.map((label) => (
+            <Text key={label} style={styles.calendarWeekText}>
+              {label}
+            </Text>
+          ))}
+        </View>
+        <View style={styles.calendarGrid}>
+          {calendarCells.map((ymd, index) => {
+            const count = ymd ? assignmentsByDate.get(ymd)?.length ?? 0 : 0;
+            const selected = ymd === selectedCalendarYmd;
+            const today = ymd === dateToBangkokYmd(new Date());
+            return (
+              <Pressable
+                key={`${ymd ?? 'blank'}-${index}`}
+                style={[
+                  styles.calendarCell,
+                  !ymd && styles.calendarCellBlank,
+                  count > 0 && styles.calendarCellHasWork,
+                  today && styles.calendarCellToday,
+                  selected && styles.calendarCellSelected,
+                ]}
+                disabled={!ymd}
+                onPress={() => {
+                  if (!ymd) return;
+                  setSelectedCalendarYmd(ymd);
+                  setCalendarDetailOpen(true);
+                }}>
+                {ymd ? (
+                  <>
+                    <Text
+                      style={[
+                        styles.calendarDayText,
+                        selected && styles.calendarDayTextSelected,
+                      ]}>
+                      {dateFromYmd(ymd).getDate()}
+                    </Text>
+                    {count > 0 ? (
+                      <Text
+                        style={[
+                          styles.calendarCountText,
+                          selected && styles.calendarDayTextSelected,
+                        ]}>
+                        {count} คน
+                      </Text>
+                    ) : null}
+                  </>
+                ) : null}
+              </Pressable>
+            );
+          })}
+        </View>
+        <View style={styles.calendarSelectedSummary}>
+          <View style={styles.calendarSelectedBody}>
+            <Text style={styles.dayDetailTitle}>{formatSelectedDateTh(selectedCalendarYmd)}</Text>
+            <Text style={styles.dayDetailEmpty}>
+              {selectedDayAssignments.length > 0
+                ? `มีพนักงานเข้างาน ${selectedDayAssignments.length} คน`
+                : 'ไม่มีพนักงานถูกมอบหมายในวันนี้'}
+            </Text>
+          </View>
+          <Pressable style={styles.calendarDetailBtn} onPress={() => setCalendarDetailOpen(true)}>
+            <Text style={styles.calendarDetailBtnText}>ดูรายละเอียด</Text>
+          </Pressable>
+        </View>
+      </View>
 
       <Text style={styles.section}>มอบหมายล่าสุด</Text>
       {visibleAssignments.length === 0 ? (
@@ -940,35 +1160,80 @@ export default function ScheduleScreen() {
         ))
       )}
 
-      <Text style={styles.section}>ตารางแบบเต็มช่วง (work_schedules)</Text>
-      <Text style={styles.hint}>ตัวอย่างเวลา: 2026-04-06T09:00:00+07:00</Text>
-      {rows.length === 0 ? (
-        <Text style={styles.empty}>ยังไม่มีตาราง</Text>
-      ) : (
-        rows.map((item) => (
-          <View key={item.id} style={styles.card}>
-            <Text style={styles.cardTitle}>{item.title || 'กะงาน'}</Text>
-            <Text style={styles.cardMeta}>
-              {new Date(item.start_at).toLocaleString('th-TH')} →{' '}
-              {new Date(item.end_at).toLocaleString('th-TH')}
-            </Text>
-            <Text style={styles.cardMeta}>
-              พนักงาน: {peopleLabel.get(item.user_id) ?? item.user_id.slice(0, 8)}
-            </Text>
-            {mgr ? (
-              <View style={styles.cardActions}>
-                <Pressable onPress={() => openEditSchedule(item)}>
-                  <Text style={styles.linkBtn}>แก้ไข</Text>
-                </Pressable>
-                <Pressable onPress={() => askDeleteSchedule(item)}>
-                  <Text style={styles.linkBtnDanger}>ลบ</Text>
-                </Pressable>
-              </View>
-            ) : null}
-          </View>
-        ))
-      )}
       </ScrollView>
+
+      <Modal
+        visible={calendarDetailOpen}
+        animationType="slide"
+        transparent
+        statusBarTranslucent
+        presentationStyle="overFullScreen"
+        onRequestClose={() => setCalendarDetailOpen(false)}>
+        <View style={[styles.backdrop, WEB_MODAL_BACKDROP]}>
+          <Pressable style={styles.backdropHit} onPress={() => setCalendarDetailOpen(false)} />
+          <View style={[styles.modal, modalSheetPad]}>
+            <Text style={styles.modalTitle}>
+              ตารางงาน {formatSelectedDateTh(selectedCalendarYmd)}
+            </Text>
+            <Text style={styles.cardMeta}>
+              แสดงแยกตามสาขา พร้อมรายชื่อพนักงาน ตำแหน่ง และกะงาน
+            </Text>
+            <ScrollView
+              style={styles.modalScroll}
+              contentContainerStyle={styles.modalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator>
+              {selectedDayAssignments.length === 0 ? (
+                <Text style={styles.empty}>ไม่มีพนักงานถูกมอบหมายในวันนี้</Text>
+              ) : (
+                selectedDayAssignmentGroups.map((group) => (
+                  <View key={group.branchName} style={styles.scheduleBranchGroup}>
+                    <View style={styles.scheduleBranchHeader}>
+                      <Text style={styles.scheduleBranchTitle}>{group.branchName}</Text>
+                      <Text style={styles.scheduleBranchCount}>
+                        เข้างาน {group.assignments.length} คน
+                      </Text>
+                    </View>
+                    {group.assignments.map((a) => {
+                      const person = peopleById.get(a.user_id);
+                      const name =
+                        peopleLabel.get(a.user_id) ?? person?.email ?? a.user_id.slice(0, 8);
+                      const subtitle =
+                        positionByProfileId[a.user_id] ||
+                        `${roleLabelTh(person?.role)} · ${person?.employee_code?.trim() || '—'}`;
+                      const shiftName = a.work_shifts?.name ?? 'กะ';
+                      const shiftTime = `${a.work_shifts?.start_time?.slice(0, 5) ?? '?'}-${
+                        a.work_shifts?.end_time?.slice(0, 5) ?? '?'
+                      }`;
+                      return (
+                        <View key={a.id} style={styles.scheduleBranchEmployeeRow}>
+                          <UserAvatar
+                            uri={person?.avatar_url ?? undefined}
+                            label={name}
+                            size={40}
+                          />
+                          <View style={styles.scheduleEmployeeBody}>
+                            <Text style={styles.scheduleEmployeeName}>{name}</Text>
+                            <Text style={styles.scheduleEmployeeMeta}>{subtitle}</Text>
+                            <Text style={styles.scheduleEmployeeShift}>
+                              {shiftName} {shiftTime}
+                            </Text>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ))
+              )}
+            </ScrollView>
+            <View style={styles.actions}>
+              <Pressable onPress={() => setCalendarDetailOpen(false)}>
+                <Text style={{ color: NatureTheme.colors.text }}>ปิด</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={assignmentPickerOpen}
@@ -995,7 +1260,7 @@ export default function ScheduleScreen() {
               keyboardShouldPersistTaps="handled"
               renderItem={({ item }) => {
                 const selected = selectedAssignmentUserId === item.id;
-                return (
+                  return (
                   <Pressable
                     style={[styles.row, selected && styles.rowOn]}
                     onPress={() => {
@@ -1016,7 +1281,7 @@ export default function ScheduleScreen() {
                       </View>
                     </View>
                   </Pressable>
-                );
+                  );
               }}
               ListEmptyComponent={
                 <Text style={styles.empty}>
@@ -1758,6 +2023,204 @@ const styles = StyleSheet.create({
     marginHorizontal: s.screen,
     marginTop: 10,
     marginBottom: 6,
+  },
+  calendarCard: {
+    marginHorizontal: s.screen,
+    marginBottom: s.section,
+    padding: s.card,
+    borderRadius: r.md,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  calendarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  calendarHeaderCenter: { flex: 1, minWidth: 0, alignItems: 'center' },
+  calendarTitle: { color: c.text, fontSize: 16, fontWeight: '900' },
+  calendarSubtitle: {
+    color: c.textMuted,
+    fontSize: 11,
+    marginTop: 3,
+    textAlign: 'center',
+  },
+  calendarNavBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calendarNavText: { color: c.primaryDark, fontSize: 24, fontWeight: '900', lineHeight: 26 },
+  calendarTodayBtn: {
+    alignSelf: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    marginBottom: 10,
+  },
+  calendarTodayText: { color: c.primaryDark, fontSize: 12, fontWeight: '800' },
+  calendarWeekRow: {
+    flexDirection: 'row',
+    marginBottom: 6,
+  },
+  calendarWeekText: {
+    flex: 1,
+    textAlign: 'center',
+    color: c.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  calendarGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderColor: c.borderSoft,
+    borderRadius: r.sm,
+    overflow: 'hidden',
+  },
+  calendarCell: {
+    width: `${100 / 7}%`,
+    minHeight: 54,
+    paddingVertical: 7,
+    paddingHorizontal: 3,
+    backgroundColor: c.surfaceMuted,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: c.borderSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calendarCellBlank: { opacity: 0.35 },
+  calendarCellHasWork: { backgroundColor: 'rgba(166, 184, 116, 0.11)' },
+  calendarCellToday: { borderColor: c.primaryMuted },
+  calendarCellSelected: { backgroundColor: c.primary, borderColor: c.primary },
+  calendarDayText: { color: c.text, fontSize: 13, fontWeight: '800' },
+  calendarDayTextSelected: { color: c.onAccent },
+  calendarCountText: { color: c.primaryDark, fontSize: 9, fontWeight: '800', marginTop: 3 },
+  calendarSelectedSummary: {
+    marginTop: 12,
+    padding: 10,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  calendarSelectedBody: { flex: 1, minWidth: 0 },
+  calendarDetailBtn: {
+    borderRadius: 999,
+    backgroundColor: c.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  calendarDetailBtnText: { color: c.onAccent, fontSize: 12, fontWeight: '800' },
+  dayDetailPanel: {
+    marginTop: 12,
+    padding: 10,
+    borderRadius: r.sm,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  dayDetailTitle: { color: c.text, fontSize: 14, fontWeight: '900', marginBottom: 8 },
+  dayDetailEmpty: { color: c.textMuted, fontSize: 12, lineHeight: 18 },
+  dayAssignmentRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: c.borderSoft,
+  },
+  dayAssignmentBody: { flex: 1, minWidth: 0 },
+  dayAssignmentName: { color: c.text, fontSize: 13, fontWeight: '800' },
+  dayAssignmentMeta: { color: c.textMuted, fontSize: 11, marginTop: 3 },
+  dayAssignmentBranch: { color: c.primaryDark, fontSize: 11, fontWeight: '800', marginTop: 4 },
+  scheduleBranchGroup: {
+    marginBottom: 12,
+    borderRadius: r.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surface,
+    overflow: 'hidden',
+  },
+  scheduleBranchHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: c.primaryLight,
+    borderBottomWidth: 1,
+    borderBottomColor: c.borderSoft,
+  },
+  scheduleBranchTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: c.primaryDark,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  scheduleBranchCount: {
+    color: c.primaryDark,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  scheduleBranchEmployeeRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: c.borderSoft,
+  },
+  scheduleDayCard: {
+    padding: 12,
+    marginBottom: 10,
+    borderRadius: r.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surface,
+  },
+  scheduleShiftTitle: {
+    color: c.primaryDark,
+    fontSize: 14,
+    fontWeight: '900',
+    marginBottom: 10,
+  },
+  scheduleEmployeeRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  scheduleEmployeeBody: { flex: 1, minWidth: 0 },
+  scheduleEmployeeName: { color: c.text, fontSize: 14, fontWeight: '900' },
+  scheduleEmployeeMeta: { color: c.textMuted, fontSize: 12, marginTop: 4 },
+  scheduleEmployeeShift: {
+    color: c.text,
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 6,
+  },
+  scheduleEmployeeBranch: {
+    color: c.primaryDark,
+    fontSize: 12,
+    fontWeight: '800',
+    marginTop: 5,
   },
   card: {
     marginHorizontal: s.screen,

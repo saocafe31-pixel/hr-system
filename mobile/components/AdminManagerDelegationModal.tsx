@@ -31,7 +31,7 @@ const WEB_MODAL_BACKDROP = Platform.select({
 type Props = {
   visible: boolean;
   manager: Profile | null;
-  /** บัญชีที่เลือกเป็นพนักงานใต้บังคับได้ (ไม่รวมแอดมิน) */
+  /** บัญชีที่เลือกเป็นคนในทีมได้ รวมถึง Admin/HR เมื่อองค์กรต้องการให้ manager มอบหมายงานให้ได้ */
   candidateProfiles: Profile[];
   onClose: () => void;
   onSaved: () => void;
@@ -183,9 +183,9 @@ export function AdminManagerDelegationModal({
                   {canManageSchedule ? 'เปิด' : 'ปิด'} — แก้มอบหมายกะรายวันให้ลูกทีมในหน้า «ตาราง»
                 </Text>
               </View>
-              <Text style={[styles.label, { marginTop: 14 }]}>พนักงานภายใต้การดูแล</Text>
+              <Text style={[styles.label, { marginTop: 14 }]}>คนในทีม / ผู้รับมอบหมายงาน</Text>
               <Text style={styles.hint}>
-                เลือกบัญชีที่ผู้จัดการคนนี้ดูแล — ต้องเชื่อม employee ในโปรไฟล์แล้วจึงจะเห็นในหน้า «ทีม» ของผู้จัดการ
+                เลือกบัญชีที่ผู้จัดการคนนี้ดูแลหรือมอบหมายงานให้ได้ — รวม Admin/HR ได้ตามโครงสร้างองค์กร
               </Text>
               {sortedCandidates.map((p) => {
                 const on = selected.has(p.id);
