@@ -36,6 +36,17 @@ type Props = {
   onSubmitted?: () => void;
 };
 
+type SalaryClaimEligibility = {
+  claim_month: string;
+  salary_window_open: boolean;
+  base_salary: number;
+  base_salary_source: 'payroll' | 'employee_input';
+  eligible_base_amount: number;
+  max_claim_amount: number;
+  active_claim_id: string | null;
+  active_claim_status: SalaryClaimRow['status'] | null;
+};
+
 function newExpenseDraft(): ExpenseDraft {
   return {
     key: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -49,11 +60,6 @@ function newExpenseDraft(): ExpenseDraft {
 
 function money(n: number): string {
   return n.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function currentClaimMonth(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 }
 
 function claimStatusLabelTh(status: SalaryClaimRow['status']): string {
@@ -94,6 +100,8 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
   const [salaryNote, setSalaryNote] = useState('');
   const [salarySaving, setSalarySaving] = useState(false);
   const [salaryHistory, setSalaryHistory] = useState<SalaryClaimRow[]>([]);
+  const [salaryEligibility, setSalaryEligibility] = useState<SalaryClaimEligibility | null>(null);
+  const [salaryEligibilityLoading, setSalaryEligibilityLoading] = useState(false);
 
   const [expenseRows, setExpenseRows] = useState<ExpenseDraft[]>([newExpenseDraft()]);
   const [expenseSaving, setExpenseSaving] = useState(false);
@@ -104,9 +112,13 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
 
   const today = new Date();
   const day = today.getDate();
-  const salaryWindowOpen = day >= 10 && day <= 14;
+  const salaryWindowOpen = salaryEligibility?.salary_window_open ?? (day >= 10 && day <= 14);
 
-  const baseSalaryNum = Number(salaryBase || 0);
+  const payrollBaseSalary = Number(salaryEligibility?.base_salary ?? 0);
+  const salaryBaseFromPayroll =
+    salaryEligibility?.base_salary_source === 'payroll' && payrollBaseSalary > 0;
+  const activeSalaryClaimStatus = salaryEligibility?.active_claim_status ?? null;
+  const baseSalaryNum = salaryBaseFromPayroll ? payrollBaseSalary : Number(salaryBase || 0);
   const halfBase = Number.isFinite(baseSalaryNum) && baseSalaryNum > 0 ? baseSalaryNum * 0.5 : 0;
   const salaryCeiling = halfBase * 0.7;
 
@@ -180,9 +192,32 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
     }
   }, [toast, userId]);
 
+  const loadSalaryEligibility = useCallback(async () => {
+    if (!userId) {
+      setSalaryEligibility(null);
+      return;
+    }
+    setSalaryEligibilityLoading(true);
+    try {
+      const { data, error } = await supabase.rpc('salary_claim_eligibility');
+      if (error) throw error;
+      const row = Array.isArray(data) ? data[0] : data;
+      setSalaryEligibility((row as SalaryClaimEligibility | null) ?? null);
+    } catch (e) {
+      setSalaryEligibility(null);
+      toast.error('โหลดสิทธิ์เบิกเงินเดือนไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setSalaryEligibilityLoading(false);
+    }
+  }, [toast, userId]);
+
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    void loadSalaryEligibility();
+  }, [loadSalaryEligibility]);
 
   async function notifyAdminsForNewClaim(
     kind: 'salary' | 'expense',
@@ -236,25 +271,11 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
       return;
     }
     setSalarySaving(true);
-    const { data, error } = await supabase
-      .from('salary_claims')
-      .insert({
-        user_id: userId,
-        employee_id: payoutIdentity.employee_id,
-        claim_month: currentClaimMonth(),
-        base_salary: baseSalaryNum,
-        eligible_base_amount: halfBase,
-        max_claim_amount: salaryCeiling,
-        requested_amount: ask,
-        full_name: payoutIdentity.full_name ?? null,
-        bank_name: payoutIdentity.bank_name,
-        account_number: payoutIdentity.account_number,
-        branch_name: payoutIdentity.branch_name,
-        branch_id: payoutIdentity.branch_id,
-        note: salaryNote.trim() || null,
-      })
-      .select('id, requested_amount')
-      .single();
+    const { data, error } = await supabase.rpc('submit_salary_claim', {
+      p_requested_amount: ask,
+      p_fallback_base_salary: salaryBaseFromPayroll ? null : baseSalaryNum,
+      p_note: salaryNote.trim() || null,
+    });
     setSalarySaving(false);
     if (error) {
       toast.error('ส่งคำขอไม่สำเร็จ', error.message);
@@ -267,6 +288,7 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
     }
     toast.success('ส่งคำขอเบิกเงินเดือนแล้ว', 'ส่งเข้าหน้าแอดมินเรียบร้อย');
     await loadHistory();
+    await loadSalaryEligibility();
     onSubmitted?.();
   }
 
@@ -372,13 +394,40 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
         <Text style={styles.hint}>
           วันนี้วันที่ {day} · สถานะ {salaryWindowOpen ? 'เปิดให้เบิก' : 'ยังไม่อยู่ในช่วงเบิก'}
         </Text>
-        <TextInput
-          style={styles.input}
-          value={salaryBase}
-          onChangeText={setSalaryBase}
-          keyboardType="decimal-pad"
-          placeholder="ฐานเงินเดือน (บาท)"
-        />
+        {salaryEligibilityLoading ? (
+          <View style={styles.salaryInfoBox}>
+            <ActivityIndicator color={c.primary} />
+            <Text style={styles.salaryInfoText}>กำลังตรวจสอบฐานเงินเดือนจาก Payroll...</Text>
+          </View>
+        ) : salaryBaseFromPayroll ? (
+          <View style={styles.salaryInfoBox}>
+            <Text style={styles.salaryInfoTitle}>ใช้ฐานเงินเดือนจาก Payroll</Text>
+            <Text style={styles.salaryInfoText}>
+              ระบบใช้ฐานเงินเดือนที่ Admin/HR ตั้งไว้: {money(payrollBaseSalary)} บาท
+            </Text>
+          </View>
+        ) : (
+          <>
+            <Text style={styles.salaryInfoText}>
+              ยังไม่มีฐานเงินเดือนจาก Payroll กรุณากรอกฐานเงินเดือนตามขั้นตอนเดิม
+            </Text>
+            <TextInput
+              style={styles.input}
+              value={salaryBase}
+              onChangeText={setSalaryBase}
+              keyboardType="decimal-pad"
+              placeholder="ฐานเงินเดือน (บาท)"
+            />
+          </>
+        )}
+        {activeSalaryClaimStatus ? (
+          <Text style={styles.salaryBlockedText}>
+            เดือนนี้มีคำขอเบิกเงินเดือนสถานะ {claimStatusLabelTh(activeSalaryClaimStatus)} แล้ว
+          </Text>
+        ) : null}
+        <Text style={styles.hint}>
+          หากคำขอถูกปฏิเสธ ระบบจะคืนสิทธิ์ให้ส่งคำขอของเดือนนี้ใหม่ได้
+        </Text>
         <Text style={styles.small}>
           50% ของฐานเงินเดือน: {money(halfBase)} บาท · เบิกได้สูงสุด: {money(salaryCeiling)} บาท
         </Text>
@@ -402,8 +451,12 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
           multiline
         />
         <Pressable
-          style={[styles.primaryBtn, (salarySaving || !salaryWindowOpen) && styles.disabled]}
-          disabled={salarySaving || !salaryWindowOpen}
+          style={[
+            styles.primaryBtn,
+            (salarySaving || salaryEligibilityLoading || !salaryWindowOpen || !!activeSalaryClaimStatus) &&
+              styles.disabled,
+          ]}
+          disabled={salarySaving || salaryEligibilityLoading || !salaryWindowOpen || !!activeSalaryClaimStatus}
           onPress={() => void submitSalaryClaim()}>
           {salarySaving ? (
             <ActivityIndicator color={NatureTheme.colors.onAccent} />
@@ -417,7 +470,10 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
           <Pressable
             style={[styles.refreshBtn, historyLoading && styles.disabled]}
             disabled={historyLoading}
-            onPress={() => void loadHistory()}>
+            onPress={() => {
+              void loadHistory();
+              void loadSalaryEligibility();
+            }}>
             <Text style={styles.refreshBtnText}>{historyLoading ? 'กำลังโหลด...' : 'รีเฟรช'}</Text>
           </Pressable>
         </View>
@@ -617,6 +673,34 @@ const styles = StyleSheet.create({
     color: c.textMuted,
   },
   small: { fontSize: 12, color: c.textSecondary },
+  salaryInfoBox: {
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    borderRadius: r.md,
+    padding: 10,
+    backgroundColor: c.primaryLight,
+    gap: 4,
+  },
+  salaryInfoTitle: {
+    color: c.primaryDark,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  salaryInfoText: {
+    color: c.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  salaryBlockedText: {
+    borderWidth: 1,
+    borderColor: c.warningBorder,
+    borderRadius: r.sm,
+    padding: 8,
+    backgroundColor: c.warningBg,
+    color: c.warningTitle,
+    fontSize: 12,
+    fontWeight: '800',
+  },
   input: {
     borderWidth: 1,
     borderColor: c.border,

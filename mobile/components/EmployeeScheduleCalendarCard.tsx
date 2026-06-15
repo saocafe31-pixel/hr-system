@@ -17,10 +17,11 @@ import { TaskDetailModal } from '@/components/TaskDetailModal';
 import { NatureTheme } from '@/constants/Theme';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
+import { leaveTypeLabelTh } from '@/lib/leaveAttendanceChat';
 import { priorityColor } from '@/lib/taskHelpers';
 import { supabase } from '@/lib/supabase';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
-import type { Branch, TaskPriority } from '@/lib/types';
+import type { Branch, LeaveRequestType, TaskPriority } from '@/lib/types';
 
 type Row = {
   ymd: string;
@@ -35,13 +36,22 @@ type Row = {
 type Cell = {
   ymd: string | null;
   rows: Row[];
-  markerSource: 'shift' | 'legacy' | 'memo' | null;
+  markerSource: 'leave' | 'shift' | 'legacy' | 'memo' | null;
 };
 
 type HighlightDay = {
   ymd: string;
   rows: Row[];
+  hasApprovedLeave: boolean;
   hasMemo: boolean;
+};
+
+type ApprovedLeave = {
+  id: string;
+  leave_type: LeaveRequestType;
+  starts_on: string;
+  ends_on: string;
+  reason: string | null;
 };
 
 type CalendarChecklistItem = {
@@ -133,6 +143,7 @@ export function EmployeeScheduleCalendarCard({
   const admin = isAdmin(role);
   const [anchorDate, setAnchorDate] = useState<Date>(() => new Date());
   const [rows, setRows] = useState<Row[]>([]);
+  const [approvedLeaves, setApprovedLeaves] = useState<ApprovedLeave[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedYmd, setSelectedYmd] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -174,6 +185,19 @@ export function EmployeeScheduleCalendarCard({
     return map;
   }, [rows]);
 
+  const approvedLeavesByYmd = useMemo(() => {
+    const map = new Map<string, ApprovedLeave[]>();
+    for (const leave of approvedLeaves) {
+      for (const ymd of listYmdRange(leave.starts_on, leave.ends_on)) {
+        if (ymd < period.startYmd || ymd > period.endYmd) continue;
+        const arr = map.get(ymd) ?? [];
+        arr.push(leave);
+        map.set(ymd, arr);
+      }
+    }
+    return map;
+  }, [approvedLeaves, period.endYmd, period.startYmd]);
+
   const gridCells = useMemo(() => {
     const first = ymdToDate(period.startYmd);
     const firstDowSun0 = first.getDay();
@@ -184,18 +208,21 @@ export function EmployeeScheduleCalendarCard({
     for (const ymd of dates) {
       const dayRows = rowsByYmd.get(ymd) ?? [];
       const hasMemo = memoYmdSet.has(ymd);
-      const markerSource = dayRows.find((r) => r.source === 'shift')
-        ? 'shift'
-        : dayRows.length > 0
-          ? 'legacy'
-          : hasMemo
-            ? 'memo'
-            : null;
+      const hasApprovedLeave = approvedLeavesByYmd.has(ymd);
+      const markerSource = hasApprovedLeave
+        ? 'leave'
+        : dayRows.find((r) => r.source === 'shift')
+          ? 'shift'
+          : dayRows.length > 0
+            ? 'legacy'
+            : hasMemo
+              ? 'memo'
+              : null;
       cells.push({ ymd, rows: dayRows, markerSource });
     }
     while (cells.length % 7 !== 0) cells.push({ ymd: null, rows: [], markerSource: null });
     return cells;
-  }, [memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]);
+  }, [approvedLeavesByYmd, memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]);
 
   const highlightDays = useMemo<HighlightDay[]>(
     () =>
@@ -203,10 +230,11 @@ export function EmployeeScheduleCalendarCard({
         .map((ymd) => ({
           ymd,
           rows: rowsByYmd.get(ymd) ?? [],
+          hasApprovedLeave: approvedLeavesByYmd.has(ymd),
           hasMemo: memoYmdSet.has(ymd),
         }))
-        .filter((d) => d.rows.length > 0 || d.hasMemo),
-    [memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]
+        .filter((d) => d.rows.length > 0 || d.hasApprovedLeave || d.hasMemo),
+    [approvedLeavesByYmd, memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]
   );
 
   function openDayPopup(ymd: string, dayRows: Row[]) {
@@ -332,7 +360,7 @@ export function EmployeeScheduleCalendarCard({
     if (!userId) return;
     setLoading(true);
     try {
-      const [branchRes, assignmentRes, legacyRes, memoRes, assigneeRes, directTaskRes] = await Promise.all([
+      const [branchRes, assignmentRes, legacyRes, memoRes, leaveRes, assigneeRes, directTaskRes] = await Promise.all([
         supabase.from('branch_information').select('*').order('branch_name'),
         supabase
           .from('work_schedule_assignments')
@@ -354,6 +382,14 @@ export function EmployeeScheduleCalendarCard({
           .eq('user_id', userId)
           .gte('work_date', period.startYmd)
           .lte('work_date', period.endYmd),
+        supabase
+          .from('leave_requests')
+          .select('id, leave_type, starts_on, ends_on, reason')
+          .eq('user_id', userId)
+          .eq('status', 'approved')
+          .lte('starts_on', period.endYmd)
+          .gte('ends_on', period.startYmd)
+          .order('starts_on', { ascending: true }),
         supabase
           .from('task_assignees')
           .select('task_id')
@@ -385,6 +421,12 @@ export function EmployeeScheduleCalendarCard({
           if ((m.note ?? '').trim() || clen > 0) nextMemo.add(m.work_date);
         }
         setMemoYmdSet(nextMemo);
+      }
+
+      if (leaveRes.error) {
+        setApprovedLeaves([]);
+      } else {
+        setApprovedLeaves(((leaveRes.data ?? []) as ApprovedLeave[]) ?? []);
       }
 
       const assignments = (assignmentRes.data ?? []) as Array<{
@@ -597,6 +639,10 @@ export function EmployeeScheduleCalendarCard({
     void loadDayMemo(selectedYmd);
   }, [detailOpen, selectedYmd, loadDayMemo]);
 
+  const selectedApprovedLeaves = selectedYmd ? (approvedLeavesByYmd.get(selectedYmd) ?? []) : [];
+  const selectedHasApprovedLeave = selectedApprovedLeaves.length > 0;
+  const approvedLeaveDayCount = approvedLeavesByYmd.size;
+
   return (
     <View style={styles.wrap}>
       <Text style={styles.title}>{title}</Text>
@@ -620,10 +666,10 @@ export function EmployeeScheduleCalendarCard({
             <View style={styles.highlightCard}>
               <View style={styles.highlightCopy}>
                 <Text style={styles.highlightTitle}>
-                  มีตาราง/โน้ต {highlightDays.length} วัน · Live Work {liveWorkTasks.length} งาน
+                  มีตาราง/ลา/โน้ต {highlightDays.length} วัน · ลาอนุมัติ {approvedLeaveDayCount} วัน · Live Work {liveWorkTasks.length} งาน
                 </Text>
                 <Text style={styles.highlightSub}>
-                  ระบบจะเปิดรายละเอียดให้อัตโนมัติเมื่อเข้าดูข้อมูลพนักงาน และแสดงตาราง/โน้ต/งานที่กำลังทำใน popup เดียวกัน
+                  ระบบจะเปิดรายละเอียดให้อัตโนมัติเมื่อเข้าดูข้อมูลพนักงาน และถ้าวันนั้นมีลาอนุมัติจะแสดงสถานะลาแทนตารางเข้างาน
                 </Text>
               </View>
               <Pressable
@@ -663,11 +709,13 @@ export function EmployeeScheduleCalendarCard({
                   <View
                     style={[
                       styles.dot,
-                      cell.markerSource === 'shift'
-                        ? styles.dotShift
-                        : cell.markerSource === 'legacy'
-                          ? styles.dotLegacy
-                          : styles.dotMemo,
+                      cell.markerSource === 'leave'
+                        ? styles.dotLeave
+                        : cell.markerSource === 'shift'
+                          ? styles.dotShift
+                          : cell.markerSource === 'legacy'
+                            ? styles.dotLegacy
+                            : styles.dotMemo,
                     ]}
                   />
                 ) : null}
@@ -695,10 +743,16 @@ export function EmployeeScheduleCalendarCard({
                 <View style={styles.popupHeroCopy}>
                   <Text style={styles.popupKicker}>Schedule · Notes · Live Work</Text>
                   <Text style={styles.detailTitle}>
-                    {selectedYmd ? `ตารางงานวันที่ ${selectedYmd}` : 'ตารางงาน'}
+                    {selectedYmd
+                      ? selectedHasApprovedLeave
+                        ? `สถานะการลาวันที่ ${selectedYmd}`
+                        : `ตารางงานวันที่ ${selectedYmd}`
+                      : 'ตารางงาน'}
                   </Text>
                   <Text style={styles.detailSub}>
-                    {detailRows.length > 0 && selectedYmd && memoYmdSet.has(selectedYmd)
+                    {selectedHasApprovedLeave
+                      ? 'วันนี้มีการลาที่ได้รับการอนุมัติแล้ว จึงแสดงสถานะลาแทนตารางเวลาเข้างาน'
+                      : detailRows.length > 0 && selectedYmd && memoYmdSet.has(selectedYmd)
                       ? 'วันนี้มีทั้งตารางงานและโน้ต/เช็กลิสต์'
                       : detailRows.length > 0
                         ? 'รายละเอียดตารางงานที่มอบหมายในวันดังกล่าว'
@@ -763,7 +817,34 @@ export function EmployeeScheduleCalendarCard({
                   ))
                 )}
               </View>
-              {detailRows.length > 0 ? (
+              {selectedHasApprovedLeave ? (
+                <View style={styles.leaveStatusPanel}>
+                  <View style={styles.leaveStatusHeader}>
+                    <View style={styles.leaveStatusIcon}>
+                      <FontAwesome name="calendar-check-o" size={18} color={c.primaryDark} />
+                    </View>
+                    <View style={styles.leaveStatusCopy}>
+                      <Text style={styles.leaveStatusTitle}>วันนี้ลาอนุมัติแล้ว</Text>
+                      <Text style={styles.leaveStatusSub}>
+                        ระบบแสดงสถานะลาแทนตารางเวลาเข้างานของวันนี้
+                      </Text>
+                    </View>
+                  </View>
+                  {selectedApprovedLeaves.map((leave) => (
+                    <View key={leave.id} style={styles.leaveStatusRow}>
+                      <Text style={styles.leaveStatusType}>{leaveTypeLabelTh(leave.leave_type)}</Text>
+                      <Text style={styles.leaveStatusMeta}>
+                        ช่วงลา {leave.starts_on} - {leave.ends_on} · อนุมัติแล้ว
+                      </Text>
+                      {leave.reason ? (
+                        <Text style={styles.leaveStatusReason} numberOfLines={3}>
+                          เหตุผล: {leave.reason}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ))}
+                </View>
+              ) : detailRows.length > 0 ? (
                 detailRows.map((row, idx) => (
                   <View key={`${row.ymd}-${row.source}-${idx}`} style={styles.detailRow}>
                     <Text style={styles.detailRowTitle}>{row.title}</Text>
@@ -969,6 +1050,7 @@ const styles = StyleSheet.create({
   dayNumber: { fontSize: 12, color: c.text, fontWeight: '600' },
   dayNumberMuted: { color: c.textMuted, opacity: 0.45 },
   dot: { marginTop: 4, width: 6, height: 6, borderRadius: 999 },
+  dotLeave: { backgroundColor: c.warningTitle },
   dotShift: { backgroundColor: c.primaryDark },
   dotLegacy: { backgroundColor: c.accentWarm },
   dotMemo: { backgroundColor: c.checkIn },
@@ -1086,6 +1168,64 @@ const styles = StyleSheet.create({
   },
   detailRowTitle: { fontSize: 14, fontWeight: '700', color: c.text },
   detailRowMeta: { marginTop: 4, fontSize: 12, color: c.textSecondary },
+  leaveStatusPanel: {
+    borderWidth: 1,
+    borderColor: c.warningBorder,
+    borderRadius: r.md,
+    backgroundColor: c.warningBg,
+    padding: 12,
+    marginBottom: 10,
+  },
+  leaveStatusHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  leaveStatusIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.warningBorder,
+  },
+  leaveStatusCopy: { flex: 1, minWidth: 0 },
+  leaveStatusTitle: {
+    color: c.warningTitle,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  leaveStatusSub: {
+    color: c.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 2,
+  },
+  leaveStatusRow: {
+    borderTopWidth: 1,
+    borderTopColor: c.warningBorder,
+    paddingTop: 9,
+    marginTop: 8,
+  },
+  leaveStatusType: {
+    color: c.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  leaveStatusMeta: {
+    color: c.textSecondary,
+    fontSize: 12,
+    marginTop: 3,
+  },
+  leaveStatusReason: {
+    color: c.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 4,
+  },
   empty: { color: c.textMuted, fontSize: 12, textAlign: 'center', paddingVertical: 16 },
   closeBtn: {
     marginTop: 8,
