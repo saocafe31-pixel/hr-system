@@ -28,7 +28,8 @@ import { UserAvatar } from '@/components/UserAvatar';
 import { ZoomableImage } from '@/components/ZoomableImage';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import {
   chatBodyIndicatesSickLeave,
   extractLeaveRequestIdFromChatBody,
@@ -330,6 +331,9 @@ export default function AttendanceChatScreen() {
   const role = useRole();
   const admin = isAdmin(role);
   const canApproveLeave = isManagerOrAdmin(role);
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createChatStyles(theme), [theme]);
   const [items, setItems] = useState<Row[]>([]);
   const [leaveStatusById, setLeaveStatusById] = useState<Record<string, LeaveRequestStatus>>({});
   const [leaveActionId, setLeaveActionId] = useState<string | null>(null);
@@ -617,7 +621,7 @@ export default function AttendanceChatScreen() {
               onPress={() => setExportOpen(true)}
               style={styles.headerIconBtn}
               hitSlop={{ top: 10, bottom: 10, left: 4, right: 4 }}>
-              <FontAwesome name="download" size={18} color={NatureTheme.colors.text} />
+              <FontAwesome name="download" size={18} color={c.text} />
             </Pressable>
           ) : null}
           {admin ? (
@@ -626,7 +630,7 @@ export default function AttendanceChatScreen() {
               onPress={() => setPruneChatConfirmOpen(true)}
               style={[styles.headerIconBtn, styles.headerIconBtnDanger]}
               hitSlop={{ top: 10, bottom: 10, left: 4, right: 4 }}>
-              <FontAwesome name="trash" size={17} color={NatureTheme.colors.error} />
+              <FontAwesome name="trash" size={17} color={c.error} />
             </Pressable>
           ) : null}
           <Pressable
@@ -637,14 +641,14 @@ export default function AttendanceChatScreen() {
             <FontAwesome
               name="refresh"
               size={18}
-              color={NatureTheme.colors.text}
+              color={c.text}
             />
           </Pressable>
           <TaskNotificationsHeaderButton />
         </View>
       ),
     });
-  }, [admin, canApproveLeave, navigation, onPullRefresh]);
+  }, [admin, c.error, c.text, canApproveLeave, navigation, onPullRefresh, styles]);
 
   useEffect(() => {
     let alive = true;
@@ -1143,7 +1147,7 @@ export default function AttendanceChatScreen() {
                 disabled={exporting}
                 onPress={() => void exportAttendanceCsv()}>
                 {exporting ? (
-                  <ActivityIndicator color={NatureTheme.colors.onAccent} />
+                  <ActivityIndicator color={c.onAccent} />
                 ) : (
                   <Text style={styles.exportOkText}>ดาวน์โหลด CSV</Text>
                 )}
@@ -1165,7 +1169,7 @@ export default function AttendanceChatScreen() {
               showsVerticalScrollIndicator>
               <Text style={styles.profileTitle}>โปรไฟล์ในแชท</Text>
               {profileLoading ? (
-                <ActivityIndicator color={NatureTheme.colors.primary} style={{ marginVertical: 16 }} />
+                <ActivityIndicator color={c.primary} style={{ marginVertical: 16 }} />
               ) : (
                 <>
                   <Pressable
@@ -1284,10 +1288,10 @@ export default function AttendanceChatScreen() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onPullRefresh}
-            tintColor={NatureTheme.colors.primary}
-            colors={[NatureTheme.colors.primary]}
+            tintColor={c.primary}
+            colors={[c.primary]}
             title="ดึงลงเพื่อรีเฟรช"
-            titleColor={NatureTheme.colors.textMuted}
+            titleColor={c.textMuted}
           />
         }
         onStartReached={() => {
@@ -1310,7 +1314,7 @@ export default function AttendanceChatScreen() {
             <View style={styles.listHeaderLoading}>
               <ActivityIndicator
                 size="small"
-                color={NatureTheme.colors.primary}
+                color={c.primary}
               />
             </View>
             ) : null}
@@ -1475,11 +1479,12 @@ export default function AttendanceChatScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createChatStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   flex: { flex: 1, backgroundColor: c.canvas },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   headerRight: {
@@ -1698,7 +1703,7 @@ const styles = StyleSheet.create({
   sendText: { color: c.onAccent, fontWeight: '700' },
   exportBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: c.overlay,
     justifyContent: 'center',
     padding: s.screen,
   },
@@ -1786,7 +1791,7 @@ const styles = StyleSheet.create({
   },
   fullImageBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.8)',
+    backgroundColor: c.overlay,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 20,
@@ -1836,4 +1841,5 @@ const styles = StyleSheet.create({
   },
   exportOkDisabled: { opacity: 0.55 },
   exportOkText: { color: c.onAccent, fontWeight: '800', fontSize: 15 },
-});
+  });
+}

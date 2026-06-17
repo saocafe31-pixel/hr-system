@@ -14,14 +14,30 @@ import {
 } from 'react-native';
 
 import { TaskDetailModal } from '@/components/TaskDetailModal';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { leaveTypeLabelTh } from '@/lib/leaveAttendanceChat';
+import {
+  companyHolidayMapByDate,
+  fetchCompanyHolidayDates,
+} from '@/lib/companyHolidays';
+import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
+import {
+  buildAssignmentByUserDate,
+  buildHolidayByUserDate,
+  resolvedScheduleDayStatusForUser,
+} from '@/lib/scheduleDayResolution';
 import { priorityColor } from '@/lib/taskHelpers';
 import { supabase } from '@/lib/supabase';
-import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
-import type { Branch, LeaveRequestType, TaskPriority } from '@/lib/types';
+import type {
+  Branch,
+  CompanyHolidayDateRow,
+  EmployeeHolidayDateRow,
+  LeaveRequestType,
+  TaskPriority,
+} from '@/lib/types';
 
 type Row = {
   ymd: string;
@@ -36,13 +52,18 @@ type Row = {
 type Cell = {
   ymd: string | null;
   rows: Row[];
-  markerSource: 'leave' | 'shift' | 'legacy' | 'memo' | null;
+  markerSource: 'shift' | 'legacy' | 'memo' | null;
+  companyHoliday: CompanyHolidayDateRow | null;
+  employeeHoliday: boolean;
+  approvedLeave: ApprovedLeave | null;
 };
 
 type HighlightDay = {
   ymd: string;
   rows: Row[];
   hasApprovedLeave: boolean;
+  hasEmployeeHoliday: boolean;
+  hasCompanyHoliday: boolean;
   hasMemo: boolean;
 };
 
@@ -117,6 +138,16 @@ function addMonthsLocal(d: Date, delta: number): Date {
   return next;
 }
 
+function approvedLeaveForYmd(
+  leaves: ApprovedLeave[],
+  ymd: string
+): ApprovedLeave | null {
+  for (const row of leaves) {
+    if (ymd >= row.starts_on && ymd <= row.ends_on) return row;
+  }
+  return null;
+}
+
 function taskStatusLabel(status: string): string {
   if (status === 'in_progress') return 'กำลังทำ';
   if (status === 'pending') return 'รอดำเนินการ';
@@ -141,9 +172,14 @@ export function EmployeeScheduleCalendarCard({
   const role = useRole();
   const manager = isManagerOrAdmin(role);
   const admin = isAdmin(role);
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createEmployeeScheduleCalendarStyles(theme), [theme]);
   const [anchorDate, setAnchorDate] = useState<Date>(() => new Date());
   const [rows, setRows] = useState<Row[]>([]);
   const [approvedLeaves, setApprovedLeaves] = useState<ApprovedLeave[]>([]);
+  const [companyHolidayRows, setCompanyHolidayRows] = useState<CompanyHolidayDateRow[]>([]);
+  const [resolvedHolidayYmds, setResolvedHolidayYmds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(false);
   const [selectedYmd, setSelectedYmd] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -198,31 +234,81 @@ export function EmployeeScheduleCalendarCard({
     return map;
   }, [approvedLeaves, period.endYmd, period.startYmd]);
 
+  const companyHolidayByDate = useMemo(
+    () => companyHolidayMapByDate(companyHolidayRows),
+    [companyHolidayRows]
+  );
+
+  const workDaysCount = useMemo(() => new Set(rows.map((r) => r.ymd)).size, [rows]);
+
+  const employeeHolidayDaysCount = useMemo(() => {
+    let count = 0;
+    for (const ymd of listYmdRange(period.startYmd, period.endYmd)) {
+      if (resolvedHolidayYmds.has(ymd)) count += 1;
+    }
+    return count;
+  }, [period.endYmd, period.startYmd, resolvedHolidayYmds]);
+
   const gridCells = useMemo(() => {
     const first = ymdToDate(period.startYmd);
     const firstDowSun0 = first.getDay();
     const lead = (firstDowSun0 + 6) % 7;
     const dates = listYmdRange(period.startYmd, period.endYmd);
     const cells: Cell[] = [];
-    for (let i = 0; i < lead; i += 1) cells.push({ ymd: null, rows: [], markerSource: null });
+    for (let i = 0; i < lead; i += 1) {
+      cells.push({
+        ymd: null,
+        rows: [],
+        markerSource: null,
+        companyHoliday: null,
+        employeeHoliday: false,
+        approvedLeave: null,
+      });
+    }
     for (const ymd of dates) {
       const dayRows = rowsByYmd.get(ymd) ?? [];
       const hasMemo = memoYmdSet.has(ymd);
-      const hasApprovedLeave = approvedLeavesByYmd.has(ymd);
-      const markerSource = hasApprovedLeave
-        ? 'leave'
-        : dayRows.find((r) => r.source === 'shift')
-          ? 'shift'
-          : dayRows.length > 0
-            ? 'legacy'
-            : hasMemo
-              ? 'memo'
-              : null;
-      cells.push({ ymd, rows: dayRows, markerSource });
+      const approvedLeave = approvedLeaveForYmd(approvedLeaves, ymd);
+      const employeeHoliday = resolvedHolidayYmds.has(ymd);
+      const markerSource =
+        approvedLeave || employeeHoliday
+          ? null
+          : dayRows.find((r) => r.source === 'shift')
+            ? 'shift'
+            : dayRows.length > 0
+              ? 'legacy'
+              : hasMemo
+                ? 'memo'
+                : null;
+      cells.push({
+        ymd,
+        rows: dayRows,
+        markerSource,
+        companyHoliday: companyHolidayByDate.get(ymd) ?? null,
+        employeeHoliday,
+        approvedLeave,
+      });
     }
-    while (cells.length % 7 !== 0) cells.push({ ymd: null, rows: [], markerSource: null });
+    while (cells.length % 7 !== 0) {
+      cells.push({
+        ymd: null,
+        rows: [],
+        markerSource: null,
+        companyHoliday: null,
+        employeeHoliday: false,
+        approvedLeave: null,
+      });
+    }
     return cells;
-  }, [approvedLeavesByYmd, memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]);
+  }, [
+    approvedLeaves,
+    companyHolidayByDate,
+    memoYmdSet,
+    period.endYmd,
+    period.startYmd,
+    resolvedHolidayYmds,
+    rowsByYmd,
+  ]);
 
   const highlightDays = useMemo<HighlightDay[]>(
     () =>
@@ -231,10 +317,27 @@ export function EmployeeScheduleCalendarCard({
           ymd,
           rows: rowsByYmd.get(ymd) ?? [],
           hasApprovedLeave: approvedLeavesByYmd.has(ymd),
+          hasEmployeeHoliday: resolvedHolidayYmds.has(ymd),
+          hasCompanyHoliday: companyHolidayByDate.has(ymd),
           hasMemo: memoYmdSet.has(ymd),
         }))
-        .filter((d) => d.rows.length > 0 || d.hasApprovedLeave || d.hasMemo),
-    [approvedLeavesByYmd, memoYmdSet, period.endYmd, period.startYmd, rowsByYmd]
+        .filter(
+          (d) =>
+            d.rows.length > 0 ||
+            d.hasApprovedLeave ||
+            d.hasEmployeeHoliday ||
+            d.hasCompanyHoliday ||
+            d.hasMemo
+        ),
+    [
+      approvedLeavesByYmd,
+      companyHolidayByDate,
+      memoYmdSet,
+      period.endYmd,
+      period.startYmd,
+      resolvedHolidayYmds,
+      rowsByYmd,
+    ]
   );
 
   function openDayPopup(ymd: string, dayRows: Row[]) {
@@ -360,11 +463,12 @@ export function EmployeeScheduleCalendarCard({
     if (!userId) return;
     setLoading(true);
     try {
-      const [branchRes, assignmentRes, legacyRes, memoRes, leaveRes, assigneeRes, directTaskRes] = await Promise.all([
+      const [branchRes, assignmentRes, legacyRes, memoRes, leaveRes, empHolRes, companyHolRes, assigneeRes, directTaskRes] =
+        await Promise.all([
         supabase.from('branch_information').select('*').order('branch_name'),
         supabase
           .from('work_schedule_assignments')
-          .select('work_date, shift_id, allowed_branch_id')
+          .select('work_date, shift_id, allowed_branch_id, created_at')
           .eq('user_id', userId)
           .gte('work_date', period.startYmd)
           .lte('work_date', period.endYmd)
@@ -390,6 +494,15 @@ export function EmployeeScheduleCalendarCard({
           .lte('starts_on', period.endYmd)
           .gte('ends_on', period.startYmd)
           .order('starts_on', { ascending: true }),
+        supabase
+          .from('employee_holiday_dates')
+          .select('id, user_id, holiday_date, created_at')
+          .eq('user_id', userId)
+          .gte('holiday_date', period.startYmd)
+          .lte('holiday_date', period.endYmd),
+        fetchCompanyHolidayDates({ startYmd: period.startYmd, endYmd: period.endYmd }).catch(
+          () => [] as CompanyHolidayDateRow[]
+        ),
         supabase
           .from('task_assignees')
           .select('task_id')
@@ -428,12 +541,49 @@ export function EmployeeScheduleCalendarCard({
       } else {
         setApprovedLeaves(((leaveRes.data ?? []) as ApprovedLeave[]) ?? []);
       }
+      setCompanyHolidayRows(companyHolRes);
+
+      const approvedLeavesList = leaveRes.error
+        ? []
+        : (((leaveRes.data ?? []) as ApprovedLeave[]) ?? []);
+      const employeeHolidayRows = ((empHolRes.data ?? []) as EmployeeHolidayDateRow[]) ?? [];
+      const holidayByUserDate = buildHolidayByUserDate(employeeHolidayRows);
 
       const assignments = (assignmentRes.data ?? []) as Array<{
         work_date: string;
         shift_id: string;
         allowed_branch_id?: number | null;
+        created_at?: string;
       }>;
+      const assignmentByUserDate = buildAssignmentByUserDate(
+        assignments.map((row) => ({
+          user_id: userId,
+          work_date: row.work_date,
+          created_at: row.created_at ?? '',
+        }))
+      );
+      const nextResolvedHolidayYmds = new Set<string>();
+      for (const row of employeeHolidayRows) {
+        const status = resolvedScheduleDayStatusForUser(
+          userId,
+          row.holiday_date,
+          holidayByUserDate,
+          assignmentByUserDate
+        );
+        if (status === 'holiday') nextResolvedHolidayYmds.add(row.holiday_date);
+      }
+      setResolvedHolidayYmds(nextResolvedHolidayYmds);
+
+      const dayShowsWork = (ymd: string) => {
+        if (approvedLeaveForYmd(approvedLeavesList, ymd)) return false;
+        const status = resolvedScheduleDayStatusForUser(
+          userId,
+          ymd,
+          holidayByUserDate,
+          assignmentByUserDate
+        );
+        return status !== 'holiday';
+      };
       const shiftIds = [...new Set(assignments.map((a) => a.shift_id).filter(Boolean))];
       let shiftById = new Map<string, { name: string; start_time: string; end_time: string }>();
       if (shiftIds.length > 0) {
@@ -491,6 +641,7 @@ export function EmployeeScheduleCalendarCard({
 
       const out: Row[] = [];
       for (const ymd of listYmdRange(period.startYmd, period.endYmd)) {
+        if (!dayShowsWork(ymd)) continue;
         const shift = dailyShiftMap.get(ymd);
         if (shift) {
           out.push(shift);
@@ -641,6 +792,12 @@ export function EmployeeScheduleCalendarCard({
 
   const selectedApprovedLeaves = selectedYmd ? (approvedLeavesByYmd.get(selectedYmd) ?? []) : [];
   const selectedHasApprovedLeave = selectedApprovedLeaves.length > 0;
+  const selectedCompanyHoliday = selectedYmd
+    ? companyHolidayByDate.get(selectedYmd) ?? null
+    : null;
+  const selectedEmployeeHoliday = !!(
+    selectedYmd && resolvedHolidayYmds.has(selectedYmd) && !selectedHasApprovedLeave
+  );
   const approvedLeaveDayCount = approvedLeavesByYmd.size;
 
   return (
@@ -659,17 +816,21 @@ export function EmployeeScheduleCalendarCard({
         </Pressable>
       </View>
       {loading ? (
-        <ActivityIndicator color={NatureTheme.colors.primary} style={{ marginVertical: 12 }} />
+        <ActivityIndicator color={c.primary} style={{ marginVertical: 12 }} />
       ) : (
         <>
-          {highlightDays.length > 0 || liveWorkTasks.length > 0 ? (
+          {highlightDays.length > 0 ||
+          liveWorkTasks.length > 0 ||
+          employeeHolidayDaysCount > 0 ||
+          approvedLeaveDayCount > 0 ? (
             <View style={styles.highlightCard}>
               <View style={styles.highlightCopy}>
                 <Text style={styles.highlightTitle}>
-                  มีตาราง/ลา/โน้ต {highlightDays.length} วัน · ลาอนุมัติ {approvedLeaveDayCount} วัน · Live Work {liveWorkTasks.length} งาน
+                  มีตารางงาน {workDaysCount} วัน · วันหยุด {employeeHolidayDaysCount} วัน · ลา{' '}
+                  {approvedLeaveDayCount} วัน · Live Work {liveWorkTasks.length} งาน
                 </Text>
                 <Text style={styles.highlightSub}>
-                  ระบบจะเปิดรายละเอียดให้อัตโนมัติเมื่อเข้าดูข้อมูลพนักงาน และถ้าวันนั้นมีลาอนุมัติจะแสดงสถานะลาแทนตารางเข้างาน
+                  แตะวันที่ในปฏิทินเพื่อดูตารางงาน วันหยุดบริษัท/ส่วนตัว และการลาที่อนุมัติแล้ว
                 </Text>
               </View>
               <Pressable
@@ -705,19 +866,34 @@ export function EmployeeScheduleCalendarCard({
                 <Text style={[styles.dayNumber, !cell.ymd && styles.dayNumberMuted]}>
                   {cell.ymd ? String(Number(cell.ymd.slice(8, 10))) : ''}
                 </Text>
+                {cell.companyHoliday ? (
+                  <Text style={styles.calendarCompanyHolidayText} numberOfLines={1}>
+                    {cell.companyHoliday.title}
+                  </Text>
+                ) : null}
+                {cell.approvedLeave ? (
+                  <Text style={styles.calendarLeaveText} numberOfLines={1}>
+                    {leaveTypeLabelTh(cell.approvedLeave.leave_type)}
+                  </Text>
+                ) : cell.employeeHoliday ? (
+                  <Text style={styles.calendarEmployeeHolidayText} numberOfLines={1}>
+                    วันหยุด
+                  </Text>
+                ) : null}
                 {cell.markerSource ? (
                   <View
                     style={[
                       styles.dot,
-                      cell.markerSource === 'leave'
-                        ? styles.dotLeave
-                        : cell.markerSource === 'shift'
-                          ? styles.dotShift
-                          : cell.markerSource === 'legacy'
-                            ? styles.dotLegacy
-                            : styles.dotMemo,
+                      cell.markerSource === 'shift'
+                        ? styles.dotShift
+                        : cell.markerSource === 'legacy'
+                          ? styles.dotLegacy
+                          : styles.dotMemo,
                     ]}
                   />
+                ) : null}
+                {cell.markerSource && cell.rows.length > 0 ? (
+                  <Text style={styles.calendarMiniLabel}>มีงาน</Text>
                 ) : null}
               </Pressable>
             ))}
@@ -746,21 +922,27 @@ export function EmployeeScheduleCalendarCard({
                     {selectedYmd
                       ? selectedHasApprovedLeave
                         ? `สถานะการลาวันที่ ${selectedYmd}`
-                        : `ตารางงานวันที่ ${selectedYmd}`
+                        : selectedEmployeeHoliday
+                          ? `วันหยุดวันที่ ${selectedYmd}`
+                          : `ตารางงานวันที่ ${selectedYmd}`
                       : 'ตารางงาน'}
                   </Text>
                   <Text style={styles.detailSub}>
                     {selectedHasApprovedLeave
-                      ? 'วันนี้มีการลาที่ได้รับการอนุมัติแล้ว จึงแสดงสถานะลาแทนตารางเวลาเข้างาน'
-                      : detailRows.length > 0 && selectedYmd && memoYmdSet.has(selectedYmd)
-                      ? 'วันนี้มีทั้งตารางงานและโน้ต/เช็กลิสต์'
-                      : detailRows.length > 0
-                        ? 'รายละเอียดตารางงานที่มอบหมายในวันดังกล่าว'
-                        : selectedYmd && memoYmdSet.has(selectedYmd)
-                          ? 'วันนี้มีโน้ต/เช็กลิสต์ที่บันทึกไว้'
-                          : liveWorkTasks.length > 0
-                            ? 'วันนี้ยังไม่มีตารางงาน แต่มีงานที่กำลังดำเนินการ'
-                            : 'วันนี้ยังไม่มีตารางงาน แต่สามารถจดโน้ต/เช็กลิสต์ได้'}
+                      ? 'วันนี้มีการลาที่ได้รับการอนุมัติแล้ว'
+                      : selectedEmployeeHoliday
+                        ? 'วันนี้เป็นวันหยุดตามตารางงาน'
+                        : selectedCompanyHoliday
+                          ? `วันหยุดบริษัท: ${selectedCompanyHoliday.title}`
+                          : detailRows.length > 0 && selectedYmd && memoYmdSet.has(selectedYmd)
+                            ? 'วันนี้มีทั้งตารางงานและโน้ต/เช็กลิสต์'
+                            : detailRows.length > 0
+                              ? 'รายละเอียดตารางงานที่มอบหมายในวันดังกล่าว'
+                              : selectedYmd && memoYmdSet.has(selectedYmd)
+                                ? 'วันนี้มีโน้ต/เช็กลิสต์ที่บันทึกไว้'
+                                : liveWorkTasks.length > 0
+                                  ? 'วันนี้ยังไม่มีตารางงาน แต่มีงานที่กำลังดำเนินการ'
+                                  : 'วันนี้ยังไม่มีตารางงาน แต่สามารถจดโน้ต/เช็กลิสต์ได้'}
                   </Text>
                 </View>
                 <Animated.View
@@ -817,16 +999,37 @@ export function EmployeeScheduleCalendarCard({
                   ))
                 )}
               </View>
+              {selectedCompanyHoliday ? (
+                <View style={styles.companyHolidayBanner}>
+                  <Text style={styles.companyHolidayBannerLabel}>วันหยุดประจำปีบริษัท</Text>
+                  <Text style={styles.companyHolidayBannerTitle}>
+                    {selectedCompanyHoliday.title}
+                  </Text>
+                  {selectedCompanyHoliday.description?.trim() ? (
+                    <Text style={styles.companyHolidayBannerDesc}>
+                      {selectedCompanyHoliday.description.trim()}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+              {selectedEmployeeHoliday ? (
+                <View style={styles.employeeHolidayBanner}>
+                  <Text style={styles.employeeHolidayBannerLabel}>วันหยุด</Text>
+                  <Text style={styles.employeeHolidayBannerTitle}>
+                    วันนี้เป็นวันหยุดตามตารางงาน
+                  </Text>
+                </View>
+              ) : null}
               {selectedHasApprovedLeave ? (
                 <View style={styles.leaveStatusPanel}>
                   <View style={styles.leaveStatusHeader}>
                     <View style={styles.leaveStatusIcon}>
-                      <FontAwesome name="calendar-check-o" size={18} color={c.primaryDark} />
+                      <FontAwesome name="calendar-check-o" size={18} color={c.leaveSickBar} />
                     </View>
                     <View style={styles.leaveStatusCopy}>
                       <Text style={styles.leaveStatusTitle}>วันนี้ลาอนุมัติแล้ว</Text>
                       <Text style={styles.leaveStatusSub}>
-                        ระบบแสดงสถานะลาแทนตารางเวลาเข้างานของวันนี้
+                        แสดงสถานะการลาแทนตารางเวลาเข้างานของวันนี้
                       </Text>
                     </View>
                   </View>
@@ -868,7 +1071,7 @@ export function EmployeeScheduleCalendarCard({
                   <Text style={styles.readOnlyHint}>ดูได้อย่างเดียว — เฉพาะพนักงานหรือผู้จัดการที่มีสิทธิ์จัดตารางจึงแก้ไขได้</Text>
                 ) : null}
                 {dayMemoLoading ? (
-                  <ActivityIndicator color={NatureTheme.colors.primary} style={{ marginVertical: 12 }} />
+                  <ActivityIndicator color={c.primary} style={{ marginVertical: 12 }} />
                 ) : (
                   <>
                     <TextInput
@@ -876,7 +1079,7 @@ export function EmployeeScheduleCalendarCard({
                       value={dayNote}
                       onChangeText={setDayNote}
                       placeholder="เพิ่มโน้ตของวันนี้..."
-                      placeholderTextColor={NatureTheme.colors.textMuted}
+                      placeholderTextColor={c.textMuted}
                       multiline
                       editable={canEditNotes}
                     />
@@ -900,7 +1103,7 @@ export function EmployeeScheduleCalendarCard({
                               name={item.done ? 'check-square-o' : 'square-o'}
                               size={18}
                               color={
-                                item.done ? NatureTheme.colors.checkIn : NatureTheme.colors.textMuted
+                                item.done ? c.checkIn : c.textMuted
                               }
                             />
                           </Pressable>
@@ -914,7 +1117,7 @@ export function EmployeeScheduleCalendarCard({
                             onPress={() =>
                               setDayChecklist((prev) => prev.filter((it) => it.id !== item.id))
                             }>
-                            <FontAwesome name="trash-o" size={16} color={NatureTheme.colors.error} />
+                            <FontAwesome name="trash-o" size={16} color={c.error} />
                           </Pressable>
                         </View>
                       ))
@@ -926,7 +1129,7 @@ export function EmployeeScheduleCalendarCard({
                           value={dayNewItemText}
                           onChangeText={setDayNewItemText}
                           placeholder="เพิ่มรายการเช็กลิสต์"
-                          placeholderTextColor={NatureTheme.colors.textMuted}
+                          placeholderTextColor={c.textMuted}
                         />
                         <Pressable
                           style={styles.dayChecklistAddBtn}
@@ -981,10 +1184,11 @@ export function EmployeeScheduleCalendarCard({
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
+function createEmployeeScheduleCalendarStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   wrap: {
     marginTop: 14,
     borderWidth: 1,
@@ -1054,6 +1258,78 @@ const styles = StyleSheet.create({
   dotShift: { backgroundColor: c.primaryDark },
   dotLegacy: { backgroundColor: c.accentWarm },
   dotMemo: { backgroundColor: c.checkIn },
+  calendarCompanyHolidayText: {
+    marginTop: 2,
+    fontSize: 7,
+    fontWeight: '900',
+    color: '#DC2626',
+    textAlign: 'center',
+  },
+  calendarEmployeeHolidayText: {
+    marginTop: 2,
+    fontSize: 7,
+    fontWeight: '900',
+    color: '#DC2626',
+    textAlign: 'center',
+  },
+  calendarLeaveText: {
+    marginTop: 2,
+    fontSize: 7,
+    fontWeight: '900',
+    color: c.leaveSickBar,
+    textAlign: 'center',
+  },
+  calendarMiniLabel: {
+    marginTop: 2,
+    fontSize: 7,
+    fontWeight: '800',
+    color: c.primaryDark,
+    textAlign: 'center',
+  },
+  companyHolidayBanner: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 10,
+  },
+  companyHolidayBannerLabel: {
+    color: '#DC2626',
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  companyHolidayBannerTitle: {
+    color: '#991B1B',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  companyHolidayBannerDesc: {
+    color: c.textMuted,
+    fontSize: 13,
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  employeeHolidayBanner: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 10,
+  },
+  employeeHolidayBannerLabel: {
+    color: '#DC2626',
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  employeeHolidayBannerTitle: {
+    color: '#991B1B',
+    fontSize: 15,
+    fontWeight: '900',
+  },
   detailOverlayWrap: {
     flex: 1,
     zIndex: 900000,
@@ -1170,9 +1446,9 @@ const styles = StyleSheet.create({
   detailRowMeta: { marginTop: 4, fontSize: 12, color: c.textSecondary },
   leaveStatusPanel: {
     borderWidth: 1,
-    borderColor: c.warningBorder,
+    borderColor: c.leaveSickBar,
     borderRadius: r.md,
-    backgroundColor: c.warningBg,
+    backgroundColor: c.leaveSickBg,
     padding: 12,
     marginBottom: 10,
   },
@@ -1190,11 +1466,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: c.surfaceElevated,
     borderWidth: 1,
-    borderColor: c.warningBorder,
+    borderColor: c.leaveSickBar,
   },
   leaveStatusCopy: { flex: 1, minWidth: 0 },
   leaveStatusTitle: {
-    color: c.warningTitle,
+    color: c.leaveSickBar,
     fontSize: 14,
     fontWeight: '900',
   },
@@ -1206,12 +1482,12 @@ const styles = StyleSheet.create({
   },
   leaveStatusRow: {
     borderTopWidth: 1,
-    borderTopColor: c.warningBorder,
+    borderTopColor: c.leaveSickBar,
     paddingTop: 9,
     marginTop: 8,
   },
   leaveStatusType: {
-    color: c.text,
+    color: c.leaveSickBar,
     fontSize: 13,
     fontWeight: '900',
   },
@@ -1337,4 +1613,5 @@ const styles = StyleSheet.create({
   },
   saveMemoBtnDisabled: { opacity: 0.55 },
   saveMemoBtnText: { color: c.text, fontWeight: '700', fontSize: 14 },
-});
+  });
+}

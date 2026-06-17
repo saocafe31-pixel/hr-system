@@ -13,8 +13,9 @@ import {
   View,
 } from 'react-native';
 
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
 import { FriendlyNoticeModal } from '@/components/FriendlyNoticeModal';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import {
   buildEmployeeHrUpdate,
@@ -152,6 +153,9 @@ export function AdminEmployeeEditModal({
   onSaved,
 }: Props) {
   const toast = useCuteToast();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createAdminEmployeeEditStyles(theme), [theme]);
   const [hr, setHr] = useState<EmployeeHrForm>(emptyHr);
   const [loading, setLoading] = useState(false);
   const [savingPw, setSavingPw] = useState(false);
@@ -734,7 +738,7 @@ export function AdminEmployeeEditModal({
           {loading ? (
             <ActivityIndicator
               style={{ marginVertical: 24 }}
-              color={NatureTheme.colors.primary}
+              color={c.primary}
             />
           ) : (
             <ScrollView
@@ -1099,7 +1103,7 @@ export function AdminEmployeeEditModal({
             {linkPickSaving ? (
               <ActivityIndicator
                 style={{ marginTop: 12 }}
-                color={NatureTheme.colors.primary}
+                color={c.primary}
               />
             ) : null}
             <Pressable
@@ -1125,10 +1129,11 @@ export function AdminEmployeeEditModal({
   );
 }
 
-const tc = NatureTheme.colors;
-const tr = NatureTheme.radius;
+function createAdminEmployeeEditStyles(theme: AppTheme) {
+  const tc = theme.colors;
+  const tr = theme.radius;
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   backdrop: {
     flex: 1,
     backgroundColor: tc.overlay,
@@ -1286,4 +1291,5 @@ const styles = StyleSheet.create({
     color: tc.primary,
   },
   pickBadgeMuted: { marginTop: 6, fontSize: 12, color: tc.textMuted },
-});
+  });
+}

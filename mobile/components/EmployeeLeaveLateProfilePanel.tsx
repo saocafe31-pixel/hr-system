@@ -11,7 +11,8 @@ import {
 } from 'react-native';
 
 import { LateRequestHistoryCard } from '@/components/LateRequestHistoryCard';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { isAdmin, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import {
@@ -253,6 +254,9 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
   const role = useRole();
   const admin = isAdmin(role);
   const toast = useCuteToast();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createEmployeeLeaveLateStyles(theme), [theme]);
   const [loading, setLoading] = useState(false);
   const [leaveRows, setLeaveRows] = useState<LeaveRequestRow[]>([]);
   const [leaveHistoryOpen, setLeaveHistoryOpen] = useState(false);
@@ -774,6 +778,7 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
             <LeaveHistoryRow
               key={row.id}
               row={row}
+              styles={styles}
               preview
               canManage={admin}
               onManage={openLeaveEditor}
@@ -940,6 +945,7 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
                   <LeaveHistoryRow
                     key={`modal-${row.id}`}
                     row={row}
+                    styles={styles}
                     canManage={admin}
                     onManage={openLeaveEditor}
                   />
@@ -1064,11 +1070,13 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
 
 function LeaveHistoryRow({
   row,
+  styles,
   preview = false,
   canManage = false,
   onManage,
 }: {
   row: LeaveRequestRow;
+  styles: ReturnType<typeof createEmployeeLeaveLateStyles>;
   preview?: boolean;
   canManage?: boolean;
   onManage?: (row: LeaveRequestRow) => void;
@@ -1126,15 +1134,21 @@ function LeaveHistoryRow({
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
+function createEmployeeLeaveLateStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   sectionTitle: {
     marginTop: 20,
     fontSize: 17,
     fontWeight: '700',
     color: c.text,
+    ...sectionAccent,
   },
   sectionSub: { fontSize: 12, color: c.textMuted, marginTop: 4, marginBottom: 10 },
   loadingBox: {
@@ -1571,4 +1585,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modalCloseText: { fontWeight: '700', color: c.textSecondary },
-});
+  });
+}

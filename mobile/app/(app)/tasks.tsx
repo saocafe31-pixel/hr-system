@@ -26,7 +26,8 @@ import { TaskDetailModal } from '@/components/TaskDetailModal';
 import { UserAvatar } from '@/components/UserAvatar';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useTaskNotifications } from '@/contexts/TaskNotificationsContext';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { emitTaskStatusChanged } from '@/lib/appSignals';
 import {
   checklistAllDone,
@@ -169,6 +170,10 @@ const PRESENTATION_TEMPLATES: PresentationTemplate[] = [
 export default function TasksScreen() {
   const { session } = useAuth();
   const router = useRouter();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const s = theme.spacing;
+  const styles = useMemo(() => createTasksStyles(theme), [theme]);
   const params = useLocalSearchParams<{
     focusAssigneeId?: string | string[];
     focusAssigneeName?: string | string[];
@@ -2253,7 +2258,7 @@ export default function TasksScreen() {
                   primaryAmongSelected.length === 0
                 }>
                 {mgrSaving ? (
-                  <ActivityIndicator color={NatureTheme.colors.onAccent} />
+                  <ActivityIndicator color={c.onAccent} />
                 ) : (
                   <Text style={styles.mgrSaveText}>บันทึกงาน</Text>
                 )}
@@ -2295,11 +2300,12 @@ export default function TasksScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createTasksStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   screen: { flex: 1, backgroundColor: c.canvas },
   mainScroll: { flex: 1 },
   mainContent: { paddingBottom: 14 },
@@ -2826,4 +2832,5 @@ const styles = StyleSheet.create({
   },
   mgrSaveDisabled: { opacity: 0.7 },
   mgrSaveText: { color: c.onAccent, fontWeight: '700' },
-});
+  });
+}

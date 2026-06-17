@@ -26,10 +26,12 @@ import {
   ADMIN_NEW_EMPLOYEE_ID,
 } from '@/components/AdminEmployeeEditModal';
 import { AppLoadingScreen } from '@/components/AppLoadingScreen';
+import { DatePickerField } from '@/components/DatePickerField';
 import { AdminManagerDelegationModal } from '@/components/AdminManagerDelegationModal';
 import { AdminPayrollPanel } from '@/components/AdminPayrollPanel';
 import { ZoomableImage } from '@/components/ZoomableImage';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { mergeEmployeeWithProfiles, isUuidLike } from '@/lib/adminEmployeeMerge';
@@ -44,7 +46,9 @@ import {
   ATTENDANCE_KPI_SETTINGS_KEY,
   DEFAULT_ATTENDANCE_KPI_SETTINGS,
   parseAttendanceKpiSettings,
+  type AttendanceKpiSettings,
 } from '@/lib/attendanceKpi';
+import { fetchCompanyHolidayDates } from '@/lib/companyHolidays';
 import {
   PAYROLL_COMPANY_INFO_KEY,
   parsePayrollCompanyInfo,
@@ -57,10 +61,12 @@ import {
 } from '@/lib/computeLateFromAttendance';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
 import { supabase } from '@/lib/supabase';
+import { dateToBangkokYmd } from '@/lib/taskHelpers';
 import { uploadAnnouncementSlideFromUri } from '@/lib/uploadAnnouncementSlide';
 import type {
   AdminEmployeePasswordRow,
   Branch,
+  CompanyHolidayDateRow,
   ExpenseClaimItemRow,
   ExpenseClaimRow,
   Profile,
@@ -69,11 +75,13 @@ import type {
 } from '@/lib/types';
 const BREAK_START_KEY = 'attendance_break_start_messages';
 const BREAK_END_KEY = 'attendance_break_end_messages';
-const DEFAULT_KPI_SETTINGS_TEXT = JSON.stringify(
-  DEFAULT_ATTENDANCE_KPI_SETTINGS,
-  null,
-  2
-);
+const LEAVE_PROMPT_KEY = 'attendance_leave_prompt_messages';
+const HOLIDAY_PROMPT_KEY = 'attendance_holiday_prompt_messages';
+const OVERTIME_PROMPT_SETTINGS_KEY = 'attendance_overtime_prompt_settings';
+const DEFAULT_OVERTIME_PROMPT_SETTINGS = {
+  prompt_after_minutes: 15,
+  auto_checkout_after_minutes: 30,
+};
 type ClaimStatus = SalaryClaimRow['status'];
 type ClaimHistoryKind = 'salary' | 'expense';
 type ClaimHistoryStatusFilter = 'all' | Exclude<ClaimStatus, 'pending'>;
@@ -88,6 +96,7 @@ type AdminSectionKey =
   | 'payroll'
   | 'branches'
   | 'breakMessages'
+  | 'companyHolidays'
   | 'kpi';
 type EmployeeConfirmAction = {
   kind: 'resign' | 'delete';
@@ -153,14 +162,21 @@ const ADMIN_SECTIONS: Array<{
     key: 'breakMessages',
     no: '8',
     title: 'ข้อความการ์ดพักเบรก',
-    subtitle: 'ข้อความ popup พัก/กลับงาน',
+    subtitle: 'ข้อความ popup พัก/กลับงาน/ลา',
     icon: 'coffee',
   },
   {
-    key: 'kpi',
+    key: 'companyHolidays',
     no: '9',
-    title: 'ตั้งค่า KPI ลา / ขอเข้าสาย',
-    subtitle: 'เกณฑ์ KPI และ JSON ระบบ',
+    title: 'วันหยุดประจำปีบริษัท',
+    subtitle: 'ตั้งวันหยุดบริษัทแสดงในปฏิทิน',
+    icon: 'calendar',
+  },
+  {
+    key: 'kpi',
+    no: '10',
+    title: 'ตั้งค่าระบบ',
+    subtitle: 'KPI, OT และ JSON ระบบ',
     icon: 'sliders',
   },
 ];
@@ -203,6 +219,141 @@ type RankRow = {
 type AnnouncementDraftItem =
   | { key: string; kind: 'saved'; url: string; durationSeconds: string }
   | { key: string; kind: 'pending'; localUri: string; durationSeconds: string };
+type KpiDraftSection = 'personalNotice' | 'sickNotice' | 'vacationNotice' | 'late';
+type KpiSettingsDraft = {
+  leaveMaxScore: string;
+  lateMaxScore: string;
+  personalNotice: Record<string, string>;
+  sickNotice: Record<string, string>;
+  vacationNotice: Record<string, string>;
+  late: Record<string, string>;
+};
+type KpiFormField = {
+  section: 'root' | KpiDraftSection;
+  key: string;
+  label: string;
+  hint?: string;
+};
+type KpiFormGroup = {
+  title: string;
+  description: string;
+  rows: Array<{
+    title?: string;
+    fields: KpiFormField[];
+  }>;
+};
+
+const KPI_FORM_GROUPS: KpiFormGroup[] = [
+  {
+    title: 'คะแนนเต็ม',
+    description: 'กำหนดคะแนนเต็มต่อไตรมาสของหมวดลาและหมวดมาสาย',
+    rows: [
+      {
+        fields: [
+          { section: 'root', key: 'leaveMaxScore', label: 'คะแนนเต็มหมวดลา' },
+          { section: 'root', key: 'lateMaxScore', label: 'คะแนนเต็มหมวดขอเข้าสาย/มาสาย' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'ลากิจ: เกณฑ์แจ้งล่วงหน้า',
+    description: 'ระบบคิดจำนวนวันจากเวลาที่ส่งคำขอถึงเวลาเริ่มงานของวันลา',
+    rows: [
+      {
+        title: 'ดีมาก',
+        fields: [
+          { section: 'personalNotice', key: 'goodDays', label: 'แจ้งล่วงหน้าอย่างน้อย (วัน)' },
+          { section: 'personalNotice', key: 'penaltyBelowGood', label: 'หักคะแนนเมื่อต่ำกว่าดีมาก' },
+        ],
+      },
+      {
+        title: 'ปานกลาง',
+        fields: [
+          { section: 'personalNotice', key: 'midDays', label: 'แจ้งล่วงหน้าอย่างน้อย (วัน)' },
+          { section: 'personalNotice', key: 'penaltyBelowMid', label: 'หักคะแนนเมื่อต่ำกว่าปานกลาง' },
+        ],
+      },
+      {
+        title: 'ขั้นต่ำ',
+        fields: [
+          { section: 'personalNotice', key: 'lowDays', label: 'แจ้งล่วงหน้าอย่างน้อย (วัน)' },
+          { section: 'personalNotice', key: 'penaltyBelowLow', label: 'หักคะแนนเมื่อต่ำกว่าขั้นต่ำ' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'ลาป่วย: เกณฑ์แจ้งล่วงหน้า',
+    description: 'ใช้เปรียบเทียบเวลาส่งคำขอกับเวลาเริ่มงานของวันลา',
+    rows: [
+      {
+        fields: [
+          { section: 'sickNotice', key: 'minHours', label: 'ต้องแจ้งล่วงหน้าอย่างน้อย (ชั่วโมง)' },
+          { section: 'sickNotice', key: 'penaltyBelowMin', label: 'หักคะแนนถ้าแจ้งน้อยกว่ากำหนด' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'ลาพักร้อน: เกณฑ์แจ้งล่วงหน้า',
+    description: 'ระบบคิดจำนวนวันจากเวลาที่ส่งคำขอถึงเวลาเริ่มงานของวันลา',
+    rows: [
+      {
+        title: 'ดีมาก',
+        fields: [
+          { section: 'vacationNotice', key: 'goodDays', label: 'แจ้งล่วงหน้าอย่างน้อย (วัน)' },
+          { section: 'vacationNotice', key: 'penaltyBelowGood', label: 'หักคะแนนเมื่อต่ำกว่าดีมาก' },
+        ],
+      },
+      {
+        title: 'ปานกลาง',
+        fields: [
+          { section: 'vacationNotice', key: 'midDays', label: 'แจ้งล่วงหน้าอย่างน้อย (วัน)' },
+          { section: 'vacationNotice', key: 'penaltyBelowMid', label: 'หักคะแนนเมื่อต่ำกว่าปานกลาง' },
+        ],
+      },
+      {
+        title: 'ขั้นต่ำ',
+        fields: [
+          { section: 'vacationNotice', key: 'lowDays', label: 'แจ้งล่วงหน้าอย่างน้อย (วัน)' },
+          { section: 'vacationNotice', key: 'penaltyBelowLow', label: 'หักคะแนนเมื่อต่ำกว่าขั้นต่ำ' },
+        ],
+      },
+    ],
+  },
+  {
+    title: 'ขอเข้าสาย / มาสายจริง',
+    description: 'กำหนดช่วงจำนวนครั้ง/นาทีรวมในไตรมาส และคะแนนที่หักตามระดับ',
+    rows: [
+      {
+        title: 'ระดับแรก',
+        fields: [
+          { section: 'late', key: 'firstMinCount', label: 'จำนวนครั้งขั้นต่ำ' },
+          { section: 'late', key: 'firstMaxCount', label: 'จำนวนครั้งสูงสุด' },
+          { section: 'late', key: 'firstMaxMinutes', label: 'นาทีรวมสูงสุด' },
+          { section: 'late', key: 'firstPenalty', label: 'คะแนนที่หัก' },
+        ],
+      },
+      {
+        title: 'ระดับสอง',
+        fields: [
+          { section: 'late', key: 'secondMaxCount', label: 'จำนวนครั้งสูงสุด' },
+          { section: 'late', key: 'secondMaxMinutes', label: 'นาทีรวมสูงสุด' },
+          { section: 'late', key: 'secondPenalty', label: 'คะแนนที่หัก' },
+        ],
+      },
+      {
+        title: 'รุนแรง',
+        fields: [
+          { section: 'late', key: 'severeCountOver', label: 'จำนวนครั้งเกิน' },
+          { section: 'late', key: 'severeMinutesOver', label: 'นาทีรวมเกิน' },
+          { section: 'late', key: 'severePenalty', label: 'คะแนนที่หัก' },
+        ],
+      },
+    ],
+  },
+];
 
 function newDraftKey(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -392,6 +543,15 @@ function overlapInclusiveDays(
   return countInclusiveDays(start, end);
 }
 
+function formatCompanyHolidayDateTh(ymd: string): string {
+  return new Intl.DateTimeFormat('th-TH-u-ca-gregory-nu-latn', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  }).format(new Date(`${ymd}T12:00:00+07:00`));
+}
+
 function bangkokYmdFromIso(iso: string): string {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Bangkok',
@@ -415,49 +575,6 @@ function formatDurationMinutes(minutes: number): string {
   if (h > 0 && m > 0) return `${h} ชม. ${m} นาที`;
   if (h > 0) return `${h} ชม.`;
   return `${m} นาที`;
-}
-
-function MiniBarChart({
-  points,
-  maxValue,
-  valueSuffix,
-  color = c.primaryMuted,
-}: {
-  points: ChartPoint[];
-  maxValue?: number;
-  valueSuffix?: string;
-  color?: string;
-}) {
-  const max = maxValue ?? Math.max(1, ...points.map((p) => p.value));
-  return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-      <View style={styles.analyticsChartRow}>
-        {points.map((point) => {
-          const height = point.value <= 0 ? 4 : Math.max(8, (point.value / max) * 112);
-          return (
-            <View key={point.key} style={styles.analyticsBarCol}>
-              <View style={styles.analyticsBarTrack}>
-                <View style={[styles.analyticsBarFill, { height, backgroundColor: color }]} />
-              </View>
-              <Text style={styles.analyticsBarLabel} numberOfLines={2}>
-                {point.label}
-              </Text>
-              <Text style={styles.analyticsBarValue} numberOfLines={1}>
-                {point.value > 0
-                  ? `${point.value.toFixed(point.value % 1 ? 1 : 0)}${valueSuffix ?? ''}`
-                  : '—'}
-              </Text>
-              {point.sub ? (
-                <Text style={styles.analyticsBarSub} numberOfLines={1}>
-                  {point.sub}
-                </Text>
-              ) : null}
-            </View>
-          );
-        })}
-      </View>
-    </ScrollView>
-  );
 }
 
 function lateRequestMinutesByWorkDate(
@@ -509,9 +626,163 @@ function breakMessagesToEditorLines(raw: unknown): string[] {
   return nonEmpty.length > 0 ? nonEmpty : [''];
 }
 
+function clampMinuteSetting(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(240, Math.round(n)));
+}
+
+function parseOvertimePromptSettings(raw: unknown): typeof DEFAULT_OVERTIME_PROMPT_SETTINGS {
+  if (!raw || typeof raw !== 'object') return DEFAULT_OVERTIME_PROMPT_SETTINGS;
+  const obj = raw as {
+    prompt_after_minutes?: unknown;
+    auto_checkout_after_minutes?: unknown;
+  };
+  const promptAfter = clampMinuteSetting(
+    obj.prompt_after_minutes,
+    DEFAULT_OVERTIME_PROMPT_SETTINGS.prompt_after_minutes
+  );
+  const autoCheckout = Math.max(
+    promptAfter,
+    clampMinuteSetting(
+      obj.auto_checkout_after_minutes,
+      DEFAULT_OVERTIME_PROMPT_SETTINGS.auto_checkout_after_minutes
+    )
+  );
+  return {
+    prompt_after_minutes: promptAfter,
+    auto_checkout_after_minutes: autoCheckout,
+  };
+}
+
+function kpiDraftFromSettings(settings: AttendanceKpiSettings): KpiSettingsDraft {
+  return {
+    leaveMaxScore: String(settings.leaveMaxScore),
+    lateMaxScore: String(settings.lateMaxScore),
+    personalNotice: {
+      goodDays: String(settings.personalNotice.goodDays),
+      midDays: String(settings.personalNotice.midDays),
+      lowDays: String(settings.personalNotice.lowDays),
+      penaltyBelowGood: String(settings.personalNotice.penaltyBelowGood),
+      penaltyBelowMid: String(settings.personalNotice.penaltyBelowMid),
+      penaltyBelowLow: String(settings.personalNotice.penaltyBelowLow),
+    },
+    sickNotice: {
+      minHours: String(settings.sickNotice.minHours),
+      penaltyBelowMin: String(settings.sickNotice.penaltyBelowMin),
+    },
+    vacationNotice: {
+      goodDays: String(settings.vacationNotice.goodDays),
+      midDays: String(settings.vacationNotice.midDays),
+      lowDays: String(settings.vacationNotice.lowDays),
+      penaltyBelowGood: String(settings.vacationNotice.penaltyBelowGood),
+      penaltyBelowMid: String(settings.vacationNotice.penaltyBelowMid),
+      penaltyBelowLow: String(settings.vacationNotice.penaltyBelowLow),
+    },
+    late: {
+      firstMinCount: String(settings.late.firstMinCount),
+      firstMaxCount: String(settings.late.firstMaxCount),
+      firstMaxMinutes: String(settings.late.firstMaxMinutes),
+      firstPenalty: String(settings.late.firstPenalty),
+      secondMaxCount: String(settings.late.secondMaxCount),
+      secondMaxMinutes: String(settings.late.secondMaxMinutes),
+      secondPenalty: String(settings.late.secondPenalty),
+      severeCountOver: String(settings.late.severeCountOver),
+      severeMinutesOver: String(settings.late.severeMinutesOver),
+      severePenalty: String(settings.late.severePenalty),
+    },
+  };
+}
+
+function nonNegativeDraftNumber(raw: string, fallback: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, n);
+}
+
+function kpiSettingsFromDraft(draft: KpiSettingsDraft): AttendanceKpiSettings {
+  const d = DEFAULT_ATTENDANCE_KPI_SETTINGS;
+  return {
+    leaveMaxScore: nonNegativeDraftNumber(draft.leaveMaxScore, d.leaveMaxScore),
+    lateMaxScore: nonNegativeDraftNumber(draft.lateMaxScore, d.lateMaxScore),
+    personalNotice: {
+      goodDays: nonNegativeDraftNumber(draft.personalNotice.goodDays, d.personalNotice.goodDays),
+      midDays: nonNegativeDraftNumber(draft.personalNotice.midDays, d.personalNotice.midDays),
+      lowDays: nonNegativeDraftNumber(draft.personalNotice.lowDays, d.personalNotice.lowDays),
+      penaltyBelowGood: nonNegativeDraftNumber(
+        draft.personalNotice.penaltyBelowGood,
+        d.personalNotice.penaltyBelowGood
+      ),
+      penaltyBelowMid: nonNegativeDraftNumber(
+        draft.personalNotice.penaltyBelowMid,
+        d.personalNotice.penaltyBelowMid
+      ),
+      penaltyBelowLow: nonNegativeDraftNumber(
+        draft.personalNotice.penaltyBelowLow,
+        d.personalNotice.penaltyBelowLow
+      ),
+    },
+    sickNotice: {
+      minHours: nonNegativeDraftNumber(draft.sickNotice.minHours, d.sickNotice.minHours),
+      penaltyBelowMin: nonNegativeDraftNumber(
+        draft.sickNotice.penaltyBelowMin,
+        d.sickNotice.penaltyBelowMin
+      ),
+    },
+    vacationNotice: {
+      goodDays: nonNegativeDraftNumber(draft.vacationNotice.goodDays, d.vacationNotice.goodDays),
+      midDays: nonNegativeDraftNumber(draft.vacationNotice.midDays, d.vacationNotice.midDays),
+      lowDays: nonNegativeDraftNumber(draft.vacationNotice.lowDays, d.vacationNotice.lowDays),
+      penaltyBelowGood: nonNegativeDraftNumber(
+        draft.vacationNotice.penaltyBelowGood,
+        d.vacationNotice.penaltyBelowGood
+      ),
+      penaltyBelowMid: nonNegativeDraftNumber(
+        draft.vacationNotice.penaltyBelowMid,
+        d.vacationNotice.penaltyBelowMid
+      ),
+      penaltyBelowLow: nonNegativeDraftNumber(
+        draft.vacationNotice.penaltyBelowLow,
+        d.vacationNotice.penaltyBelowLow
+      ),
+    },
+    late: {
+      firstMinCount: nonNegativeDraftNumber(draft.late.firstMinCount, d.late.firstMinCount),
+      firstMaxCount: nonNegativeDraftNumber(draft.late.firstMaxCount, d.late.firstMaxCount),
+      firstMaxMinutes: nonNegativeDraftNumber(
+        draft.late.firstMaxMinutes,
+        d.late.firstMaxMinutes
+      ),
+      firstPenalty: nonNegativeDraftNumber(draft.late.firstPenalty, d.late.firstPenalty),
+      secondMaxCount: nonNegativeDraftNumber(draft.late.secondMaxCount, d.late.secondMaxCount),
+      secondMaxMinutes: nonNegativeDraftNumber(
+        draft.late.secondMaxMinutes,
+        d.late.secondMaxMinutes
+      ),
+      secondPenalty: nonNegativeDraftNumber(draft.late.secondPenalty, d.late.secondPenalty),
+      severeCountOver: nonNegativeDraftNumber(draft.late.severeCountOver, d.late.severeCountOver),
+      severeMinutesOver: nonNegativeDraftNumber(
+        draft.late.severeMinutesOver,
+        d.late.severeMinutesOver
+      ),
+      severePenalty: nonNegativeDraftNumber(draft.late.severePenalty, d.late.severePenalty),
+    },
+  };
+}
+
+function getKpiDraftField(draft: KpiSettingsDraft, field: KpiFormField): string {
+  if (field.section === 'root') {
+    return field.key === 'lateMaxScore' ? draft.lateMaxScore : draft.leaveMaxScore;
+  }
+  return draft[field.section][field.key] ?? '';
+}
+
 export default function AdminScreen() {
   const toast = useCuteToast();
   const { session } = useAuth();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createAdminStyles(theme), [theme]);
   const [activeSection, setActiveSection] = useState<AdminSectionKey | null>(null);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -537,8 +808,27 @@ export default function AdminScreen() {
     useState<AnnouncementTransitionMode>('slide');
   const [breakStartLines, setBreakStartLines] = useState<string[]>(['']);
   const [breakEndLines, setBreakEndLines] = useState<string[]>(['']);
-  const [kpiSettingsText, setKpiSettingsText] = useState(DEFAULT_KPI_SETTINGS_TEXT);
+  const [leavePromptLines, setLeavePromptLines] = useState<string[]>(['']);
+  const [holidayPromptLines, setHolidayPromptLines] = useState<string[]>(['']);
+  const [companyHolidays, setCompanyHolidays] = useState<CompanyHolidayDateRow[]>([]);
+  const [companyHolidaysLoading, setCompanyHolidaysLoading] = useState(false);
+  const [companyHolidayFormOpen, setCompanyHolidayFormOpen] = useState(false);
+  const [companyHolidayEditId, setCompanyHolidayEditId] = useState<string | null>(null);
+  const [companyHolidayDate, setCompanyHolidayDate] = useState<Date | null>(null);
+  const [companyHolidayTitle, setCompanyHolidayTitle] = useState('');
+  const [companyHolidayDescription, setCompanyHolidayDescription] = useState('');
+  const [companyHolidaySaving, setCompanyHolidaySaving] = useState(false);
+  const [kpiSettingsDraft, setKpiSettingsDraft] = useState(() =>
+    kpiDraftFromSettings(DEFAULT_ATTENDANCE_KPI_SETTINGS)
+  );
   const [kpiSettingsSaving, setKpiSettingsSaving] = useState(false);
+  const [otPromptAfterMinutes, setOtPromptAfterMinutes] = useState(
+    String(DEFAULT_OVERTIME_PROMPT_SETTINGS.prompt_after_minutes)
+  );
+  const [otAutoCheckoutAfterMinutes, setOtAutoCheckoutAfterMinutes] = useState(
+    String(DEFAULT_OVERTIME_PROMPT_SETTINGS.auto_checkout_after_minutes)
+  );
+  const [otPromptSettingsSaving, setOtPromptSettingsSaving] = useState(false);
   const [payrollCompanyName, setPayrollCompanyName] = useState('');
   const [payrollCompanyAddressText, setPayrollCompanyAddressText] = useState('');
   const [payrollCompanyJuristicId, setPayrollCompanyJuristicId] = useState('');
@@ -647,7 +937,10 @@ export default function AdminScreen() {
       { data: annRow },
       { data: breakStartRow },
       { data: breakEndRow },
+      { data: leavePromptRow },
+      { data: holidayPromptRow },
       { data: kpiRow },
+      { data: otPromptRow },
       { data: payrollCompanyRow },
     ] =
       await Promise.all([
@@ -669,7 +962,22 @@ export default function AdminScreen() {
         supabase
           .from('app_settings')
           .select('value')
+          .eq('key', LEAVE_PROMPT_KEY)
+          .maybeSingle(),
+        supabase
+          .from('app_settings')
+          .select('value')
+          .eq('key', HOLIDAY_PROMPT_KEY)
+          .maybeSingle(),
+        supabase
+          .from('app_settings')
+          .select('value')
           .eq('key', ATTENDANCE_KPI_SETTINGS_KEY)
+          .maybeSingle(),
+        supabase
+          .from('app_settings')
+          .select('value')
+          .eq('key', OVERTIME_PROMPT_SETTINGS_KEY)
           .maybeSingle(),
         supabase
           .from('app_settings')
@@ -690,9 +998,12 @@ export default function AdminScreen() {
     );
     setBreakStartLines(breakMessagesToEditorLines(breakStartRow?.value));
     setBreakEndLines(breakMessagesToEditorLines(breakEndRow?.value));
-    setKpiSettingsText(
-      JSON.stringify(parseAttendanceKpiSettings(kpiRow?.value), null, 2)
-    );
+    setLeavePromptLines(breakMessagesToEditorLines(leavePromptRow?.value));
+    setHolidayPromptLines(breakMessagesToEditorLines(holidayPromptRow?.value));
+    setKpiSettingsDraft(kpiDraftFromSettings(parseAttendanceKpiSettings(kpiRow?.value)));
+    const otPromptSettings = parseOvertimePromptSettings(otPromptRow?.value);
+    setOtPromptAfterMinutes(String(otPromptSettings.prompt_after_minutes));
+    setOtAutoCheckoutAfterMinutes(String(otPromptSettings.auto_checkout_after_minutes));
     const payrollCompanyInfo = parsePayrollCompanyInfo(payrollCompanyRow?.value);
     setPayrollCompanyName(payrollCompanyInfo.name);
     setPayrollCompanyAddressText(payrollCompanyInfo.addressLines.join('\n'));
@@ -1860,29 +2171,36 @@ export default function AdminScreen() {
     const endMessages = breakEndLines
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+    const leaveMessages = leavePromptLines
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const holidayMessages = holidayPromptLines
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
     const { error } = await supabase.from('app_settings').upsert([
       { key: BREAK_START_KEY, value: { messages: startMessages } },
       { key: BREAK_END_KEY, value: { messages: endMessages } },
+      { key: LEAVE_PROMPT_KEY, value: { messages: leaveMessages } },
+      { key: HOLIDAY_PROMPT_KEY, value: { messages: holidayMessages } },
     ]);
     if (error) {
-      toast.error('บันทึกข้อความพักเบรกไม่สำเร็จ', error.message);
+      toast.error('บันทึกข้อความ popup ไม่สำเร็จ', error.message);
       return;
     }
-    toast.success('บันทึกข้อความพักเบรกแล้ว', 'พักผ่อนอย่างมีสไตล์นะ 🍃');
+    toast.success('บันทึกข้อความ popup แล้ว', 'พักเบรก / กลับงาน / ลา / วันหยุด อัปเดตแล้ว');
     await load();
   }
 
   async function saveKpiSettings() {
     setKpiSettingsSaving(true);
     try {
-      const parsed = JSON.parse(kpiSettingsText) as unknown;
-      const normalized = parseAttendanceKpiSettings(parsed);
+      const normalized = parseAttendanceKpiSettings(kpiSettingsFromDraft(kpiSettingsDraft));
       const { error } = await supabase.from('app_settings').upsert({
         key: ATTENDANCE_KPI_SETTINGS_KEY,
         value: normalized,
       });
       if (error) throw new Error(error.message);
-      setKpiSettingsText(JSON.stringify(normalized, null, 2));
+      setKpiSettingsDraft(kpiDraftFromSettings(normalized));
       toast.success('บันทึก KPI แล้ว', 'เกณฑ์ KPI ลา/เข้าสายถูกอัปเดตแล้ว');
       await load();
     } catch (e) {
@@ -1893,6 +2211,137 @@ export default function AdminScreen() {
     } finally {
       setKpiSettingsSaving(false);
     }
+  }
+
+  async function saveOvertimePromptSettings() {
+    setOtPromptSettingsSaving(true);
+    try {
+      const promptAfter = clampMinuteSetting(
+        otPromptAfterMinutes,
+        DEFAULT_OVERTIME_PROMPT_SETTINGS.prompt_after_minutes
+      );
+      const autoCheckout = Math.max(
+        promptAfter,
+        clampMinuteSetting(
+          otAutoCheckoutAfterMinutes,
+          DEFAULT_OVERTIME_PROMPT_SETTINGS.auto_checkout_after_minutes
+        )
+      );
+      const value = {
+        prompt_after_minutes: promptAfter,
+        auto_checkout_after_minutes: autoCheckout,
+      };
+      const { error } = await supabase.from('app_settings').upsert({
+        key: OVERTIME_PROMPT_SETTINGS_KEY,
+        value,
+      });
+      if (error) throw new Error(error.message);
+      setOtPromptAfterMinutes(String(promptAfter));
+      setOtAutoCheckoutAfterMinutes(String(autoCheckout));
+      toast.success(
+        'บันทึกตั้งค่า OT แล้ว',
+        `ถามทำ OT หลังเลิกงาน ${promptAfter} นาที · ออกงานอัตโนมัติ ${autoCheckout} นาที`
+      );
+      await load();
+    } catch (e) {
+      toast.error(
+        'บันทึกตั้งค่า OT ไม่สำเร็จ',
+        e instanceof Error ? e.message : String(e)
+      );
+    } finally {
+      setOtPromptSettingsSaving(false);
+    }
+  }
+
+  const loadCompanyHolidays = useCallback(async () => {
+    setCompanyHolidaysLoading(true);
+    try {
+      const rows = await fetchCompanyHolidayDates();
+      setCompanyHolidays(rows);
+    } catch (e) {
+      toast.error(
+        'โหลดวันหยุดบริษัทไม่สำเร็จ',
+        e instanceof Error ? e.message : String(e)
+      );
+      setCompanyHolidays([]);
+    } finally {
+      setCompanyHolidaysLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (activeSection !== 'companyHolidays') return;
+    void loadCompanyHolidays();
+  }, [activeSection, loadCompanyHolidays]);
+
+  function openCompanyHolidayForm(row?: CompanyHolidayDateRow) {
+    if (row) {
+      setCompanyHolidayEditId(row.id);
+      setCompanyHolidayDate(new Date(`${row.holiday_date}T12:00:00+07:00`));
+      setCompanyHolidayTitle(row.title);
+      setCompanyHolidayDescription(row.description ?? '');
+    } else {
+      setCompanyHolidayEditId(null);
+      setCompanyHolidayDate(new Date());
+      setCompanyHolidayTitle('');
+      setCompanyHolidayDescription('');
+    }
+    setCompanyHolidayFormOpen(true);
+  }
+
+  async function saveCompanyHoliday() {
+    const title = companyHolidayTitle.trim();
+    if (!companyHolidayDate) {
+      toast.info('กรอกข้อมูล', 'เลือกวันที่วันหยุด');
+      return;
+    }
+    if (!title) {
+      toast.info('กรอกข้อมูล', 'ตั้งชื่อวันหยุด เช่น วันแรงงาน');
+      return;
+    }
+    const holidayDate = dateToBangkokYmd(companyHolidayDate);
+    const uid = session?.user?.id ?? null;
+    setCompanyHolidaySaving(true);
+    try {
+      const description = companyHolidayDescription.trim() || null;
+      if (companyHolidayEditId) {
+        const { error } = await supabase
+          .from('company_holiday_dates')
+          .update({
+            holiday_date: holidayDate,
+            title,
+            description,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', companyHolidayEditId);
+        if (error) throw new Error(error.message);
+      } else {
+        const { error } = await supabase.from('company_holiday_dates').insert({
+          holiday_date: holidayDate,
+          title,
+          description,
+          created_by: uid,
+        });
+        if (error) throw new Error(error.message);
+      }
+      toast.success('บันทึกแล้ว', `วันหยุด ${title} · ${formatCompanyHolidayDateTh(holidayDate)}`);
+      setCompanyHolidayFormOpen(false);
+      await loadCompanyHolidays();
+    } catch (e) {
+      toast.error('บันทึกวันหยุดไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setCompanyHolidaySaving(false);
+    }
+  }
+
+  async function deleteCompanyHoliday(row: CompanyHolidayDateRow) {
+    const { error } = await supabase.from('company_holiday_dates').delete().eq('id', row.id);
+    if (error) {
+      toast.error('ลบไม่สำเร็จ', error.message);
+      return;
+    }
+    toast.success('ลบแล้ว', row.title);
+    await loadCompanyHolidays();
   }
 
   if (loading) {
@@ -2173,7 +2622,7 @@ export default function AdminScreen() {
           onPress={() => void uploadAndSaveAnnouncementSlides()}
           disabled={announcementUploading}>
           {announcementUploading ? (
-            <ActivityIndicator color={NatureTheme.colors.onAccent} />
+            <ActivityIndicator color={c.onAccent} />
           ) : (
             <Text style={styles.btnText}>อัปโหลดและบันทึกสไลด์</Text>
           )}
@@ -2782,9 +3231,146 @@ export default function AdminScreen() {
           <Text style={styles.btnSecondaryText}>+ เพิ่มข้อความ (หลังพัก)</Text>
         </Pressable>
 
-        <Pressable style={styles.btn} onPress={saveBreakMessages}>
-          <Text style={styles.btnText}>บันทึกข้อความพักเบรก</Text>
+        <Text style={[styles.label, { marginTop: 16 }]}>
+          ข้อความก่อนเปิดฟอร์มลางาน
+        </Text>
+        {leavePromptLines.map((line, i) => (
+          <View key={`lp-${i}`} style={styles.breakLineBlock}>
+            <Text style={styles.breakLineTag}>ข้อความ {i + 1}</Text>
+            <TextInput
+              style={[styles.input, styles.breakLineInput]}
+              placeholder="พิมพ์ข้อความที่จะแสดงในป๊อปอัพก่อนคีย์ลา"
+              value={line}
+              onChangeText={(t) => {
+                setLeavePromptLines((prev) => {
+                  const next = [...prev];
+                  next[i] = t;
+                  return next;
+                });
+              }}
+              multiline
+            />
+            <Pressable
+              style={[
+                styles.breakRemoveBtn,
+                leavePromptLines.length <= 1 && styles.breakRemoveBtnDisabled,
+              ]}
+              disabled={leavePromptLines.length <= 1}
+              onPress={() => {
+                setLeavePromptLines((prev) =>
+                  prev.length <= 1 ? [''] : prev.filter((_, j) => j !== i)
+                );
+              }}>
+              <Text
+                style={[
+                  styles.breakRemoveBtnText,
+                  leavePromptLines.length <= 1 && styles.breakRemoveBtnTextDisabled,
+                ]}>
+                ลบช่องนี้
+              </Text>
+            </Pressable>
+          </View>
+        ))}
+        <Pressable
+          style={styles.btnSecondary}
+          onPress={() => setLeavePromptLines((p) => [...p, ''])}>
+          <Text style={styles.btnSecondaryText}>+ เพิ่มข้อความ (ก่อนลา)</Text>
         </Pressable>
+
+        <Text style={[styles.label, { marginTop: 16 }]}>
+          ข้อความเมื่อวันนี้เป็นวันหยุด (เข้า-ออกงาน)
+        </Text>
+        <Text style={styles.muted}>
+          แสดงอัตโนมัติเมื่อวันนี้เป็นวันหยุดบริษัท หรือวันหยุดส่วนตัวที่ตั้งในตารางงาน
+        </Text>
+        {holidayPromptLines.map((line, i) => (
+          <View key={`hp-${i}`} style={styles.breakLineBlock}>
+            <Text style={styles.breakLineTag}>ข้อความ {i + 1}</Text>
+            <TextInput
+              style={[styles.input, styles.breakLineInput]}
+              placeholder="พิมพ์ข้อความแจ้งเตือนเมื่อวันนี้เป็นวันหยุด"
+              value={line}
+              onChangeText={(t) => {
+                setHolidayPromptLines((prev) => {
+                  const next = [...prev];
+                  next[i] = t;
+                  return next;
+                });
+              }}
+              multiline
+            />
+            <Pressable
+              style={[
+                styles.breakRemoveBtn,
+                holidayPromptLines.length <= 1 && styles.breakRemoveBtnDisabled,
+              ]}
+              disabled={holidayPromptLines.length <= 1}
+              onPress={() => {
+                setHolidayPromptLines((prev) =>
+                  prev.length <= 1 ? [''] : prev.filter((_, j) => j !== i)
+                );
+              }}>
+              <Text
+                style={[
+                  styles.breakRemoveBtnText,
+                  holidayPromptLines.length <= 1 && styles.breakRemoveBtnTextDisabled,
+                ]}>
+                ลบช่องนี้
+              </Text>
+            </Pressable>
+          </View>
+        ))}
+        <Pressable
+          style={styles.btnSecondary}
+          onPress={() => setHolidayPromptLines((p) => [...p, ''])}>
+          <Text style={styles.btnSecondaryText}>+ เพิ่มข้อความ (วันหยุด)</Text>
+        </Pressable>
+
+        <Pressable style={styles.btn} onPress={saveBreakMessages}>
+          <Text style={styles.btnText}>บันทึกข้อความ popup</Text>
+        </Pressable>
+          </View>
+        ) : null}
+
+        {activeSection === 'companyHolidays' ? (
+          <View style={styles.adminSectionCard}>
+            <Text style={[styles.h2, { marginTop: 24 }]}>วันหยุดประจำปีบริษัท</Text>
+            <Text style={styles.muted}>
+              ตั้งวันหยุดของบริษัท (เช่น วันแรงงาน 1 พ.ค.) — แสดงเป็นตัวสีแดงในปฏิทินหน้าตารางและปฏิทินส่วนตัวของพนักงาน
+            </Text>
+            <Pressable style={styles.btn} onPress={() => openCompanyHolidayForm()}>
+              <Text style={styles.btnText}>+ เพิ่มวันหยุดบริษัท</Text>
+            </Pressable>
+            {companyHolidaysLoading ? (
+              <ActivityIndicator color={c.primary} style={{ marginVertical: 16 }} />
+            ) : companyHolidays.length === 0 ? (
+              <Text style={styles.muted}>ยังไม่มีวันหยุดประจำปี</Text>
+            ) : (
+              companyHolidays.map((row) => (
+                <View key={row.id} style={styles.row}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.rowTitle}>{row.title}</Text>
+                    <Text style={styles.rowSub}>
+                      {formatCompanyHolidayDateTh(row.holiday_date)}
+                    </Text>
+                    {row.description?.trim() ? (
+                      <Text style={styles.rowSub}>{row.description.trim()}</Text>
+                    ) : null}
+                  </View>
+                  <View style={styles.branchActions}>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      style={[styles.editBtn, Platform.OS === 'web' && styles.pressableWeb]}
+                      onPress={() => openCompanyHolidayForm(row)}>
+                      <Text style={styles.editBtnText}>แก้ไข</Text>
+                    </TouchableOpacity>
+                    <Pressable onPress={() => void deleteCompanyHoliday(row)}>
+                      <Text style={styles.danger}>ลบ</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))
+            )}
           </View>
         ) : null}
 
@@ -2792,21 +3378,52 @@ export default function AdminScreen() {
           <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 24 }]}>ตั้งค่า KPI ลา / ขอเข้าสาย</Text>
         <Text style={styles.muted}>
-          เกณฑ์นี้ใช้คำนวณการ์ด KPI ในหน้าโปรไฟล์แบบรายไตรมาสและภาพรวมปี — แก้ตัวเลขใน JSON ได้ทั้งหมด
+          เกณฑ์นี้ใช้คำนวณการ์ด KPI ในหน้าโปรไฟล์แบบรายไตรมาสและภาพรวมปี — กรอกตัวเลขแล้วบันทึกได้ทันที
         </Text>
-        <TextInput
-          style={[styles.input, styles.kpiSettingsInput]}
-          value={kpiSettingsText}
-          onChangeText={setKpiSettingsText}
-          multiline
-          textAlignVertical="top"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+        {KPI_FORM_GROUPS.map((group) => (
+          <View key={group.title} style={styles.kpiFormGroupCard}>
+            <Text style={styles.kpiFormGroupTitle}>{group.title}</Text>
+            <Text style={styles.kpiFormGroupSub}>{group.description}</Text>
+            {group.rows.map((row, rowIndex) => (
+              <View key={`${group.title}-${row.title ?? rowIndex}`} style={styles.kpiFormPairRow}>
+                {row.title ? <Text style={styles.kpiFormPairTitle}>{row.title}</Text> : null}
+                <View style={styles.kpiFormGrid}>
+                  {row.fields.map((field) => (
+                    <View key={`${field.section}-${field.key}`} style={styles.kpiFormField}>
+                      <Text style={styles.label}>{field.label}</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={getKpiDraftField(kpiSettingsDraft, field)}
+                        onChangeText={(value) => {
+                          setKpiSettingsDraft((prev) => {
+                            if (field.section === 'root') {
+                              return { ...prev, [field.key]: value };
+                            }
+                            return {
+                              ...prev,
+                              [field.section]: {
+                                ...prev[field.section],
+                                [field.key]: value,
+                              },
+                            };
+                          });
+                        }}
+                        keyboardType="decimal-pad"
+                        placeholder="0"
+                        placeholderTextColor={c.textMuted}
+                      />
+                      {field.hint ? <Text style={styles.kpiFormFieldHint}>{field.hint}</Text> : null}
+                    </View>
+                  ))}
+                </View>
+              </View>
+            ))}
+          </View>
+        ))}
         <View style={styles.kpiSettingsActions}>
           <Pressable
             style={styles.btnSecondary}
-            onPress={() => setKpiSettingsText(DEFAULT_KPI_SETTINGS_TEXT)}>
+            onPress={() => setKpiSettingsDraft(kpiDraftFromSettings(DEFAULT_ATTENDANCE_KPI_SETTINGS))}>
             <Text style={styles.btnSecondaryText}>คืนค่าเริ่มต้น</Text>
           </Pressable>
           <Pressable
@@ -2814,9 +3431,56 @@ export default function AdminScreen() {
             disabled={kpiSettingsSaving}
             onPress={() => void saveKpiSettings()}>
             {kpiSettingsSaving ? (
-              <ActivityIndicator color={NatureTheme.colors.onAccent} />
+              <ActivityIndicator color={c.onAccent} />
             ) : (
               <Text style={styles.btnText}>บันทึกเกณฑ์ KPI</Text>
+            )}
+          </Pressable>
+        </View>
+
+        <View style={styles.payrollCompanyCard}>
+          <Text style={styles.h2}>ตั้งค่าระบบถามทำ OT หลังเลิกงาน</Text>
+          <Text style={styles.muted}>
+            ระบบจะถามพนักงานหลังเวลาเลิกงานตามตาราง และถ้าไม่ตอบจะออกงานให้อัตโนมัติตามเวลาที่กำหนด
+          </Text>
+          <View style={styles.otPromptSettingGrid}>
+            <View style={styles.otPromptSettingField}>
+              <Text style={styles.label}>ถามทำ OT หลังเลิกงาน (นาที)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="15"
+                placeholderTextColor={c.textMuted}
+                value={otPromptAfterMinutes}
+                onChangeText={setOtPromptAfterMinutes}
+                keyboardType="number-pad"
+              />
+              <Text style={styles.otPromptSettingHint}>
+                ค่าเริ่มต้น 15 นาที · ระบบ cron ตรวจทุกนาที
+              </Text>
+            </View>
+            <View style={styles.otPromptSettingField}>
+              <Text style={styles.label}>ออกงานอัตโนมัติหลังเลิกงาน (นาที)</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="30"
+                placeholderTextColor={c.textMuted}
+                value={otAutoCheckoutAfterMinutes}
+                onChangeText={setOtAutoCheckoutAfterMinutes}
+                keyboardType="number-pad"
+              />
+              <Text style={styles.otPromptSettingHint}>
+                ค่าเริ่มต้น 30 นาที · ต้องไม่น้อยกว่าเวลาถาม OT
+              </Text>
+            </View>
+          </View>
+          <Pressable
+            style={[styles.btn, otPromptSettingsSaving && styles.disabledSoft]}
+            disabled={otPromptSettingsSaving}
+            onPress={() => void saveOvertimePromptSettings()}>
+            {otPromptSettingsSaving ? (
+              <ActivityIndicator color={c.onAccent} />
+            ) : (
+              <Text style={styles.btnText}>บันทึกตั้งค่า OT</Text>
             )}
           </Pressable>
         </View>
@@ -2857,7 +3521,7 @@ export default function AdminScreen() {
             disabled={payrollCompanySaving}
             onPress={() => void savePayrollCompanyInfo()}>
             {payrollCompanySaving ? (
-              <ActivityIndicator color={NatureTheme.colors.onAccent} />
+              <ActivityIndicator color={c.onAccent} />
             ) : (
               <Text style={styles.btnText}>บันทึกข้อมูลบริษัทบนสลิป</Text>
             )}
@@ -2887,6 +3551,69 @@ export default function AdminScreen() {
           </View>
         ) : null}
       </ScrollView>
+
+      <Modal
+        visible={companyHolidayFormOpen}
+        transparent
+        animationType="slide"
+        presentationStyle="overFullScreen"
+        onRequestClose={() => setCompanyHolidayFormOpen(false)}>
+        <Pressable
+          style={[styles.linkBackdrop, WEB_MODAL_BACKDROP]}
+          onPress={() => setCompanyHolidayFormOpen(false)}>
+          <Pressable style={styles.linkModalCard} onPress={() => {}}>
+            <Text style={styles.linkModalTitle}>
+              {companyHolidayEditId ? 'แก้ไขวันหยุดบริษัท' : 'เพิ่มวันหยุดบริษัท'}
+            </Text>
+            <DatePickerField
+              label="วันที่วันหยุด"
+              value={companyHolidayDate}
+              onChange={setCompanyHolidayDate}
+            />
+            <Text style={styles.label}>ชื่อวันหยุด</Text>
+            <TextInput
+              style={styles.input}
+              placeholder='เช่น วันแรงงาน'
+              placeholderTextColor={c.textMuted}
+              value={companyHolidayTitle}
+              onChangeText={setCompanyHolidayTitle}
+            />
+            <Text style={styles.label}>รายละเอียด (ไม่บังคับ)</Text>
+            <TextInput
+              style={[styles.input, { minHeight: 88 }]}
+              placeholder="คำอธิบายเพิ่มเติม"
+              placeholderTextColor={c.textMuted}
+              value={companyHolidayDescription}
+              onChangeText={setCompanyHolidayDescription}
+              multiline
+            />
+            <View style={styles.employeeConfirmActions}>
+              <Pressable
+                style={styles.employeeConfirmCancelBtn}
+                onPress={() => setCompanyHolidayFormOpen(false)}
+                disabled={companyHolidaySaving}>
+                <Text style={styles.employeeConfirmCancelText}>ยกเลิก</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.employeeConfirmPrimaryBtn,
+                  styles.employeeConfirmResignBtn,
+                  companyHolidaySaving && styles.empActionBtnDisabled,
+                ]}
+                onPress={() => void saveCompanyHoliday()}
+                disabled={companyHolidaySaving}>
+                {companyHolidaySaving ? (
+                  <ActivityIndicator color={c.warningTitle} />
+                ) : (
+                  <Text style={[styles.employeeConfirmPrimaryText, styles.employeeConfirmResignText]}>
+                    บันทึก
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal
         visible={expenseApprovalPrompt !== null}
@@ -3457,11 +4184,16 @@ export default function AdminScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createAdminStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   screen: { flex: 1, backgroundColor: c.canvas },
   content: { padding: s.screen, paddingBottom: 36 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -3677,6 +4409,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+    ...sectionAccent,
   },
   adminSectionHeaderIcon: {
     width: 44,
@@ -3781,6 +4514,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
     color: c.text,
+    ...sectionAccent,
   },
   analyticsChartRow: {
     flexDirection: 'row',
@@ -3982,11 +4716,75 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: c.borderSoft,
   },
+  otPromptSettingGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 12,
+  },
+  otPromptSettingField: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 220,
+    minWidth: 0,
+  },
+  otPromptSettingHint: {
+    marginTop: 6,
+    color: c.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
+  },
   companyAddressInput: { minHeight: 96, textAlignVertical: 'top' },
-  kpiSettingsInput: {
-    minHeight: 320,
-    fontFamily: Platform.select({ web: 'monospace', default: undefined }),
-    lineHeight: 18,
+  kpiFormGroupCard: {
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: r.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surface,
+  },
+  kpiFormGroupTitle: {
+    color: c.text,
+    fontSize: 15,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  kpiFormGroupSub: {
+    color: c.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 10,
+  },
+  kpiFormGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  kpiFormPairRow: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: r.sm,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surfaceMuted,
+  },
+  kpiFormPairTitle: {
+    color: c.primaryDark,
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  kpiFormField: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 210,
+    minWidth: 0,
+  },
+  kpiFormFieldHint: {
+    marginTop: 5,
+    color: c.textMuted,
+    fontSize: 11,
+    lineHeight: 15,
   },
   kpiSettingsActions: {
     flexDirection: 'row',
@@ -4292,7 +5090,7 @@ const styles = StyleSheet.create({
   },
   evidenceFullBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.88)',
+    backgroundColor: c.overlay,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 16,
@@ -4312,7 +5110,7 @@ const styles = StyleSheet.create({
   evidenceFullTitle: {
     flex: 1,
     minWidth: 0,
-    color: '#F8FAFC',
+    color: c.text,
     fontSize: 15,
     fontWeight: '700',
   },
@@ -4331,7 +5129,7 @@ const styles = StyleSheet.create({
   evidenceFullHint: {
     marginTop: 10,
     textAlign: 'center',
-    color: 'rgba(248,250,252,0.72)',
+    color: c.textSecondary,
     fontSize: 12,
   },
   employeeConfirmBackdrop: {
@@ -4495,4 +5293,5 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
   },
   editBranchActionBtn: { flex: 1, marginBottom: 0 },
-});
+  });
+}

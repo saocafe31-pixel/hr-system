@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import {
   bangkokPayrollPeriodBounds,
@@ -26,9 +27,6 @@ type Props = {
   bankName?: string | null | undefined;
   bankAccount?: string | null | undefined;
 };
-
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
 
 function slipStatusLabel(status: PayrollSlipRow['status']): string {
   if (status === 'paid') return 'จ่ายแล้ว';
@@ -56,6 +54,9 @@ export function ProfilePayslipCard({
   bankAccount,
 }: Props) {
   const toast = useCuteToast();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createProfilePayslipStyles(theme), [theme]);
   const [slips, setSlips] = useState<PayrollSlipRow[]>([]);
   const [items, setItems] = useState<PayrollItemRow[]>([]);
   const [selectedCycleKey, setSelectedCycleKey] = useState(() => payrollCycleKeyFromBangkokDate());
@@ -274,9 +275,9 @@ export function ProfilePayslipCard({
               )}
             </Pressable>
           ) : null}
-          <PayslipItemGroup title="รายได้" rows={grouped.income} />
-          <PayslipItemGroup title="รายการหัก" rows={grouped.deduction} />
-          <PayslipItemGroup title="เงินคืน/เบิกจ่าย" rows={grouped.reimbursement} />
+          <PayslipItemGroup title="รายได้" rows={grouped.income} styles={styles} />
+          <PayslipItemGroup title="รายการหัก" rows={grouped.deduction} styles={styles} />
+          <PayslipItemGroup title="เงินคืน/เบิกจ่าย" rows={grouped.reimbursement} styles={styles} />
         </View>
       ) : (
         <Text style={styles.empty}>
@@ -287,7 +288,15 @@ export function ProfilePayslipCard({
   );
 }
 
-function PayslipItemGroup({ title, rows }: { title: string; rows: PayrollItemRow[] }) {
+function PayslipItemGroup({
+  title,
+  rows,
+  styles,
+}: {
+  title: string;
+  rows: PayrollItemRow[];
+  styles: ReturnType<typeof createProfilePayslipStyles>;
+}) {
   if (rows.length === 0) return null;
   return (
     <View style={styles.group}>
@@ -302,7 +311,15 @@ function PayslipItemGroup({ title, rows }: { title: string; rows: PayrollItemRow
   );
 }
 
-const styles = StyleSheet.create({
+function createProfilePayslipStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
+
+  return StyleSheet.create({
   card: {
     marginTop: 14,
     padding: 14,
@@ -312,7 +329,7 @@ const styles = StyleSheet.create({
     borderColor: c.borderSoft,
   },
   header: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
-  title: { fontSize: 17, fontWeight: '800', color: c.text },
+  title: { fontSize: 17, fontWeight: '800', color: c.text, ...sectionAccent },
   sub: { marginTop: 3, color: c.textMuted, fontSize: 12, lineHeight: 17 },
   empty: {
     padding: 12,
@@ -400,4 +417,5 @@ const styles = StyleSheet.create({
   },
   itemLabel: { flex: 1, minWidth: 0, color: c.text, fontSize: 12 },
   itemAmount: { color: c.textSecondary, fontSize: 12, fontWeight: '800' },
-});
+  });
+}

@@ -8,8 +8,10 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useMemo } from 'react';
 
-import { NatureTheme } from '@/constants/Theme';
+import { NatureTheme, type AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import type { WellbeingMoodOption } from '@/lib/wellbeing';
 
 type Props = {
@@ -43,6 +45,10 @@ export function WellbeingMoodModal({
   onPick,
   onCancel,
 }: Props) {
+  const { theme } = useAppTheme();
+  const tc = theme.colors;
+  const themed = useMemo(() => createWellbeingModalThemeStyles(tc), [tc]);
+
   return (
     <Modal
       visible={visible}
@@ -53,10 +59,10 @@ export function WellbeingMoodModal({
       onRequestClose={() => {
         if (!saving) onCancel();
       }}>
-      <View style={[styles.backdrop, WEB_MODAL_BACKDROP]}>
-        <View style={styles.card}>
-          <Text style={styles.title}>{title}</Text>
-          <Text style={styles.sub}>
+      <View style={[styles.backdrop, themed.backdrop, WEB_MODAL_BACKDROP]}>
+        <View style={[styles.card, themed.card]}>
+          <Text style={[styles.title, themed.title]}>{title}</Text>
+          <Text style={[styles.sub, themed.sub]}>
             เลือกข้อความที่ใกล้เคียงที่สุด — ใช้แสดงอิโมจิท้ายชื่อวันนี้ และสรุปภาพรวมในกราฟ
           </Text>
           <ScrollView
@@ -66,30 +72,51 @@ export function WellbeingMoodModal({
             {options.map((opt) => (
               <Pressable
                 key={opt.key}
-                style={[styles.choice, saving && styles.choiceDisabled]}
+                style={[styles.choice, themed.choice, saving && styles.choiceDisabled]}
                 onPress={() => !saving && onPick(opt)}
                 disabled={saving}>
                 <Text style={styles.emoji}>{opt.emoji}</Text>
-                <Text style={styles.label}>{opt.label}</Text>
+                <Text style={[styles.label, themed.label]}>{opt.label}</Text>
               </Pressable>
             ))}
           </ScrollView>
           {saving ? (
             <View style={styles.savingRow}>
-              <ActivityIndicator color={c.primary} />
-              <Text style={styles.savingText}>กำลังบันทึก…</Text>
+              <ActivityIndicator color={tc.primary} />
+              <Text style={[styles.savingText, themed.savingText]}>กำลังบันทึก…</Text>
             </View>
           ) : null}
           <Pressable
             style={styles.cancelBtn}
             onPress={onCancel}
             disabled={saving}>
-            <Text style={styles.cancelText}>ยกเลิก</Text>
+            <Text style={[styles.cancelText, themed.cancelText]}>ยกเลิก</Text>
           </Pressable>
         </View>
       </View>
     </Modal>
   );
+}
+
+function createWellbeingModalThemeStyles(colors: AppTheme['colors']) {
+  return StyleSheet.create({
+    backdrop: { backgroundColor: colors.overlay },
+    card: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    title: { color: colors.text },
+    sub: { color: colors.textMuted },
+    choice: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      borderWidth: 1.2,
+    },
+    label: { color: colors.text },
+    savingText: { color: colors.textSecondary },
+    cancelText: { color: colors.textMuted },
+  });
 }
 
 const styles = StyleSheet.create({

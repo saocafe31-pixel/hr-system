@@ -17,14 +17,30 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { DatePickerField } from '@/components/DatePickerField';
 import { UserAvatar } from '@/components/UserAvatar';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
-import { eachCalendarYmdInclusive } from '@/lib/leaveLateRules';
+import {
+  companyHolidayMapByDate,
+  fetchCompanyHolidayDates,
+} from '@/lib/companyHolidays';
+import {
+  buildAssignmentByUserDate,
+  buildHolidayByUserDate,
+  deleteEmployeeHolidayDatesForPairs,
+  deleteScheduleAssignmentsForPairs,
+  resolvedScheduleDayStatusForUser,
+} from '@/lib/scheduleDayResolution';
+import { leaveTypeLabelTh } from '@/lib/leaveAttendanceChat';
 import { dateToBangkokYmd } from '@/lib/taskHelpers';
 import { supabase } from '@/lib/supabase';
 import type {
   Branch,
+  CompanyHolidayDateRow,
+  EmployeeDirectory,
+  EmployeeHolidayDateRow,
+  LeaveRequestRow,
   Profile,
   WorkScheduleAssignmentRow,
   WorkScheduleRow,
@@ -42,7 +58,109 @@ const ASSIGNMENT_PAGE_SIZE = 1000;
 const WEEKDAY_LABELS_TH = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
 
 type SchedulePerson = Profile & { avatar_url?: string | null; employee_id?: string | null };
-type EmployeeLite = { id: string; position?: string | null; nickname?: string | null };
+type EmployeeDirLite = Pick<
+  EmployeeDirectory,
+  'id' | 'legacy_user_id' | 'employee_no' | 'name' | 'surname' | 'nickname' | 'position'
+>;
+type ScheduleEmployeeDisplay = {
+  realName: string;
+  nickname: string | null;
+  label: string;
+};
+type CalendarDetailFilter = 'all' | 'holiday' | 'leave' | 'work';
+type ScheduleDayLeaveEntry = {
+  leave_id: string;
+  user_id: string;
+  leave_type: LeaveRequestRow['leave_type'];
+  reason: string | null;
+  starts_on: string;
+  ends_on: string;
+};
+
+function scheduleEmployeeDisplayFromParts(
+  realName: string,
+  nickname: string | null,
+  fallback: string
+): ScheduleEmployeeDisplay {
+  const real = realName.trim();
+  const nick = nickname?.trim() || null;
+  let label = fallback;
+  if (real && nick) label = `${real}, ${nick}`;
+  else if (real) label = real;
+  else if (nick) label = nick;
+  return { realName: real, nickname: nick, label };
+}
+
+function resolveEmployeeForProfile(
+  profile: Pick<SchedulePerson, 'id' | 'employee_id' | 'email' | 'employee_code'>,
+  byEmployeeId: Map<string, EmployeeDirLite>,
+  byLegacyEmail: Map<string, EmployeeDirLite>,
+  byEmployeeNo: Map<string, EmployeeDirLite>
+): EmployeeDirLite | undefined {
+  if (profile.email) {
+    const hit = byLegacyEmail.get(profile.email.trim().toLowerCase());
+    if (hit) return hit;
+  }
+  if (profile.id) {
+    const hit = byLegacyEmail.get(profile.id.trim().toLowerCase());
+    if (hit) return hit;
+  }
+  if (profile.employee_id) {
+    const hit = byEmployeeId.get(String(profile.employee_id));
+    if (hit) return hit;
+  }
+  const code = profile.employee_code?.trim();
+  if (code) {
+    const hit = byEmployeeNo.get(code);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+function scheduleEmployeeDisplay(
+  profile: Pick<SchedulePerson, 'id' | 'email'>,
+  emp?: Pick<EmployeeDirLite, 'name' | 'surname' | 'nickname'>
+): ScheduleEmployeeDisplay {
+  const first = (emp?.name ?? '').trim();
+  const last = (emp?.surname ?? '').trim();
+  const real = `${first} ${last}`.trim();
+  const nick = emp?.nickname?.trim() || null;
+  const fallback = profile.email?.trim() || profile.id.slice(0, 8);
+  return scheduleEmployeeDisplayFromParts(real, nick, fallback);
+}
+
+function buildDirectoryLookupMaps(dirRows: EmployeeDirLite[]) {
+  const byEmployeeId = new Map<string, EmployeeDirLite>();
+  const byLegacyEmail = new Map<string, EmployeeDirLite>();
+  const byEmployeeNo = new Map<string, EmployeeDirLite>();
+  for (const row of dirRows) {
+    if (row.id) byEmployeeId.set(String(row.id), row);
+    const legacy = row.legacy_user_id?.trim().toLowerCase();
+    if (legacy) byLegacyEmail.set(legacy, row);
+    if (row.employee_no != null) byEmployeeNo.set(String(row.employee_no), row);
+  }
+  return { byEmployeeId, byLegacyEmail, byEmployeeNo };
+}
+
+async function fetchScheduleDirectoryRows(
+  isAdminUser: boolean,
+  userRole: string | null
+): Promise<EmployeeDirLite[]> {
+  const select =
+    'id,legacy_user_id,employee_no,name,surname,nickname,position' as const;
+  if (isAdminUser) {
+    const { data, error } = await supabase.rpc('admin_list_employee_directory_rows');
+    if (error) throw error;
+    return ((data ?? []) as EmployeeDirLite[]) ?? [];
+  }
+  if (userRole === 'manager') {
+    const { data, error } = await supabase.rpc('manager_list_team_directory_rows');
+    if (error) throw error;
+    return ((data ?? []) as EmployeeDirLite[]) ?? [];
+  }
+  const { data } = await supabase.from('employee_directory').select(select);
+  return ((data ?? []) as EmployeeDirLite[]) ?? [];
+}
 
 function roleLabelTh(role?: string | null): string {
   if (role === 'admin') return 'แอดมิน';
@@ -107,6 +225,36 @@ function formatSelectedDateTh(ymd: string): string {
   }).format(dateFromYmd(ymd));
 }
 
+function formatShortDateTh(ymd: string): string {
+  return new Intl.DateTimeFormat('th-TH-u-ca-gregory-nu-latn', {
+    day: 'numeric',
+    month: 'short',
+  }).format(dateFromYmd(ymd));
+}
+
+function formatHolidayDateListTh(ymds: string[]): string {
+  const sorted = [...new Set(ymds)].sort();
+  if (sorted.length === 0) return '—';
+  if (sorted.length <= 4) {
+    return sorted.map(formatShortDateTh).join(', ');
+  }
+  return `${sorted
+    .slice(0, 4)
+    .map(formatShortDateTh)
+    .join(', ')} และอีก ${sorted.length - 4} วัน`;
+}
+
+function listYmdRange(startYmd: string, endYmd: string): string[] {
+  const out: string[] = [];
+  const d = dateFromYmd(startYmd);
+  const end = dateFromYmd(endYmd).getTime();
+  while (d.getTime() <= end) {
+    out.push(ymdOfDate(d));
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
+}
+
 function calendarCellsForMonth(month: Date): Array<string | null> {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);
   const pad = first.getDay();
@@ -140,6 +288,49 @@ async function fetchAllScheduleAssignments(): Promise<{
   return { data: all, error: null };
 }
 
+async function fetchAllHolidayDates(): Promise<{
+  data: EmployeeHolidayDateRow[] | null;
+  error: { message?: string; code?: string } | null;
+}> {
+  const all: EmployeeHolidayDateRow[] = [];
+  for (let from = 0; ; from += ASSIGNMENT_PAGE_SIZE) {
+    const to = from + ASSIGNMENT_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from('employee_holiday_dates')
+      .select('id, user_id, holiday_date, created_by, created_at')
+      .order('holiday_date', { ascending: false })
+      .range(from, to);
+    if (error) return { data: null, error };
+    const page = (data as EmployeeHolidayDateRow[]) ?? [];
+    all.push(...page);
+    if (page.length < ASSIGNMENT_PAGE_SIZE) break;
+  }
+  return { data: all, error: null };
+}
+
+async function fetchAllApprovedLeaves(): Promise<{
+  data: LeaveRequestRow[] | null;
+  error: { message?: string; code?: string } | null;
+}> {
+  const all: LeaveRequestRow[] = [];
+  const select =
+    'id, user_id, leave_type, starts_on, ends_on, reason, status, created_at' as const;
+  for (let from = 0; ; from += ASSIGNMENT_PAGE_SIZE) {
+    const to = from + ASSIGNMENT_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from('leave_requests')
+      .select(select)
+      .eq('status', 'approved')
+      .order('starts_on', { ascending: false })
+      .range(from, to);
+    if (error) return { data: null, error };
+    const page = (data as LeaveRequestRow[]) ?? [];
+    all.push(...page);
+    if (page.length < ASSIGNMENT_PAGE_SIZE) break;
+  }
+  return { data: all, error: null };
+}
+
 const WEB_MODAL_BACKDROP = Platform.select({
   web: {
     position: 'fixed' as const,
@@ -159,13 +350,24 @@ export default function ScheduleScreen() {
   const role = useRole();
   const mgr = isManagerOrAdmin(role);
   const admin = isAdmin(role);
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const s = theme.spacing;
+  const styles = useMemo(() => createScheduleStyles(theme), [theme]);
 
   const [rows, setRows] = useState<WorkScheduleRow[]>([]);
   const [shifts, setShifts] = useState<WorkShiftRow[]>([]);
   const [assignments, setAssignments] = useState<AssignmentWithShift[]>([]);
+  const [holidayDates, setHolidayDates] = useState<EmployeeHolidayDateRow[]>([]);
+  const [approvedLeaves, setApprovedLeaves] = useState<LeaveRequestRow[]>([]);
+  const [companyHolidays, setCompanyHolidays] = useState<CompanyHolidayDateRow[]>([]);
+  const [companyHolidayModuleMissing, setCompanyHolidayModuleMissing] = useState(false);
   const [people, setPeople] = useState<SchedulePerson[]>([]);
   const [positionByProfileId, setPositionByProfileId] = useState<Record<string, string>>({});
   const [nicknameByProfileId, setNicknameByProfileId] = useState<Record<string, string>>({});
+  const [employeeDisplayByProfileId, setEmployeeDisplayByProfileId] = useState<
+    Record<string, ScheduleEmployeeDisplay>
+  >({});
   const [branches, setBranches] = useState<Pick<Branch, 'id' | 'branch_name' | 'branch_code'>[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -182,8 +384,11 @@ export default function ScheduleScreen() {
 
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkShiftId, setBulkShiftId] = useState<string | null>(null);
-  const [bulkFromDate, setBulkFromDate] = useState<Date | null>(null);
-  const [bulkToDate, setBulkToDate] = useState<Date | null>(null);
+  const [bulkPickMonth, setBulkPickMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [bulkPickDates, setBulkPickDates] = useState<Record<string, boolean>>({});
   const [bulkAllowedBranchId, setBulkAllowedBranchId] = useState<number | null>(null);
   const [bulkUserIds, setBulkUserIds] = useState<Record<string, boolean>>({});
   const [bulkSaving, setBulkSaving] = useState(false);
@@ -240,6 +445,16 @@ export default function ScheduleScreen() {
     dateToBangkokYmd(new Date())
   );
   const [calendarDetailOpen, setCalendarDetailOpen] = useState(false);
+  const [calendarDetailFilter, setCalendarDetailFilter] = useState<CalendarDetailFilter>('all');
+  const [holidayOpen, setHolidayOpen] = useState(false);
+  const [holidayPickMonth, setHolidayPickMonth] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [holidayPickDates, setHolidayPickDates] = useState<Record<string, boolean>>({});
+  const [holidayUserIds, setHolidayUserIds] = useState<Record<string, boolean>>({});
+  const [holidaySaving, setHolidaySaving] = useState(false);
+  const [holidayModuleMissing, setHolidayModuleMissing] = useState(false);
 
   const load = useCallback(async () => {
     const { data, error } = await supabase
@@ -311,40 +526,75 @@ export default function ScheduleScreen() {
       }
     }
     setPeople(list);
-    const empIds = [...new Set(list.map((p) => p.employee_id).filter((x): x is string => !!x))];
-    if (empIds.length === 0) {
-      setPositionByProfileId({});
-      setNicknameByProfileId({});
-    } else {
-      const { data: emps } = await supabase
-        .from('employee')
-        .select('id, position, nickname')
-        .in('id', empIds);
-      const posByEmployeeId = new Map<string, string>();
-      const nickByEmployeeId = new Map<string, string>();
-      for (const row of (emps as EmployeeLite[] | null) ?? []) {
-        const pos = row.position?.trim();
-        if (pos) posByEmployeeId.set(String(row.id), pos);
-        const nick = row.nickname?.trim();
-        if (nick) nickByEmployeeId.set(String(row.id), nick);
-      }
-      const nextPosByProfileId: Record<string, string> = {};
-      const nextNicknameByProfileId: Record<string, string> = {};
-      for (const p of list) {
-        const empId = p.employee_id ? String(p.employee_id) : '';
-        const pos = empId ? posByEmployeeId.get(empId) : undefined;
-        const nick = empId ? nickByEmployeeId.get(empId) : undefined;
-        if (pos) nextPosByProfileId[p.id] = pos;
-        if (nick) nextNicknameByProfileId[p.id] = nick;
-      }
-      setPositionByProfileId(nextPosByProfileId);
-      setNicknameByProfileId(nextNicknameByProfileId);
+    let dirRows: EmployeeDirLite[] = [];
+    try {
+      dirRows = await fetchScheduleDirectoryRows(admin, role);
+    } catch (dirErr) {
+      const msg = dirErr instanceof Error ? dirErr.message : String(dirErr);
+      toast.error('โหลดข้อมูลพนักงานไม่สำเร็จ', msg);
     }
+    const { byEmployeeId, byLegacyEmail, byEmployeeNo } = buildDirectoryLookupMaps(dirRows);
+    const nextPosByProfileId: Record<string, string> = {};
+    const nextNicknameByProfileId: Record<string, string> = {};
+    const nextEmployeeDisplayByProfileId: Record<string, ScheduleEmployeeDisplay> = {};
+    for (const p of list) {
+      const emp = resolveEmployeeForProfile(p, byEmployeeId, byLegacyEmail, byEmployeeNo);
+      const pos = emp?.position?.trim();
+      const nick = emp?.nickname?.trim();
+      if (pos) nextPosByProfileId[p.id] = pos;
+      if (nick) nextNicknameByProfileId[p.id] = nick;
+      nextEmployeeDisplayByProfileId[p.id] = scheduleEmployeeDisplay(p, emp);
+    }
+    setPositionByProfileId(nextPosByProfileId);
+    setNicknameByProfileId(nextNicknameByProfileId);
+    setEmployeeDisplayByProfileId(nextEmployeeDisplayByProfileId);
     const { data: br } = await supabase
       .from('branch_information')
       .select('id, branch_name, branch_code')
       .order('branch_name');
     setBranches((br as Pick<Branch, 'id' | 'branch_name' | 'branch_code'>[]) ?? []);
+
+    const { data: holRows, error: holErr } = await fetchAllHolidayDates();
+    if (holErr) {
+      const missingHol =
+        holErr.message?.includes('employee_holiday_dates') &&
+        (/schema cache|Could not find the table|PGRST205/i.test(holErr.message) ||
+          holErr.code === 'PGRST205');
+      setHolidayModuleMissing(!!missingHol);
+      if (!missingHol) {
+        toast.error('โหลดวันหยุดไม่สำเร็จ', holErr.message);
+      }
+      setHolidayDates([]);
+    } else {
+      setHolidayModuleMissing(false);
+      setHolidayDates(holRows ?? []);
+    }
+
+    const { data: leaveRows, error: leaveErr } = await fetchAllApprovedLeaves();
+    if (leaveErr) {
+      toast.error('โหลดการลาไม่สำเร็จ', leaveErr.message);
+      setApprovedLeaves([]);
+    } else {
+      setApprovedLeaves(leaveRows ?? []);
+    }
+
+    try {
+      const companyRows = await fetchCompanyHolidayDates();
+      setCompanyHolidays(companyRows);
+      setCompanyHolidayModuleMissing(false);
+    } catch (companyErr) {
+      const msg = companyErr instanceof Error ? companyErr.message : String(companyErr);
+      const missingCompany =
+        msg.includes('company_holiday_dates') &&
+        (/schema cache|Could not find the table|PGRST205/i.test(msg) ||
+          (companyErr as { code?: string })?.code === 'PGRST205');
+      setCompanyHolidayModuleMissing(!!missingCompany);
+      if (!missingCompany) {
+        toast.error('โหลดวันหยุดบริษัทไม่สำเร็จ', msg);
+      }
+      setCompanyHolidays([]);
+    }
+
     setDetailFetchNonce((n) => n + 1);
   }, [toast, admin, role, session?.user?.id]);
 
@@ -363,10 +613,13 @@ export default function ScheduleScreen() {
   const peopleLabel = useMemo(() => {
     const m = new Map<string, string>();
     for (const p of people) {
-      m.set(p.id, p.full_name || p.email || p.id.slice(0, 8));
+      m.set(
+        p.id,
+        employeeDisplayByProfileId[p.id]?.label ?? p.email ?? p.id.slice(0, 8)
+      );
     }
     return m;
-  }, [people]);
+  }, [employeeDisplayByProfileId, people]);
   const peopleById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
   const branchLabel = useMemo(() => {
     const m = new Map<number, string>();
@@ -380,9 +633,68 @@ export default function ScheduleScreen() {
     () => assignments.filter((a) => visiblePeopleIds.has(a.user_id)),
     [assignments, visiblePeopleIds]
   );
+  const holidayByUserDate = useMemo(
+    () => buildHolidayByUserDate(holidayDates, visiblePeopleIds),
+    [holidayDates, visiblePeopleIds]
+  );
+  const assignmentByUserDate = useMemo(
+    () => buildAssignmentByUserDate(visibleAssignments, visiblePeopleIds),
+    [visibleAssignments, visiblePeopleIds]
+  );
+  const leaveEntriesByDate = useMemo(() => {
+    const byDateUser = new Map<string, ScheduleDayLeaveEntry>();
+    for (const leave of approvedLeaves) {
+      if (!visiblePeopleIds.has(leave.user_id)) continue;
+      for (const ymd of listYmdRange(leave.starts_on, leave.ends_on)) {
+        byDateUser.set(`${ymd}|${leave.user_id}`, {
+          leave_id: leave.id,
+          user_id: leave.user_id,
+          leave_type: leave.leave_type,
+          reason: leave.reason,
+          starts_on: leave.starts_on,
+          ends_on: leave.ends_on,
+        });
+      }
+    }
+    const map = new Map<string, ScheduleDayLeaveEntry[]>();
+    for (const [key, entry] of byDateUser) {
+      const ymd = key.split('|')[0] ?? '';
+      if (!ymd) continue;
+      const list = map.get(ymd) ?? [];
+      list.push(entry);
+      map.set(ymd, list);
+    }
+    for (const [ymd, list] of map.entries()) {
+      map.set(
+        ymd,
+        [...list].sort((a, b) =>
+          (peopleLabel.get(a.user_id) ?? '').localeCompare(
+            peopleLabel.get(b.user_id) ?? '',
+            'th'
+          )
+        )
+      );
+    }
+    return map;
+  }, [approvedLeaves, peopleLabel, visiblePeopleIds]);
+  const leaveUserIdsByDate = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const [ymd, entries] of leaveEntriesByDate) {
+      map.set(ymd, new Set(entries.map((e) => e.user_id)));
+    }
+    return map;
+  }, [leaveEntriesByDate]);
   const assignmentsByDate = useMemo(() => {
     const map = new Map<string, AssignmentWithShift[]>();
     for (const row of visibleAssignments) {
+      if (leaveUserIdsByDate.get(row.work_date)?.has(row.user_id)) continue;
+      const status = resolvedScheduleDayStatusForUser(
+        row.user_id,
+        row.work_date,
+        holidayByUserDate,
+        assignmentByUserDate
+      );
+      if (status !== 'work') continue;
       map.set(row.work_date, [...(map.get(row.work_date) ?? []), row]);
     }
     for (const [ymd, list] of map.entries()) {
@@ -402,7 +714,7 @@ export default function ScheduleScreen() {
       );
     }
     return map;
-  }, [peopleLabel, visibleAssignments]);
+  }, [peopleLabel, visibleAssignments, holidayByUserDate, assignmentByUserDate, leaveUserIdsByDate]);
   const calendarCells = useMemo(() => calendarCellsForMonth(calendarMonth), [calendarMonth]);
   const selectedDayAssignments = useMemo(
     () => assignmentsByDate.get(selectedCalendarYmd) ?? [],
@@ -425,12 +737,105 @@ export default function ScheduleScreen() {
     }
     return [...groups.values()].sort((a, b) => a.branchName.localeCompare(b.branchName, 'th'));
   }, [branchLabel, selectedDayAssignments]);
+  const holidaysByDate = useMemo(() => {
+    const map = new Map<string, EmployeeHolidayDateRow[]>();
+    for (const row of holidayDates) {
+      if (!visiblePeopleIds.has(row.user_id)) continue;
+      const status = resolvedScheduleDayStatusForUser(
+        row.user_id,
+        row.holiday_date,
+        holidayByUserDate,
+        assignmentByUserDate
+      );
+      if (status !== 'holiday') continue;
+      const list = map.get(row.holiday_date) ?? [];
+      list.push(row);
+      map.set(row.holiday_date, list);
+    }
+    return map;
+  }, [holidayDates, visiblePeopleIds, holidayByUserDate, assignmentByUserDate]);
+  const companyHolidaysByDate = useMemo(
+    () => companyHolidayMapByDate(companyHolidays),
+    [companyHolidays]
+  );
+  const selectedCompanyHoliday = useMemo(
+    () => companyHolidaysByDate.get(selectedCalendarYmd) ?? null,
+    [companyHolidaysByDate, selectedCalendarYmd]
+  );
+  const selectedDayHolidayRows = useMemo(
+    () => holidaysByDate.get(selectedCalendarYmd) ?? [],
+    [holidaysByDate, selectedCalendarYmd]
+  );
+  const selectedDayHolidayGroups = useMemo(() => {
+    const groups = new Map<string, { branchName: string; userIds: string[] }>();
+    for (const row of selectedDayHolidayRows) {
+      const person = peopleById.get(row.user_id);
+      const branchId = person?.branch_id;
+      const key = branchId != null ? String(branchId) : 'none';
+      const branchName =
+        branchId != null ? branchLabel.get(branchId) ?? `สาขา #${branchId}` : 'ไม่ระบุสาขา';
+      const current = groups.get(key) ?? { branchName, userIds: [] };
+      current.userIds.push(row.user_id);
+      groups.set(key, current);
+    }
+    for (const g of groups.values()) {
+      g.userIds.sort((a, b) =>
+        (peopleLabel.get(a) ?? '').localeCompare(peopleLabel.get(b) ?? '', 'th')
+      );
+    }
+    return [...groups.values()].sort((a, b) => a.branchName.localeCompare(b.branchName, 'th'));
+  }, [branchLabel, peopleById, peopleLabel, selectedDayHolidayRows]);
+  const selectedDayLeaveRows = useMemo(
+    () => leaveEntriesByDate.get(selectedCalendarYmd) ?? [],
+    [leaveEntriesByDate, selectedCalendarYmd]
+  );
+  const selectedDayLeaveGroups = useMemo(() => {
+    const groups = new Map<string, { branchName: string; entries: ScheduleDayLeaveEntry[] }>();
+    for (const entry of selectedDayLeaveRows) {
+      const person = peopleById.get(entry.user_id);
+      const branchId = person?.branch_id;
+      const key = branchId != null ? String(branchId) : 'none';
+      const branchName =
+        branchId != null ? branchLabel.get(branchId) ?? `สาขา #${branchId}` : 'ไม่ระบุสาขา';
+      const current = groups.get(key) ?? { branchName, entries: [] };
+      current.entries.push(entry);
+      groups.set(key, current);
+    }
+    return [...groups.values()].sort((a, b) => a.branchName.localeCompare(b.branchName, 'th'));
+  }, [branchLabel, peopleById, selectedDayLeaveRows]);
+  const holidayPickDateList = useMemo(
+    () =>
+      Object.entries(holidayPickDates)
+        .filter(([, on]) => on)
+        .map(([ymd]) => ymd)
+        .sort(),
+    [holidayPickDates]
+  );
+  const holidayPickCalendarCells = useMemo(
+    () => calendarCellsForMonth(holidayPickMonth),
+    [holidayPickMonth]
+  );
+  const bulkPickDateList = useMemo(
+    () =>
+      Object.entries(bulkPickDates)
+        .filter(([, on]) => on)
+        .map(([ymd]) => ymd)
+        .sort(),
+    [bulkPickDates]
+  );
+  const bulkPickCalendarCells = useMemo(
+    () => calendarCellsForMonth(bulkPickMonth),
+    [bulkPickMonth]
+  );
   const assignmentUsers = useMemo(
     () =>
       people
         .map((p) => ({
           id: p.id,
-          label: p.full_name || p.email || p.id.slice(0, 8),
+          label:
+            employeeDisplayByProfileId[p.id]?.label ??
+            peopleLabel.get(p.id) ??
+            p.id.slice(0, 8),
           avatarUrl: p.avatar_url ?? null,
           subtitle:
             positionByProfileId[p.id] ||
@@ -439,7 +844,14 @@ export default function ScheduleScreen() {
           count: visibleAssignments.filter((a) => a.user_id === p.id).length,
         }))
         .sort((a, b) => a.label.localeCompare(b.label, 'th')),
-    [people, positionByProfileId, nicknameByProfileId, visibleAssignments]
+    [
+      people,
+      employeeDisplayByProfileId,
+      peopleLabel,
+      positionByProfileId,
+      nicknameByProfileId,
+      visibleAssignments,
+    ]
   );
   const filteredAssignmentUsers = useMemo(() => {
     const q = assignmentSearch.trim().toLowerCase();
@@ -505,11 +917,16 @@ export default function ScheduleScreen() {
     });
   }
 
+  function openCalendarDetail(filter: CalendarDetailFilter = 'all') {
+    setCalendarDetailFilter(filter);
+    setCalendarDetailOpen(true);
+  }
+
   function jumpCalendarToday() {
     const now = new Date();
     setCalendarMonth(new Date(now.getFullYear(), now.getMonth(), 1));
     setSelectedCalendarYmd(dateToBangkokYmd(now));
-    setCalendarDetailOpen(true);
+    openCalendarDetail('all');
   }
 
   function openAssignmentDetail(userId: string) {
@@ -627,6 +1044,35 @@ export default function ScheduleScreen() {
     toast.success('เพิ่มกะแล้ว', 'ใช้มอบหมายรายวันได้เลย');
   }
 
+  function openBulkSetup() {
+    if (shiftModuleMissing) {
+      toast.info(
+        'ฐานข้อมูล',
+        'รัน migration ก่อน จึงจะมอบหมายได้ — ดูกล่องแจ้งเตือนด้านบน'
+      );
+      return;
+    }
+    setBulkPickDates({ [selectedCalendarYmd]: true });
+    setBulkPickMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1));
+    setBulkUserIds({});
+    setBulkAllowedBranchId(null);
+    setBulkShiftId((prev) => prev ?? shifts[0]?.id ?? null);
+    setBulkOpen(true);
+  }
+
+  function toggleBulkPickDate(ymd: string) {
+    setBulkPickDates((prev) => {
+      const next = { ...prev };
+      if (next[ymd]) delete next[ymd];
+      else next[ymd] = true;
+      return next;
+    });
+  }
+
+  function shiftBulkPickMonth(delta: number) {
+    setBulkPickMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() + delta, 1));
+  }
+
   async function saveBulkAssignments() {
     if (shiftModuleMissing) {
       toast.info(
@@ -635,14 +1081,13 @@ export default function ScheduleScreen() {
       );
       return;
     }
-    if (!session?.user?.id || !bulkShiftId || !bulkFromDate || !bulkToDate) {
-      toast.info('ข้อมูลไม่ครบ', 'เลือกกะ วันเริ่ม และวันสิ้นสุดจากปฏิทิน');
+    if (!session?.user?.id || !bulkShiftId) {
+      toast.info('ข้อมูลไม่ครบ', 'เลือกกะและวันที่จากปฏิทิน');
       return;
     }
-    const bulkFrom = dateToBangkokYmd(bulkFromDate);
-    const bulkTo = dateToBangkokYmd(bulkToDate);
-    if (bulkFrom > bulkTo) {
-      toast.info('วันที่', 'วันเริ่มต้องไม่เกินวันสิ้นสุด');
+    const days = bulkPickDateList;
+    if (days.length === 0) {
+      toast.info('วันที่', 'เลือกอย่างน้อย 1 วันจากปฏิทิน');
       return;
     }
     const uids = Object.keys(bulkUserIds).filter((k) => bulkUserIds[k]);
@@ -650,13 +1095,14 @@ export default function ScheduleScreen() {
       toast.info('พนักงาน', 'เลือกอย่างน้อย 1 คน');
       return;
     }
-    const days = eachCalendarYmdInclusive(bulkFrom, bulkTo);
+    const nowIso = new Date().toISOString();
     const chunk: {
       user_id: string;
       work_date: string;
       shift_id: string;
       allowed_branch_id: number | null;
       created_by: string;
+      created_at: string;
     }[] = [];
     for (const uid of uids) {
       for (const d of days) {
@@ -666,6 +1112,7 @@ export default function ScheduleScreen() {
           shift_id: bulkShiftId,
           allowed_branch_id: bulkAllowedBranchId,
           created_by: session.user.id,
+          created_at: nowIso,
         });
       }
     }
@@ -679,13 +1126,15 @@ export default function ScheduleScreen() {
           .upsert(part, { onConflict: 'user_id,work_date' });
         if (error) throw new Error(error.message);
       }
+      await deleteEmployeeHolidayDatesForPairs(
+        chunk.map((row) => ({ user_id: row.user_id, holiday_date: row.work_date }))
+      );
       setBulkOpen(false);
       setBulkUserIds({});
-      setBulkFromDate(null);
-      setBulkToDate(null);
+      setBulkPickDates({});
       setBulkAllowedBranchId(null);
       await load();
-      toast.success('มอบหมายแล้ว', `รวม ${chunk.length} แถว (ทับวันเดิมถ้ามี)`);
+      toast.success('มอบหมายแล้ว', `รวม ${chunk.length} แถว — ทับวันหยุดเดิมของวันเดียวกันแล้ว`);
     } catch (e) {
       toast.error(
         'มอบหมายไม่สำเร็จ',
@@ -693,6 +1142,88 @@ export default function ScheduleScreen() {
       );
     } finally {
       setBulkSaving(false);
+    }
+  }
+
+  function openHolidaySetup() {
+    if (holidayModuleMissing) {
+      toast.info(
+        'ฐานข้อมูล',
+        'รัน migration employee_holiday_dates ก่อน จึงจะตั้งวันหยุดได้'
+      );
+      return;
+    }
+    setHolidayPickDates({ [selectedCalendarYmd]: true });
+    setHolidayUserIds({});
+    setHolidayPickMonth(
+      new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1)
+    );
+    setHolidayOpen(true);
+  }
+
+  function toggleHolidayPickDate(ymd: string) {
+    setHolidayPickDates((prev) => {
+      const next = { ...prev };
+      if (next[ymd]) delete next[ymd];
+      else next[ymd] = true;
+      return next;
+    });
+  }
+
+  function shiftHolidayPickMonth(delta: number) {
+    setHolidayPickMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() + delta, 1));
+  }
+
+  async function saveHolidayDates() {
+    if (!session?.user?.id) return;
+    if (holidayModuleMissing) {
+      toast.info('ฐานข้อมูล', 'รัน migration employee_holiday_dates ก่อน');
+      return;
+    }
+    const uids = Object.keys(holidayUserIds).filter((k) => holidayUserIds[k]);
+    const dates = holidayPickDateList;
+    if (uids.length === 0) {
+      toast.info('พนักงาน', 'เลือกอย่างน้อย 1 คน');
+      return;
+    }
+    if (dates.length === 0) {
+      toast.info('วันหยุด', 'เลือกอย่างน้อย 1 วันจากปฏิทิน');
+      return;
+    }
+    setHolidaySaving(true);
+    try {
+      const nowIso = new Date().toISOString();
+      const rows = uids.flatMap((user_id) =>
+        dates.map((holiday_date) => ({
+          user_id,
+          holiday_date,
+          created_by: session.user.id,
+          created_at: nowIso,
+        }))
+      );
+      const batchSize = 80;
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const part = rows.slice(i, i + batchSize);
+        const { error } = await supabase
+          .from('employee_holiday_dates')
+          .upsert(part, { onConflict: 'user_id,holiday_date' });
+        if (error) throw new Error(error.message);
+      }
+      await deleteScheduleAssignmentsForPairs(
+        rows.map((row) => ({ user_id: row.user_id, work_date: row.holiday_date }))
+      );
+      setHolidayOpen(false);
+      setHolidayUserIds({});
+      setHolidayPickDates({});
+      await load();
+      toast.success(
+        'บันทึกวันหยุดแล้ว',
+        `${uids.length} คน · ${dates.length} วัน — ทับมอบหมายกะเดิมของวันเดียวกันแล้ว`
+      );
+    } catch (e) {
+      toast.error('บันทึกวันหยุดไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setHolidaySaving(false);
     }
   }
 
@@ -712,15 +1243,20 @@ export default function ScheduleScreen() {
     setEditAsnSaving(true);
     try {
       const ymd = dateToBangkokYmd(editAsnDate);
+      const nowIso = new Date().toISOString();
       const { error } = await supabase
         .from('work_schedule_assignments')
         .update({
           work_date: ymd,
           shift_id: editAsnShiftId,
           allowed_branch_id: editAsnBranchId,
+          created_at: nowIso,
         })
         .eq('id', editingAssignment.id);
       if (error) throw new Error(error.message);
+      await deleteEmployeeHolidayDatesForPairs([
+        { user_id: editingAssignment.user_id, holiday_date: ymd },
+      ]);
       setEditAsnOpen(false);
       setEditingAssignment(null);
       await load();
@@ -952,7 +1488,7 @@ export default function ScheduleScreen() {
                 setListRefreshing(false);
               }
             }}
-            tintColor={NatureTheme.colors.primary}
+            tintColor={c.primary}
           />
         }>
       <Text style={styles.hint}>
@@ -988,17 +1524,13 @@ export default function ScheduleScreen() {
           </Pressable>
           <Pressable
             style={[styles.addBtnAlt, shiftModuleMissing && styles.btnDisabled]}
-            onPress={() => {
-              if (shiftModuleMissing) {
-                toast.info(
-                  'ฐานข้อมูล',
-                  'รัน migration ก่อน จึงจะมอบหมายได้ — ดูกล่องแจ้งเตือนด้านบน'
-                );
-                return;
-              }
-              setBulkOpen(true);
-            }}>
+            onPress={openBulkSetup}>
             <Text style={styles.addBtnAltText}>มอบหมาย</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.addBtnAlt, holidayModuleMissing && styles.btnDisabled]}
+            onPress={openHolidaySetup}>
+            <Text style={styles.addBtnAltText}>วันหยุด</Text>
           </Pressable>
         </View>
       ) : (
@@ -1036,6 +1568,9 @@ export default function ScheduleScreen() {
         <View style={styles.calendarGrid}>
           {calendarCells.map((ymd, index) => {
             const count = ymd ? assignmentsByDate.get(ymd)?.length ?? 0 : 0;
+            const holidayCount = ymd ? holidaysByDate.get(ymd)?.length ?? 0 : 0;
+            const leaveCount = ymd ? leaveEntriesByDate.get(ymd)?.length ?? 0 : 0;
+            const companyHoliday = ymd ? companyHolidaysByDate.get(ymd) : undefined;
             const selected = ymd === selectedCalendarYmd;
             const today = ymd === dateToBangkokYmd(new Date());
             return (
@@ -1052,7 +1587,7 @@ export default function ScheduleScreen() {
                 onPress={() => {
                   if (!ymd) return;
                   setSelectedCalendarYmd(ymd);
-                  setCalendarDetailOpen(true);
+                  openCalendarDetail('all');
                 }}>
                 {ymd ? (
                   <>
@@ -1072,6 +1607,34 @@ export default function ScheduleScreen() {
                         {count} คน
                       </Text>
                     ) : null}
+                    {companyHoliday ? (
+                      <Text
+                        style={[
+                          styles.calendarCompanyHolidayText,
+                          selected && styles.calendarCompanyHolidayTextSelected,
+                        ]}
+                        numberOfLines={1}>
+                        {companyHoliday.title}
+                      </Text>
+                    ) : null}
+                    {holidayCount > 0 ? (
+                      <Text
+                        style={[
+                          styles.calendarHolidayCountText,
+                          selected && styles.calendarDayTextSelected,
+                        ]}>
+                        หยุด {holidayCount}
+                      </Text>
+                    ) : null}
+                    {leaveCount > 0 ? (
+                      <Text
+                        style={[
+                          styles.calendarLeaveCountText,
+                          selected && styles.calendarDayTextSelected,
+                        ]}>
+                        ลา {leaveCount}
+                      </Text>
+                    ) : null}
                   </>
                 ) : null}
               </Pressable>
@@ -1082,12 +1645,25 @@ export default function ScheduleScreen() {
           <View style={styles.calendarSelectedBody}>
             <Text style={styles.dayDetailTitle}>{formatSelectedDateTh(selectedCalendarYmd)}</Text>
             <Text style={styles.dayDetailEmpty}>
-              {selectedDayAssignments.length > 0
-                ? `มีพนักงานเข้างาน ${selectedDayAssignments.length} คน`
-                : 'ไม่มีพนักงานถูกมอบหมายในวันนี้'}
+              {selectedCompanyHoliday
+                ? `วันหยุดบริษัท: ${selectedCompanyHoliday.title}`
+                : selectedDayAssignments.length > 0
+                  ? `มีพนักงานเข้างาน ${selectedDayAssignments.length} คน`
+                  : 'ไม่มีพนักงานถูกมอบหมายในวันนี้'}
+              {!selectedCompanyHoliday && selectedDayAssignments.length > 0
+                ? ''
+                : selectedCompanyHoliday && selectedDayAssignments.length > 0
+                  ? ` · เข้างาน ${selectedDayAssignments.length} คน`
+                  : ''}
+              {selectedDayHolidayRows.length > 0
+                ? `${selectedCompanyHoliday || selectedDayAssignments.length > 0 ? ' · ' : ''}หยุด ${selectedDayHolidayRows.length} คน`
+                : ''}
+              {selectedDayLeaveRows.length > 0
+                ? `${selectedCompanyHoliday || selectedDayAssignments.length > 0 || selectedDayHolidayRows.length > 0 ? ' · ' : ''}ลา ${selectedDayLeaveRows.length} คน`
+                : ''}
             </Text>
           </View>
-          <Pressable style={styles.calendarDetailBtn} onPress={() => setCalendarDetailOpen(true)}>
+          <Pressable style={styles.calendarDetailBtn} onPress={() => openCalendarDetail('all')}>
             <Text style={styles.calendarDetailBtnText}>ดูรายละเอียด</Text>
           </Pressable>
         </View>
@@ -1123,9 +1699,6 @@ export default function ScheduleScreen() {
                         {u.label}
                       </Text>
                       <Text style={styles.assignmentUserCardMeta}>{u.subtitle}</Text>
-                      {u.nickname ? (
-                        <Text style={styles.assignmentUserCardMeta}>ชื่อเล่น: {u.nickname}</Text>
-                      ) : null}
                       <Text style={styles.assignmentUserCardMeta}>มอบหมาย {u.count} รายการ</Text>
                     </View>
                   </View>
@@ -1178,15 +1751,178 @@ export default function ScheduleScreen() {
             <Text style={styles.cardMeta}>
               แสดงแยกตามสาขา พร้อมรายชื่อพนักงาน ตำแหน่ง และกะงาน
             </Text>
+            <View style={styles.detailFilterRow}>
+              {(
+                [
+                  { key: 'all' as const, label: 'ทั้งหมด' },
+                  { key: 'holiday' as const, label: 'วันหยุด' },
+                  { key: 'leave' as const, label: 'ลา' },
+                  { key: 'work' as const, label: 'มาทำงาน' },
+                ] as const
+              ).map((opt) => {
+                const active = calendarDetailFilter === opt.key;
+                return (
+                  <Pressable
+                    key={opt.key}
+                    style={[
+                      styles.detailFilterChip,
+                      active && opt.key === 'holiday' && styles.detailFilterChipHolidayOn,
+                      active && opt.key === 'leave' && styles.detailFilterChipLeaveOn,
+                      active && opt.key !== 'holiday' && opt.key !== 'leave' && styles.detailFilterChipOn,
+                    ]}
+                    onPress={() => setCalendarDetailFilter(opt.key)}>
+                    <Text
+                      style={[
+                        styles.detailFilterChipText,
+                        active && opt.key === 'holiday' && styles.detailFilterChipTextHolidayOn,
+                        active && opt.key === 'leave' && styles.detailFilterChipTextLeaveOn,
+                        active &&
+                          opt.key !== 'holiday' &&
+                          opt.key !== 'leave' &&
+                          styles.detailFilterChipTextOn,
+                      ]}>
+                      {opt.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
             <ScrollView
               style={styles.modalScroll}
               contentContainerStyle={styles.modalScrollContent}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator>
-              {selectedDayAssignments.length === 0 ? (
-                <Text style={styles.empty}>ไม่มีพนักงานถูกมอบหมายในวันนี้</Text>
-              ) : (
-                selectedDayAssignmentGroups.map((group) => (
+              {selectedCompanyHoliday ? (
+                <View style={styles.companyHolidayBanner}>
+                  <Text style={styles.companyHolidayBannerLabel}>วันหยุดประจำปีบริษัท</Text>
+                  <Text style={styles.companyHolidayBannerTitle}>
+                    {selectedCompanyHoliday.title}
+                  </Text>
+                  {selectedCompanyHoliday.description?.trim() ? (
+                    <Text style={styles.companyHolidayBannerDesc}>
+                      {selectedCompanyHoliday.description.trim()}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+              {(calendarDetailFilter === 'all' || calendarDetailFilter === 'holiday') &&
+              selectedDayHolidayGroups.length > 0 ? (
+                <View style={styles.scheduleHolidaySection}>
+                  <Text style={styles.scheduleHolidaySectionTitle}>วันหยุด</Text>
+                  {selectedDayHolidayGroups.map((group) => (
+                    <View key={`hol-${group.branchName}`} style={styles.scheduleHolidayGroup}>
+                      <View style={styles.scheduleHolidayHeader}>
+                        <Text style={styles.scheduleHolidayTitle}>{group.branchName}</Text>
+                        <Text style={styles.scheduleHolidayCount}>
+                          หยุด {group.userIds.length} คน
+                        </Text>
+                      </View>
+                      {group.userIds.map((uid) => {
+                        const person = peopleById.get(uid);
+                        const display = employeeDisplayByProfileId[uid];
+                        const name =
+                          display?.label ??
+                          peopleLabel.get(uid) ??
+                          person?.email ??
+                          uid.slice(0, 8);
+                        const subtitle =
+                          positionByProfileId[uid] ||
+                          `${roleLabelTh(person?.role)} · ${person?.employee_code?.trim() || '—'}`;
+                        return (
+                          <View key={uid} style={styles.scheduleBranchEmployeeRow}>
+                            <UserAvatar
+                              uri={person?.avatar_url ?? undefined}
+                              label={name}
+                              size={40}
+                            />
+                            <View style={styles.scheduleEmployeeBody}>
+                              <Text style={styles.scheduleEmployeeName}>{name}</Text>
+                              <Text style={styles.scheduleEmployeeMeta}>{subtitle}</Text>
+                              <Text style={styles.scheduleHolidayBadge}>วันหยุด</Text>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+              {calendarDetailFilter === 'holiday' && selectedDayHolidayRows.length === 0 ? (
+                <Text style={styles.empty}>ไม่มีพนักงานหยุดในวันนี้</Text>
+              ) : null}
+              {calendarDetailFilter === 'leave' && selectedDayLeaveRows.length === 0 ? (
+                <Text style={styles.empty}>ไม่มีพนักงานลาในวันนี้</Text>
+              ) : null}
+              {calendarDetailFilter === 'work' && selectedDayAssignments.length === 0 ? (
+                <Text style={styles.empty}>ไม่มีพนักงานถูกมอบหมายเข้างานในวันนี้</Text>
+              ) : null}
+              {calendarDetailFilter === 'all' &&
+              selectedDayAssignments.length === 0 &&
+              selectedDayHolidayRows.length === 0 &&
+              selectedDayLeaveRows.length === 0 ? (
+                <Text style={styles.empty}>ไม่มีพนักงานถูกมอบหมาย หยุด หรือลาในวันนี้</Text>
+              ) : null}
+              {(calendarDetailFilter === 'all' || calendarDetailFilter === 'leave') &&
+              selectedDayLeaveGroups.length > 0 ? (
+                <View style={styles.scheduleLeaveSection}>
+                  <Text style={styles.scheduleLeaveSectionTitle}>ลา</Text>
+                  {selectedDayLeaveGroups.map((group) => (
+                    <View key={`lv-${group.branchName}`} style={styles.scheduleLeaveGroup}>
+                      <View style={styles.scheduleLeaveHeader}>
+                        <Text style={styles.scheduleLeaveTitle}>{group.branchName}</Text>
+                        <Text style={styles.scheduleLeaveCount}>
+                          ลา {group.entries.length} คน
+                        </Text>
+                      </View>
+                      {group.entries.map((entry) => {
+                        const person = peopleById.get(entry.user_id);
+                        const display = employeeDisplayByProfileId[entry.user_id];
+                        const name =
+                          display?.label ??
+                          peopleLabel.get(entry.user_id) ??
+                          person?.email ??
+                          entry.user_id.slice(0, 8);
+                        const subtitle =
+                          positionByProfileId[entry.user_id] ||
+                          `${roleLabelTh(person?.role)} · ${person?.employee_code?.trim() || '—'}`;
+                        const leaveRange =
+                          entry.starts_on === entry.ends_on
+                            ? formatShortDateTh(entry.starts_on)
+                            : `${formatShortDateTh(entry.starts_on)} – ${formatShortDateTh(entry.ends_on)}`;
+                        return (
+                          <View key={`${entry.leave_id}-${entry.user_id}`} style={styles.scheduleBranchEmployeeRow}>
+                            <UserAvatar
+                              uri={person?.avatar_url ?? undefined}
+                              label={name}
+                              size={40}
+                            />
+                            <View style={styles.scheduleEmployeeBody}>
+                              <Text style={styles.scheduleEmployeeName}>{name}</Text>
+                              <Text style={styles.scheduleEmployeeMeta}>{subtitle}</Text>
+                              <Text style={styles.scheduleLeaveBadge}>
+                                {leaveTypeLabelTh(entry.leave_type)} · อนุมัติแล้ว
+                              </Text>
+                              <Text style={styles.scheduleLeaveMeta}>ช่วงลา {leaveRange}</Text>
+                              {entry.reason?.trim() ? (
+                                <Text style={styles.scheduleLeaveReason} numberOfLines={2}>
+                                  {entry.reason.trim()}
+                                </Text>
+                              ) : null}
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+              {(calendarDetailFilter === 'all' || calendarDetailFilter === 'work') &&
+              selectedDayAssignments.length > 0 ? (
+                <View style={styles.scheduleWorkSection}>
+                  {calendarDetailFilter === 'all' ? (
+                    <Text style={styles.scheduleWorkSectionTitle}>มาทำงาน</Text>
+                  ) : null}
+                  {selectedDayAssignmentGroups.map((group) => (
                   <View key={group.branchName} style={styles.scheduleBranchGroup}>
                     <View style={styles.scheduleBranchHeader}>
                       <Text style={styles.scheduleBranchTitle}>{group.branchName}</Text>
@@ -1196,8 +1932,12 @@ export default function ScheduleScreen() {
                     </View>
                     {group.assignments.map((a) => {
                       const person = peopleById.get(a.user_id);
+                      const display = employeeDisplayByProfileId[a.user_id];
                       const name =
-                        peopleLabel.get(a.user_id) ?? person?.email ?? a.user_id.slice(0, 8);
+                        display?.label ??
+                        peopleLabel.get(a.user_id) ??
+                        person?.email ??
+                        a.user_id.slice(0, 8);
                       const subtitle =
                         positionByProfileId[a.user_id] ||
                         `${roleLabelTh(person?.role)} · ${person?.employee_code?.trim() || '—'}`;
@@ -1223,12 +1963,13 @@ export default function ScheduleScreen() {
                       );
                     })}
                   </View>
-                ))
-              )}
+                ))}
+                </View>
+              ) : null}
             </ScrollView>
             <View style={styles.actions}>
               <Pressable onPress={() => setCalendarDetailOpen(false)}>
-                <Text style={{ color: NatureTheme.colors.text }}>ปิด</Text>
+                <Text style={{ color: c.text }}>ปิด</Text>
               </Pressable>
             </View>
           </View>
@@ -1249,7 +1990,7 @@ export default function ScheduleScreen() {
             <TextInput
               style={styles.input}
               placeholder="ค้นหาชื่อพนักงาน..."
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={assignmentSearch}
               onChangeText={setAssignmentSearch}
             />
@@ -1270,13 +2011,10 @@ export default function ScheduleScreen() {
                     <View style={styles.pickerEmployeeRow}>
                       <UserAvatar uri={item.avatarUrl ?? undefined} label={item.label} size={40} />
                       <View style={styles.pickerEmployeeBody}>
-                        <Text style={{ color: NatureTheme.colors.text, fontWeight: selected ? '700' : '500' }}>
+                        <Text style={{ color: c.text, fontWeight: selected ? '700' : '500' }}>
                           {item.label}
                         </Text>
                         <Text style={styles.pickerEmployeeMeta}>{item.subtitle}</Text>
-                        {item.nickname ? (
-                          <Text style={styles.pickerEmployeeMeta}>ชื่อเล่น: {item.nickname}</Text>
-                        ) : null}
                         <Text style={styles.pickerEmployeeMeta}>มอบหมาย {item.count} รายการ</Text>
                       </View>
                     </View>
@@ -1295,10 +2033,10 @@ export default function ScheduleScreen() {
                   setSelectedAssignmentUserId(null);
                   setAssignmentPickerOpen(false);
                 }}>
-                <Text style={{ color: NatureTheme.colors.text }}>ล้างการเลือก</Text>
+                <Text style={{ color: c.text }}>ล้างการเลือก</Text>
               </Pressable>
               <Pressable onPress={() => setAssignmentPickerOpen(false)}>
-                <Text style={{ color: NatureTheme.colors.text }}>ปิด</Text>
+                <Text style={{ color: c.text }}>ปิด</Text>
               </Pressable>
             </View>
           </View>
@@ -1359,7 +2097,7 @@ export default function ScheduleScreen() {
               {detailSheetLoading && detailSheetAssignments === null ? (
                 <ActivityIndicator
                   size="large"
-                  color={NatureTheme.colors.primary}
+                  color={c.primary}
                   style={{ marginVertical: 24 }}
                 />
               ) : assignmentDetailRows.length === 0 ? (
@@ -1420,7 +2158,7 @@ export default function ScheduleScreen() {
             </ScrollView>
             <View style={styles.actions}>
               <Pressable onPress={closeAssignmentDetail}>
-                <Text style={{ color: NatureTheme.colors.text }}>ปิด</Text>
+                <Text style={{ color: c.text }}>ปิด</Text>
               </Pressable>
             </View>
           </View>
@@ -1457,7 +2195,7 @@ export default function ScheduleScreen() {
                   key={sh.id}
                   style={[styles.row, bulkEditAsnShiftId === sh.id && styles.rowOn]}
                   onPress={() => setBulkEditAsnShiftId(sh.id)}>
-                  <Text style={{ color: NatureTheme.colors.text }}>
+                  <Text style={{ color: c.text }}>
                     {sh.name} ({sh.start_time.slice(0, 5)}–{sh.end_time.slice(0, 5)})
                   </Text>
                 </Pressable>
@@ -1466,14 +2204,14 @@ export default function ScheduleScreen() {
               <Pressable
                 style={[styles.row, bulkEditAsnBranchId == null && styles.rowOn]}
                 onPress={() => setBulkEditAsnBranchId(null)}>
-                <Text style={{ color: NatureTheme.colors.text }}>ไม่จำกัดสาขา</Text>
+                <Text style={{ color: c.text }}>ไม่จำกัดสาขา</Text>
               </Pressable>
               {branches.map((br) => (
                 <Pressable
                   key={String(br.id)}
                   style={[styles.row, bulkEditAsnBranchId === br.id && styles.rowOn]}
                   onPress={() => setBulkEditAsnBranchId(br.id)}>
-                  <Text style={{ color: NatureTheme.colors.text }}>
+                  <Text style={{ color: c.text }}>
                     {br.branch_name || br.branch_code || `สาขา ${br.id}`}
                   </Text>
                 </Pressable>
@@ -1481,7 +2219,7 @@ export default function ScheduleScreen() {
             </ScrollView>
             <View style={styles.actions}>
               <Pressable onPress={() => setBulkEditAsnOpen(false)} disabled={bulkEditAsnSaving}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable
                 style={[
@@ -1520,7 +2258,7 @@ export default function ScheduleScreen() {
               <Pressable
                 onPress={() => setBulkDeleteAsnConfirmOpen(false)}
                 disabled={bulkDeleteAsnSaving}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable
                 style={[styles.deleteBtn, bulkDeleteAsnSaving && { opacity: 0.6 }]}
@@ -1554,21 +2292,21 @@ export default function ScheduleScreen() {
             <TextInput
               style={styles.input}
               placeholder="หัวข้อ (ถ้ามี)"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={title}
               onChangeText={setTitle}
             />
             <TextInput
               style={styles.input}
               placeholder="เริ่ม (ISO datetime)"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={startAt}
               onChangeText={setStartAt}
             />
             <TextInput
               style={styles.input}
               placeholder="สิ้นสุด (ISO datetime)"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={endAt}
               onChangeText={setEndAt}
             />
@@ -1577,19 +2315,34 @@ export default function ScheduleScreen() {
               style={styles.list}
               data={people}
               keyExtractor={(p) => p.id}
-              renderItem={({ item: p }) => (
-                <Pressable
-                  style={[styles.row, userId === p.id && styles.rowOn]}
-                  onPress={() => setUserId(p.id)}>
-                  <Text style={{ color: NatureTheme.colors.text }}>
-                    {p.full_name || p.email || p.id}
-                  </Text>
-                </Pressable>
-              )}
+              renderItem={({ item: p }) => {
+                const label =
+                  employeeDisplayByProfileId[p.id]?.label ??
+                  peopleLabel.get(p.id) ??
+                  p.id.slice(0, 8);
+                const meta =
+                  positionByProfileId[p.id] ||
+                  `${roleLabelTh(p.role)} · ${p.employee_code?.trim() || '—'}`;
+                return (
+                  <Pressable
+                    style={[styles.row, userId === p.id && styles.rowOn]}
+                    onPress={() => setUserId(p.id)}>
+                    <View style={styles.pickerEmployeeRow}>
+                      <UserAvatar uri={p.avatar_url ?? undefined} label={label} size={36} />
+                      <View style={styles.pickerEmployeeBody}>
+                        <Text style={{ color: c.text, fontWeight: userId === p.id ? '800' : '500' }}>
+                          {label}
+                        </Text>
+                        <Text style={styles.pickerEmployeeMeta}>{meta}</Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                );
+              }}
             />
             <View style={styles.actions}>
               <Pressable onPress={() => setOpen(false)}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable style={styles.save} onPress={saveSchedule}>
                 <Text style={styles.saveText}>บันทึก</Text>
@@ -1618,27 +2371,27 @@ export default function ScheduleScreen() {
             <TextInput
               style={styles.input}
               placeholder="ชื่อกะ เช่น กะเช้า"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={shiftName}
               onChangeText={setShiftName}
             />
             <TextInput
               style={styles.input}
               placeholder="เริ่ม HH:MM"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={shiftStart}
               onChangeText={setShiftStart}
             />
             <TextInput
               style={styles.input}
               placeholder="สิ้นสุด HH:MM"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={shiftEnd}
               onChangeText={setShiftEnd}
             />
             <View style={styles.actions}>
               <Pressable onPress={() => setShiftOpen(false)}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable style={styles.save} onPress={saveShift}>
                 <Text style={styles.saveText}>บันทึก</Text>
@@ -1675,37 +2428,84 @@ export default function ScheduleScreen() {
                   key={sh.id}
                   style={[styles.row, bulkShiftId === sh.id && styles.rowOn]}
                   onPress={() => setBulkShiftId(sh.id)}>
-                  <Text style={{ color: NatureTheme.colors.text }}>
+                  <Text style={{ color: c.text }}>
                     {sh.name} ({sh.start_time.slice(0, 5)}–{sh.end_time.slice(0, 5)})
                   </Text>
                 </Pressable>
               ))}
-              <DatePickerField
-                label="วันเริ่ม"
-                value={bulkFromDate}
-                onChange={setBulkFromDate}
-                disabled={bulkSaving}
-                maximumDate={bulkToDate ?? undefined}
-              />
-              <DatePickerField
-                label="วันสิ้นสุด"
-                value={bulkToDate}
-                onChange={setBulkToDate}
-                disabled={bulkSaving}
-                minimumDate={bulkFromDate ?? undefined}
-              />
+              <Text style={styles.label}>วันที่มอบหมาย</Text>
+              <Text style={styles.cardMeta}>
+                แตะวันที่ในปฏิทินเพื่อเลือกหลายวันได้ (ไม่จำเป็นต้องต่อเนื่อง)
+              </Text>
+              <Text style={styles.holidayPickSummary}>
+                {bulkPickDateList.length > 0
+                  ? formatHolidayDateListTh(bulkPickDateList)
+                  : 'ยังไม่ได้เลือกวัน — แตะวันที่ในปฏิทินด้านล่าง'}
+              </Text>
+              <View style={styles.holidayMiniCalendar}>
+                <View style={styles.calendarHeader}>
+                  <Pressable
+                    style={styles.calendarNavBtn}
+                    onPress={() => shiftBulkPickMonth(-1)}
+                    disabled={bulkSaving}>
+                    <Text style={styles.calendarNavText}>‹</Text>
+                  </Pressable>
+                  <Text style={styles.calendarTitle}>{monthTitleTh(bulkPickMonth)}</Text>
+                  <Pressable
+                    style={styles.calendarNavBtn}
+                    onPress={() => shiftBulkPickMonth(1)}
+                    disabled={bulkSaving}>
+                    <Text style={styles.calendarNavText}>›</Text>
+                  </Pressable>
+                </View>
+                <View style={styles.calendarWeekRow}>
+                  {WEEKDAY_LABELS_TH.map((label) => (
+                    <Text key={`bp-${label}`} style={styles.calendarWeekText}>
+                      {label}
+                    </Text>
+                  ))}
+                </View>
+                <View style={styles.calendarGrid}>
+                  {bulkPickCalendarCells.map((ymd, index) => {
+                    const picked = ymd ? !!bulkPickDates[ymd] : false;
+                    const hasAssignment = ymd && (assignmentsByDate.get(ymd)?.length ?? 0) > 0;
+                    return (
+                      <Pressable
+                        key={`bp-cell-${ymd ?? 'blank'}-${index}`}
+                        style={[
+                          styles.calendarCell,
+                          !ymd && styles.calendarCellBlank,
+                          hasAssignment && !picked && styles.bulkPickCellSaved,
+                          picked && styles.bulkPickCellOn,
+                        ]}
+                        disabled={!ymd || bulkSaving}
+                        onPress={() => ymd && toggleBulkPickDate(ymd)}>
+                        {ymd ? (
+                          <Text
+                            style={[
+                              styles.calendarDayText,
+                              picked && styles.bulkPickCellTextOn,
+                            ]}>
+                            {dateFromYmd(ymd).getDate()}
+                          </Text>
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
               <Text style={styles.label}>สาขาที่เข้าได้ (ตามตาราง)</Text>
               <Pressable
                 style={[styles.row, bulkAllowedBranchId == null && styles.rowOn]}
                 onPress={() => setBulkAllowedBranchId(null)}>
-                <Text style={{ color: NatureTheme.colors.text }}>ไม่จำกัดสาขา</Text>
+                <Text style={{ color: c.text }}>ไม่จำกัดสาขา</Text>
               </Pressable>
               {branches.map((br) => (
                 <Pressable
                   key={String(br.id)}
                   style={[styles.row, bulkAllowedBranchId === br.id && styles.rowOn]}
                   onPress={() => setBulkAllowedBranchId(br.id)}>
-                  <Text style={{ color: NatureTheme.colors.text }}>
+                  <Text style={{ color: c.text }}>
                     {(br.branch_name || br.branch_code || `สาขา ${br.id}`) +
                       (br.branch_code ? ` (${br.branch_code})` : '')}
                   </Text>
@@ -1714,6 +2514,13 @@ export default function ScheduleScreen() {
               <Text style={styles.label}>พนักงาน (แตะเลือกหลายคน)</Text>
               {people.map((p) => {
                 const on = !!bulkUserIds[p.id];
+                const label =
+                  employeeDisplayByProfileId[p.id]?.label ??
+                  peopleLabel.get(p.id) ??
+                  p.id.slice(0, 8);
+                const meta =
+                  positionByProfileId[p.id] ||
+                  `${roleLabelTh(p.role)} · ${p.employee_code?.trim() || '—'}`;
                 return (
                   <Pressable
                     key={p.id}
@@ -1721,16 +2528,22 @@ export default function ScheduleScreen() {
                     onPress={() =>
                       setBulkUserIds((prev) => ({ ...prev, [p.id]: !on }))
                     }>
-                    <Text style={{ color: NatureTheme.colors.text }}>
-                      {(on ? '✓ ' : '') + (p.full_name || p.email || p.id)}
-                    </Text>
+                    <View style={styles.pickerEmployeeRow}>
+                      <UserAvatar uri={p.avatar_url ?? undefined} label={label} size={36} />
+                      <View style={styles.pickerEmployeeBody}>
+                        <Text style={{ color: c.text, fontWeight: on ? '800' : '500' }}>
+                          {(on ? '✓ ' : '') + label}
+                        </Text>
+                        <Text style={styles.pickerEmployeeMeta}>{meta}</Text>
+                      </View>
+                    </View>
                   </Pressable>
                 );
               })}
             </ScrollView>
             <View style={styles.actions}>
               <Pressable onPress={() => setBulkOpen(false)} disabled={bulkSaving}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable
                 style={[styles.save, bulkSaving && { opacity: 0.6 }]}
@@ -1738,6 +2551,136 @@ export default function ScheduleScreen() {
                 disabled={bulkSaving}>
                 <Text style={styles.saveText}>
                   {bulkSaving ? 'กำลังบันทึก…' : 'บันทึก'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={holidayOpen}
+        animationType="slide"
+        transparent
+        statusBarTranslucent
+        presentationStyle="overFullScreen"
+        onRequestClose={() => !holidaySaving && setHolidayOpen(false)}>
+        <View style={[styles.backdrop, WEB_MODAL_BACKDROP]}>
+          <Pressable
+            style={styles.backdropHit}
+            onPress={() => !holidaySaving && setHolidayOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="ปิด"
+          />
+          <View style={[styles.modal, modalSheetPad]}>
+            <ScrollView
+              style={styles.modalScroll}
+              contentContainerStyle={styles.modalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator>
+              <Text style={styles.modalTitle}>ตั้งวันหยุด</Text>
+              <Text style={styles.cardMeta}>
+                เลือกวันที่จากปฏิทินได้หลายวัน (แต่ละวันที่เลือกจะเป็นวันหยุดเฉพาะวันนั้น
+                ไม่ซ้ำทุกสัปดาห์) แล้วเลือกพนักงานที่ต้องการ
+              </Text>
+              <Text style={styles.label}>วันที่เลือก</Text>
+              <Text style={styles.holidayPickSummary}>
+                {holidayPickDateList.length > 0
+                  ? formatHolidayDateListTh(holidayPickDateList)
+                  : 'ยังไม่ได้เลือกวัน — แตะวันที่ในปฏิทินด้านล่าง'}
+              </Text>
+              <View style={styles.holidayMiniCalendar}>
+                <View style={styles.calendarHeader}>
+                  <Pressable
+                    style={styles.calendarNavBtn}
+                    onPress={() => shiftHolidayPickMonth(-1)}
+                    disabled={holidaySaving}>
+                    <Text style={styles.calendarNavText}>‹</Text>
+                  </Pressable>
+                  <Text style={styles.calendarTitle}>{monthTitleTh(holidayPickMonth)}</Text>
+                  <Pressable
+                    style={styles.calendarNavBtn}
+                    onPress={() => shiftHolidayPickMonth(1)}
+                    disabled={holidaySaving}>
+                    <Text style={styles.calendarNavText}>›</Text>
+                  </Pressable>
+                </View>
+                <View style={styles.calendarWeekRow}>
+                  {WEEKDAY_LABELS_TH.map((label) => (
+                    <Text key={`hp-${label}`} style={styles.calendarWeekText}>
+                      {label}
+                    </Text>
+                  ))}
+                </View>
+                <View style={styles.calendarGrid}>
+                  {holidayPickCalendarCells.map((ymd, index) => {
+                    const picked = ymd ? !!holidayPickDates[ymd] : false;
+                    const hasSavedHoliday =
+                      ymd && (holidaysByDate.get(ymd)?.length ?? 0) > 0;
+                    return (
+                      <Pressable
+                        key={`hp-cell-${ymd ?? 'blank'}-${index}`}
+                        style={[
+                          styles.calendarCell,
+                          !ymd && styles.calendarCellBlank,
+                          hasSavedHoliday && !picked && styles.holidayPickCellSaved,
+                          picked && styles.holidayPickCellOn,
+                        ]}
+                        disabled={!ymd || holidaySaving}
+                        onPress={() => ymd && toggleHolidayPickDate(ymd)}>
+                        {ymd ? (
+                          <Text
+                            style={[
+                              styles.calendarDayText,
+                              picked && styles.holidayPickCellTextOn,
+                            ]}>
+                            {dateFromYmd(ymd).getDate()}
+                          </Text>
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+              <Text style={styles.label}>พนักงาน (เลือกได้หลายคน)</Text>
+              {people.map((p) => {
+                const on = !!holidayUserIds[p.id];
+                const display = employeeDisplayByProfileId[p.id];
+                const label =
+                  display?.label ?? peopleLabel.get(p.id) ?? p.id.slice(0, 8);
+                const meta =
+                  positionByProfileId[p.id] ||
+                  `${roleLabelTh(p.role)} · ${p.employee_code?.trim() || '—'}`;
+                return (
+                  <Pressable
+                    key={p.id}
+                    style={[styles.row, on && styles.rowOn]}
+                    onPress={() =>
+                      setHolidayUserIds((prev) => ({ ...prev, [p.id]: !prev[p.id] }))
+                    }>
+                    <View style={styles.pickerEmployeeRow}>
+                      <UserAvatar uri={p.avatar_url ?? undefined} label={label} size={36} />
+                      <View style={styles.pickerEmployeeBody}>
+                        <Text style={{ color: c.text, fontWeight: on ? '800' : '500' }}>
+                          {label}
+                        </Text>
+                        <Text style={styles.pickerEmployeeMeta}>{meta}</Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.actions}>
+              <Pressable onPress={() => setHolidayOpen(false)} disabled={holidaySaving}>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.save, holidaySaving && { opacity: 0.6 }]}
+                onPress={() => void saveHolidayDates()}
+                disabled={holidaySaving}>
+                <Text style={styles.saveText}>
+                  {holidaySaving ? 'กำลังบันทึก…' : 'บันทึกวันหยุด'}
                 </Text>
               </Pressable>
             </View>
@@ -1776,7 +2719,7 @@ export default function ScheduleScreen() {
                   key={sh.id}
                   style={[styles.row, editAsnShiftId === sh.id && styles.rowOn]}
                   onPress={() => setEditAsnShiftId(sh.id)}>
-                  <Text style={{ color: NatureTheme.colors.text }}>
+                  <Text style={{ color: c.text }}>
                     {sh.name} ({sh.start_time.slice(0, 5)}–{sh.end_time.slice(0, 5)})
                   </Text>
                 </Pressable>
@@ -1785,14 +2728,14 @@ export default function ScheduleScreen() {
               <Pressable
                 style={[styles.row, editAsnBranchId == null && styles.rowOn]}
                 onPress={() => setEditAsnBranchId(null)}>
-                <Text style={{ color: NatureTheme.colors.text }}>ไม่จำกัดสาขา</Text>
+                <Text style={{ color: c.text }}>ไม่จำกัดสาขา</Text>
               </Pressable>
               {branches.map((br) => (
                 <Pressable
                   key={String(br.id)}
                   style={[styles.row, editAsnBranchId === br.id && styles.rowOn]}
                   onPress={() => setEditAsnBranchId(br.id)}>
-                  <Text style={{ color: NatureTheme.colors.text }}>
+                  <Text style={{ color: c.text }}>
                     {br.branch_name || br.branch_code || `สาขา ${br.id}`}
                   </Text>
                 </Pressable>
@@ -1800,7 +2743,7 @@ export default function ScheduleScreen() {
             </ScrollView>
             <View style={styles.actions}>
               <Pressable onPress={() => setEditAsnOpen(false)} disabled={editAsnSaving}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable
                 style={[styles.save, editAsnSaving && { opacity: 0.6 }]}
@@ -1830,27 +2773,27 @@ export default function ScheduleScreen() {
             <TextInput
               style={styles.input}
               placeholder="หัวข้อ (ถ้ามี)"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={editScheduleTitle}
               onChangeText={setEditScheduleTitle}
             />
             <TextInput
               style={styles.input}
               placeholder="เริ่ม (ISO datetime)"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={editScheduleStartAt}
               onChangeText={setEditScheduleStartAt}
             />
             <TextInput
               style={styles.input}
               placeholder="สิ้นสุด (ISO datetime)"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={c.textMuted}
               value={editScheduleEndAt}
               onChangeText={setEditScheduleEndAt}
             />
             <View style={styles.actions}>
               <Pressable onPress={() => setEditScheduleOpen(false)} disabled={editScheduleSaving}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable
                 style={[styles.save, editScheduleSaving && { opacity: 0.6 }]}
@@ -1887,28 +2830,28 @@ export default function ScheduleScreen() {
               <TextInput
                 style={styles.input}
                 placeholder="ชื่อกะ"
-                placeholderTextColor={NatureTheme.colors.textMuted}
+                placeholderTextColor={c.textMuted}
                 value={editShiftName}
                 onChangeText={setEditShiftName}
               />
               <TextInput
                 style={styles.input}
                 placeholder="เริ่ม HH:MM"
-                placeholderTextColor={NatureTheme.colors.textMuted}
+                placeholderTextColor={c.textMuted}
                 value={editShiftStart}
                 onChangeText={setEditShiftStart}
               />
               <TextInput
                 style={styles.input}
                 placeholder="สิ้นสุด HH:MM"
-                placeholderTextColor={NatureTheme.colors.textMuted}
+                placeholderTextColor={c.textMuted}
                 value={editShiftEnd}
                 onChangeText={setEditShiftEnd}
               />
             </ScrollView>
             <View style={styles.actions}>
               <Pressable onPress={() => setEditShiftOpen(false)} disabled={editShiftSaving}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable
                 style={[styles.save, editShiftSaving && { opacity: 0.6 }]}
@@ -1945,7 +2888,7 @@ export default function ScheduleScreen() {
               <Pressable
                 onPress={() => setConfirmDeleteOpen(false)}
                 disabled={deletingNow}>
-                <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                <Text style={{ color: c.text }}>ยกเลิก</Text>
               </Pressable>
               <Pressable
                 style={[styles.deleteBtn, deletingNow && { opacity: 0.6 }]}
@@ -1961,11 +2904,18 @@ export default function ScheduleScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createScheduleStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
+  const holiday = {
+    main: '#DC2626',
+    dark: '#991B1B',
+    bg: '#FEF2F2',
+    border: '#FECACA',
+  };
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: c.canvas },
   screen: { flex: 1, backgroundColor: c.canvas },
   content: { paddingBottom: s.scrollBottom },
@@ -2108,6 +3058,43 @@ const styles = StyleSheet.create({
   calendarDayText: { color: c.text, fontSize: 13, fontWeight: '800' },
   calendarDayTextSelected: { color: c.onAccent },
   calendarCountText: { color: c.primaryDark, fontSize: 9, fontWeight: '800', marginTop: 3 },
+  calendarHolidayCountText: { color: holiday.main, fontSize: 8, fontWeight: '800', marginTop: 2 },
+  calendarLeaveCountText: { color: c.leaveSickBar, fontSize: 8, fontWeight: '800', marginTop: 2 },
+  calendarCompanyHolidayText: {
+    color: '#DC2626',
+    fontSize: 7,
+    fontWeight: '900',
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  calendarCompanyHolidayTextSelected: {
+    color: '#FEE2E2',
+  },
+  companyHolidayBanner: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+  },
+  companyHolidayBannerLabel: {
+    color: '#DC2626',
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  companyHolidayBannerTitle: {
+    color: '#991B1B',
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  companyHolidayBannerDesc: {
+    color: c.textMuted,
+    fontSize: 14,
+    marginTop: 8,
+    lineHeight: 20,
+  },
   calendarSelectedSummary: {
     marginTop: 12,
     padding: 10,
@@ -2178,6 +3165,194 @@ const styles = StyleSheet.create({
     color: c.primaryDark,
     fontSize: 12,
     fontWeight: '800',
+  },
+  scheduleHolidaySection: {
+    marginBottom: 14,
+  },
+  scheduleWorkSection: {
+    marginBottom: 8,
+  },
+  scheduleWorkSectionTitle: {
+    color: c.primaryDark,
+    fontSize: 14,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  detailFilterRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  detailFilterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surfaceMuted,
+  },
+  detailFilterChipOn: {
+    backgroundColor: c.primaryLight,
+    borderColor: c.primaryMuted,
+  },
+  detailFilterChipHolidayOn: {
+    backgroundColor: holiday.bg,
+    borderColor: holiday.border,
+  },
+  detailFilterChipText: {
+    color: c.textMuted,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  detailFilterChipTextOn: {
+    color: c.primaryDark,
+  },
+  detailFilterChipTextHolidayOn: {
+    color: holiday.dark,
+  },
+  detailFilterChipLeaveOn: {
+    backgroundColor: c.leaveSickBg,
+    borderColor: c.leaveSickBar,
+  },
+  detailFilterChipTextLeaveOn: {
+    color: c.leaveSickBar,
+  },
+  scheduleHolidaySectionTitle: {
+    color: holiday.main,
+    fontSize: 14,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  scheduleHolidayGroup: {
+    marginBottom: 10,
+    borderRadius: r.md,
+    borderWidth: 1,
+    borderColor: holiday.border,
+    backgroundColor: c.surface,
+    overflow: 'hidden',
+  },
+  scheduleHolidayHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: holiday.bg,
+    borderBottomWidth: 1,
+    borderBottomColor: holiday.border,
+  },
+  scheduleHolidayTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: holiday.dark,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  scheduleHolidayCount: {
+    color: holiday.main,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  scheduleHolidayBadge: {
+    marginTop: 4,
+    color: holiday.main,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  scheduleLeaveSection: {
+    marginBottom: 14,
+  },
+  scheduleLeaveSectionTitle: {
+    color: c.leaveSickBar,
+    fontSize: 14,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  scheduleLeaveGroup: {
+    marginBottom: 10,
+    borderRadius: r.md,
+    borderWidth: 1,
+    borderColor: c.leaveSickBar,
+    backgroundColor: c.surface,
+    overflow: 'hidden',
+  },
+  scheduleLeaveHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: c.leaveSickBg,
+    borderBottomWidth: 1,
+    borderBottomColor: c.leaveSickBar,
+  },
+  scheduleLeaveTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: c.leaveSickBar,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  scheduleLeaveCount: {
+    color: c.leaveSickBar,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  scheduleLeaveBadge: {
+    marginTop: 4,
+    color: c.leaveSickBar,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  scheduleLeaveMeta: {
+    color: c.textMuted,
+    fontSize: 11,
+    marginTop: 3,
+  },
+  scheduleLeaveReason: {
+    color: c.textSecondary,
+    fontSize: 11,
+    marginTop: 4,
+    lineHeight: 16,
+  },
+  holidayPickSummary: {
+    color: c.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 10,
+  },
+  holidayMiniCalendar: {
+    marginBottom: 14,
+    padding: 8,
+    borderRadius: r.md,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surfaceMuted,
+  },
+  holidayPickCellOn: {
+    backgroundColor: holiday.main,
+    borderColor: holiday.main,
+  },
+  holidayPickCellSaved: {
+    backgroundColor: holiday.bg,
+    borderColor: holiday.main,
+  },
+  holidayPickCellTextOn: {
+    color: c.onAccent,
+  },
+  bulkPickCellOn: {
+    backgroundColor: c.primary,
+    borderColor: c.primary,
+  },
+  bulkPickCellSaved: {
+    backgroundColor: c.primaryLight,
+    borderColor: c.primaryMuted,
+  },
+  bulkPickCellTextOn: {
+    color: c.onAccent,
   },
   scheduleBranchEmployeeRow: {
     flexDirection: 'row',
@@ -2474,4 +3649,5 @@ const styles = StyleSheet.create({
     borderRadius: r.sm,
   },
   saveText: { color: c.onAccent, fontWeight: '700' },
-});
+  });
+}

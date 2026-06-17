@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -9,7 +9,8 @@ import {
 } from 'react-native';
 
 import { useAuth } from '@/contexts/AuthContext';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import {
   averageScoreByBangkokDay,
   bangkokCalendarDateString,
@@ -20,13 +21,13 @@ import {
   fetchMyWellbeingInRange,
 } from '@/lib/wellbeing';
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
 const BAR_H = 112;
 
 export default function WellbeingScreen() {
   const { session } = useAuth();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createWellbeingStyles(theme), [theme]);
   const [mode, setMode] = useState<'week' | 'month'>('week');
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -185,7 +186,12 @@ export default function WellbeingScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+function createWellbeingStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
+
+  return StyleSheet.create({
   screen: { flex: 1, backgroundColor: c.canvas },
   content: { padding: s.screen, paddingBottom: s.scrollBottom },
   lead: {
@@ -260,4 +266,5 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontVariant: ['tabular-nums'],
   },
-});
+  });
+}

@@ -9,7 +9,8 @@ import {
 
 import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { useAuth } from '@/contexts/AuthContext';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import {
   priorityLabel,
   TASK_STATUS_TH,
@@ -50,6 +51,8 @@ function mergeTasksById(a: TaskRow[], b: TaskRow[]): TaskRow[] {
 
 export default function TasksAssignedScreen() {
   const { session } = useAuth();
+  const { theme } = useAppTheme();
+  const styles = useMemo(() => createTasksAssignedStyles(theme), [theme]);
   const uid = session?.user?.id ?? null;
   const [loading, setLoading] = useState(true);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
@@ -276,11 +279,12 @@ export default function TasksAssignedScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createTasksAssignedStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   screen: { flex: 1, backgroundColor: c.canvas },
   content: { padding: s.screen, paddingBottom: s.scrollBottom },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -313,4 +317,5 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 15, fontWeight: '700', color: c.text, marginBottom: 6 },
   meta: { color: c.textMuted, fontSize: 12, marginBottom: 2 },
   empty: { textAlign: 'center', color: c.textMuted, marginTop: 20 },
-});
+  });
+}

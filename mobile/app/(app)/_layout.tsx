@@ -3,8 +3,7 @@ import { Tabs } from 'expo-router';
 import { useWindowDimensions } from 'react-native';
 
 import { TaskNotificationsHeaderButton } from '@/components/TaskNotificationsHeaderButton';
-import Colors from '@/constants/Colors';
-import { NatureTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { isAdmin, isManagerOrAdmin, useRole } from '@/contexts/AuthContext';
 import { TaskNotificationsProvider } from '@/contexts/TaskNotificationsContext';
 import { NotificationBootstrap } from '@/components/NotificationBootstrap';
@@ -12,7 +11,6 @@ import {
   TabUnreadBadgesProvider,
   useTabUnreadBadges,
 } from '@/contexts/TabUnreadBadgesContext';
-import { useColorScheme } from '@/components/useColorScheme';
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 
 function TabIcon(props: {
@@ -23,8 +21,8 @@ function TabIcon(props: {
 }
 
 function AppTabsLayoutInner() {
-  const colorScheme = useColorScheme();
   const role = useRole();
+  const { theme } = useAppTheme();
   const manager = isManagerOrAdmin(role);
   const admin = isAdmin(role);
   const { width: winW } = useWindowDimensions();
@@ -32,7 +30,7 @@ function AppTabsLayoutInner() {
   const tabBarH = winW < 380 ? 52 : 56;
   const { chatBadge, communityBadge, taskNotifBadge } = useTabUnreadBadges();
 
-  const t = NatureTheme.colors;
+  const t = theme.colors;
   const badgeStyle = {
     backgroundColor: t.checkIn,
     color: t.onAccent,
@@ -43,8 +41,8 @@ function AppTabsLayoutInner() {
   return (
     <Tabs
         screenOptions={{
-          tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
-          tabBarInactiveTintColor: Colors[colorScheme ?? 'light'].tabIconDefault,
+          tabBarActiveTintColor: t.tint,
+          tabBarInactiveTintColor: t.textMuted,
           tabBarStyle: {
             backgroundColor: t.tabBar,
             borderTopColor: t.tabBarBorder,

@@ -12,16 +12,13 @@ import {
 } from 'react-native';
 
 import { ZoomableImage } from '@/components/ZoomableImage';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import {
   ANNOUNCEMENT_DEFAULT_DURATION_MS,
   type AnnouncementTransitionMode,
   type AnnouncementSlide,
 } from '@/lib/announcementSlides';
-
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
 
 type Props = {
   urls: string[];
@@ -37,6 +34,9 @@ export function AnnouncementCarousel({
   transitionMode = 'slide',
   slideHeightPx = 160,
 }: Props) {
+  const { theme } = useAppTheme();
+  const styles = useMemo(() => createAnnouncementStyles(theme), [theme]);
+  const s = theme.spacing;
   const { width: winW } = useWindowDimensions();
   const slideW = Math.min(winW - s.screen * 2, 640);
   const displaySlides = useMemo(
@@ -150,7 +150,10 @@ export function AnnouncementCarousel({
 
   return (
     <View style={styles.outer}>
-      <Text style={styles.label}>ประกาศจากบริษัท</Text>
+      <View style={styles.labelPill}>
+        <View style={styles.labelDot} />
+        <Text style={styles.label}>ประกาศจากบริษัท</Text>
+      </View>
       {transitionMode === 'fade' ? (
         <View style={[styles.fadeFrame, { width: slideW, height: slideHeightPx }]}>
           <ZoomableImage
@@ -224,13 +227,36 @@ export function AnnouncementCarousel({
   );
 }
 
-const styles = StyleSheet.create({
+function createAnnouncementStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
+
+  return StyleSheet.create({
   outer: { marginBottom: s.section },
-  label: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: c.textSecondary,
+  labelPill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     marginBottom: s.gap,
+    paddingVertical: 5,
+    paddingHorizontal: 9,
+    borderRadius: 999,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+  },
+  labelDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: c.primaryDark,
+  },
+  label: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: c.primaryDark,
   },
   scrollContent: { alignItems: 'flex-start' },
   image: {
@@ -277,4 +303,5 @@ const styles = StyleSheet.create({
     backgroundColor: c.border,
   },
   dotActive: { backgroundColor: c.primary, width: 16 },
-});
+  });
+}

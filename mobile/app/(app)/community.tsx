@@ -28,7 +28,8 @@ import { UserAvatar } from '@/components/UserAvatar';
 import { ZoomableImage } from '@/components/ZoomableImage';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { isAdmin, useAuth, useRole } from '@/contexts/AuthContext';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { supabase } from '@/lib/supabase';
 import type {
   CommunityFeedPost,
@@ -259,6 +260,9 @@ export default function CommunityScreen() {
   const role = useRole();
   const admin = isAdmin(role);
   const { profile, refreshProfile } = useAuth();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createCommunityStyles(theme), [theme]);
   const [cards, setCards] = useState<EmployeeCard[]>([]);
   const [feedPosts, setFeedPosts] = useState<FeedRow[]>([]);
   const [feedImageUri, setFeedImageUri] = useState<string | null>(null);
@@ -1338,10 +1342,10 @@ export default function CommunityScreen() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onPullRefresh}
-            tintColor={NatureTheme.colors.primary}
-            colors={[NatureTheme.colors.primary]}
+            tintColor={c.primary}
+            colors={[c.primary]}
             title="ดึงลงเพื่อรีเฟรช"
-            titleColor={NatureTheme.colors.textMuted}
+            titleColor={c.textMuted}
           />
         }
         ListEmptyComponent={
@@ -1757,6 +1761,8 @@ export default function CommunityScreen() {
                     cm={cm}
                     postId={item.id}
                     depth={0}
+                    styles={styles}
+                    placeholderTextColor={c.textMuted}
                     activeUserId={activeUserId}
                     replyTarget={feedReplyTarget}
                     replyDrafts={feedReplyDrafts}
@@ -1783,7 +1789,7 @@ export default function CommunityScreen() {
                       }))
                     }
                     placeholder="แสดงความคิดเห็น..."
-                    placeholderTextColor={NatureTheme.colors.textMuted}
+                    placeholderTextColor={c.textMuted}
                     multiline
                   />
                   <Pressable
@@ -1818,7 +1824,7 @@ export default function CommunityScreen() {
             {likersLoading ? (
               <ActivityIndicator
                 style={styles.likersModalSpinner}
-                color={NatureTheme.colors.primary}
+                color={c.primary}
               />
             ) : likersRows.length === 0 ? (
               <Text style={styles.likersModalEmpty}>ยังไม่มีรายชื่อ</Text>
@@ -1854,11 +1860,12 @@ export default function CommunityScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createCommunityStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   flex: { flex: 1, backgroundColor: c.canvas },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   searchWrap: {
@@ -2160,7 +2167,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: c.overlay,
     padding: 24,
   },
   likersModalCard: {
@@ -2445,12 +2452,15 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   feedReplySendBtnText: { color: c.onAccent, fontWeight: '700', fontSize: 12 },
-});
+  });
+}
 
 type FeedCommentRecursiveProps = {
   cm: FeedCommentRow;
   postId: string;
   depth: number;
+  styles: ReturnType<typeof createCommunityStyles>;
+  placeholderTextColor: string;
   activeUserId: string | null;
   replyTarget: { postId: string; parentId: string } | null;
   replyDrafts: Record<string, string>;
@@ -2464,6 +2474,8 @@ function FeedCommentRecursive({
   cm,
   postId,
   depth,
+  styles,
+  placeholderTextColor,
   activeUserId,
   replyTarget,
   replyDrafts,
@@ -2505,7 +2517,7 @@ function FeedCommentRecursive({
                 value={replyDrafts[draftKey] ?? ''}
                 onChangeText={(t) => onChangeReplyDraft(draftKey, t.slice(0, 500))}
                 placeholder="เขียนคำตอบ..."
-                placeholderTextColor={NatureTheme.colors.textMuted}
+                placeholderTextColor={placeholderTextColor}
                 multiline
               />
               <View style={styles.feedReplyActions}>
@@ -2533,6 +2545,8 @@ function FeedCommentRecursive({
           cm={child}
           postId={postId}
           depth={depth + 1}
+          styles={styles}
+          placeholderTextColor={placeholderTextColor}
           activeUserId={activeUserId}
           replyTarget={replyTarget}
           replyDrafts={replyDrafts}

@@ -13,7 +13,8 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { DatePickerField } from '@/components/DatePickerField';
-import { NatureTheme } from '@/constants/Theme';
+import { NatureTheme, type AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import {
@@ -67,6 +68,9 @@ export function LeaveRequestModal({
   quotaYear,
   onSubmitted,
 }: Props) {
+  const { theme } = useAppTheme();
+  const tc = theme.colors;
+  const themed = useMemo(() => createLeaveModalThemeStyles(tc), [tc]);
   const toast = useCuteToast();
   const insets = useSafeAreaInsets();
   const { profile } = useAuth();
@@ -349,27 +353,27 @@ export function LeaveRequestModal({
       statusBarTranslucent
       presentationStyle="overFullScreen"
       onRequestClose={onClose}>
-      <View style={[styles.backdrop, WEB_LEAVE_MODAL]}>
+      <View style={[styles.backdrop, themed.backdrop, WEB_LEAVE_MODAL]}>
         <Pressable
           style={styles.backdropHit}
           onPress={onClose}
           accessibilityRole="button"
           accessibilityLabel="ปิด"
         />
-        <View style={[styles.card, sheetPad]}>
-          <Text style={styles.title}>ลางาน</Text>
-          <Text style={styles.sub}>
+        <View style={[styles.card, themed.card, sheetPad]}>
+          <Text style={[styles.title, themed.title]}>ลางาน</Text>
+          <Text style={[styles.sub, themed.sub]}>
             ลาป่วยสูงสุด {SICK_ANNUAL_DAYS} วัน/ปี · ลากิจ {PERSONAL_ANNUAL_DAYS}{' '}
             วัน/ปี · พักร้อนตามที่ HR กำหนด — ส่งคำขอแล้วรออนุมัติ (โควตาหักเมื่ออนุมัติ)
           </Text>
           {loading ? (
-            <ActivityIndicator color={c.primary} style={{ marginVertical: 20 }} />
+            <ActivityIndicator color={tc.primary} style={{ marginVertical: 20 }} />
           ) : (
             <ScrollView
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
               style={styles.scroll}>
-              <Text style={styles.label}>ประเภท</Text>
+              <Text style={[styles.label, themed.label]}>ประเภท</Text>
               <View style={styles.rowChips}>
                 {(
                   [
@@ -381,12 +385,19 @@ export function LeaveRequestModal({
                 ).map(([t, lab]) => (
                   <Pressable
                     key={t}
-                    style={[styles.chip, leaveType === t && styles.chipOn]}
+                    style={[
+                      styles.chip,
+                      themed.chip,
+                      leaveType === t && styles.chipOn,
+                      leaveType === t && themed.chipOn,
+                    ]}
                     onPress={() => setLeaveType(t)}>
                     <Text
                       style={[
                         styles.chipText,
+                        themed.chipText,
                         leaveType === t && styles.chipTextOn,
+                        leaveType === t && themed.chipTextOn,
                       ]}>
                       {lab}
                     </Text>
@@ -394,13 +405,13 @@ export function LeaveRequestModal({
                 ))}
               </View>
 
-              <Text style={styles.meta}>
+              <Text style={[styles.meta, themed.meta]}>
                 ปี {quotaYear} (นับเฉพาะที่อนุมัติแล้ว): ลาป่วยเหลือ {sickRemaining} วัน ·
                 ลากิจเหลือ {personalRemaining} วัน · พักร้อนเหลือ{' '}
                 {vacationLeft.toFixed(1)} วัน
               </Text>
               {leaveType === 'unpaid' ? (
-                <Text style={styles.warnBox}>
+                <Text style={[styles.warnBox, themed.warnBox]}>
                   ลาไม่รับเงินจะไม่ใช้โควต้าลา แต่จะถูกนำไปหักในสลิปเงินเดือนหลังอนุมัติ
                 </Text>
               ) : null}
@@ -430,35 +441,35 @@ export function LeaveRequestModal({
                 maximumDate={quotaYearMax}
               />
               {newDays > 0 ? (
-                <Text style={styles.hint}>รวม {newDays} วันปฏิทิน</Text>
+                <Text style={[styles.hint, themed.hint]}>รวม {newDays} วันปฏิทิน</Text>
               ) : null}
 
               {leaveType === 'personal' && needPersonalExtra ? (
-                <Text style={styles.warnBox}>
+                <Text style={[styles.warnBox, themed.warnBox]}>
                   ลากิจแนว B: ช่วงนี้ติดกันกับลากิจที่มีแล้วเกิน 2 วัน — ต้องกรอกเหตุผลเพิ่มและแนบเอกสาร
                 </Text>
               ) : null}
               {leaveType === 'sick' && needSickCert ? (
-                <Text style={styles.warnBox}>
+                <Text style={[styles.warnBox, themed.warnBox]}>
                   ลาป่วยติดกันเกิน 2 วัน — ต้องแนบใบรับรองแพทย์
                 </Text>
               ) : null}
 
-              <Text style={styles.label}>เหตุผล</Text>
+              <Text style={[styles.label, themed.label]}>เหตุผล</Text>
               <TextInput
-                style={[styles.input, styles.tall]}
+                style={[styles.input, themed.input, styles.tall]}
                 value={reason}
                 onChangeText={setReason}
                 placeholder="ระบุเหตุผล"
-                placeholderTextColor={c.textMuted}
+                placeholderTextColor={tc.textMuted}
                 multiline
               />
 
               {leaveType === 'sick' && needSickCert ? (
                 <>
-                  <Text style={styles.label}>ใบรับรองแพทย์ (รูป)</Text>
+                  <Text style={[styles.label, themed.label]}>ใบรับรองแพทย์ (รูป)</Text>
                   <Pressable
-                    style={styles.uploadBtn}
+                    style={[styles.uploadBtn, themed.uploadBtn]}
                     disabled={uploadingMed}
                     onPress={async () => {
                       setUploadingMed(true);
@@ -475,7 +486,7 @@ export function LeaveRequestModal({
                         setUploadingMed(false);
                       }
                     }}>
-                    <Text style={styles.uploadBtnText}>
+                    <Text style={[styles.uploadBtnText, themed.uploadBtnText]}>
                       {uploadingMed
                         ? 'กำลังอัปโหลด…'
                         : medicalUrl
@@ -488,18 +499,18 @@ export function LeaveRequestModal({
 
               {leaveType === 'personal' && needPersonalExtra ? (
                 <>
-                  <Text style={styles.label}>เหตุผล / รายละเอียดเพิ่ม (อย่างน้อย 10 ตัวอักษร)</Text>
+                  <Text style={[styles.label, themed.label]}>เหตุผล / รายละเอียดเพิ่ม (อย่างน้อย 10 ตัวอักษร)</Text>
                   <TextInput
-                    style={[styles.input, styles.tall]}
+                    style={[styles.input, themed.input, styles.tall]}
                     value={suppNote}
                     onChangeText={setSuppNote}
                     placeholder="เช่น ประชุมต่างจังหวัด / ธุระครอบครัวเร่งด่วน"
-                    placeholderTextColor={c.textMuted}
+                    placeholderTextColor={tc.textMuted}
                     multiline
                   />
-                  <Text style={styles.label}>เอกสารประกอบ (รูป)</Text>
+                  <Text style={[styles.label, themed.label]}>เอกสารประกอบ (รูป)</Text>
                   <Pressable
-                    style={styles.uploadBtn}
+                    style={[styles.uploadBtn, themed.uploadBtn]}
                     disabled={uploadingSupp}
                     onPress={async () => {
                       setUploadingSupp(true);
@@ -516,7 +527,7 @@ export function LeaveRequestModal({
                         setUploadingSupp(false);
                       }
                     }}>
-                    <Text style={styles.uploadBtnText}>
+                    <Text style={[styles.uploadBtnText, themed.uploadBtnText]}>
                       {uploadingSupp
                         ? 'กำลังอัปโหลด…'
                         : suppDocUrl
@@ -528,11 +539,11 @@ export function LeaveRequestModal({
               ) : null}
 
               <View style={styles.actions}>
-                <Pressable style={styles.btnGhost} onPress={onClose}>
-                  <Text style={styles.btnGhostText}>ปิด</Text>
+                <Pressable style={[styles.btnGhost, themed.btnGhost]} onPress={onClose}>
+                  <Text style={[styles.btnGhostText, themed.btnGhostText]}>ปิด</Text>
                 </Pressable>
                 <Pressable
-                  style={[styles.btnPrimary, saving && styles.disabled]}
+                  style={[styles.btnPrimary, themed.btnPrimary, saving && styles.disabled]}
                   disabled={saving}
                   onPress={() => void submit()}>
                   <Text style={styles.btnPrimaryText}>
@@ -546,6 +557,56 @@ export function LeaveRequestModal({
       </View>
     </Modal>
   );
+}
+
+function createLeaveModalThemeStyles(colors: AppTheme['colors']) {
+  return StyleSheet.create({
+    backdrop: { backgroundColor: colors.overlay },
+    card: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    title: { color: colors.text },
+    sub: { color: colors.textMuted },
+    label: { color: colors.textSecondary },
+    input: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      color: colors.text,
+    },
+    meta: { color: colors.textMuted },
+    hint: { color: colors.primaryDark },
+    warnBox: {
+      backgroundColor: colors.warningBg,
+      borderColor: colors.warningBorder,
+      color: colors.warningTitle,
+    },
+    uploadBtn: {
+      backgroundColor: colors.primaryLight,
+      borderColor: colors.primaryMuted,
+      borderWidth: 1.3,
+    },
+    uploadBtnText: { color: colors.primaryDark },
+    btnGhost: {
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceMuted,
+      borderWidth: 1.5,
+    },
+    btnGhostText: { color: colors.text },
+    btnPrimary: { backgroundColor: colors.primaryDark },
+    chip: {
+      backgroundColor: colors.chip,
+      borderColor: colors.borderSoft,
+      borderWidth: 1,
+    },
+    chipOn: {
+      backgroundColor: colors.primaryLight,
+      borderColor: colors.primaryMuted,
+    },
+    chipText: { color: colors.chipText },
+    chipTextOn: { color: colors.primaryDark },
+  });
 }
 
 const styles = StyleSheet.create({

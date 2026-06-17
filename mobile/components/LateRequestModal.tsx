@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -12,7 +12,8 @@ import {
 } from 'react-native';
 
 import { DatePickerField } from '@/components/DatePickerField';
-import { NatureTheme } from '@/constants/Theme';
+import { NatureTheme, type AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { buildLateAttendanceChatBody } from '@/lib/leaveAttendanceChat';
 import {
@@ -69,6 +70,9 @@ export function LateRequestModal({
   onSubmitted,
 }: Props) {
   const toast = useCuteToast();
+  const { theme } = useAppTheme();
+  const tc = theme.colors;
+  const themed = useMemo(() => createLateModalThemeStyles(tc), [tc]);
   const [workDate, setWorkDate] = useState<Date | null>(() =>
     parseBangkokYmdToLocalDate(defaultWorkDateYmd)
   );
@@ -239,32 +243,32 @@ export function LateRequestModal({
       transparent
       presentationStyle="overFullScreen"
       statusBarTranslucent>
-      <View style={[styles.backdrop, WEB_MODAL_BACKDROP]}>
-        <View style={styles.card}>
-          <Text style={styles.title}>ขอเข้าสาย</Text>
-          <Text style={styles.sub}>
+      <View style={[styles.backdrop, themed.backdrop, WEB_MODAL_BACKDROP]}>
+        <View style={[styles.card, themed.card]}>
+          <Text style={[styles.title, themed.title]}>ขอเข้าสาย</Text>
+          <Text style={[styles.sub, themed.sub]}>
             ใช้ได้ไม่เกิน {LATE_MAX_PER_MONTH} ครั้งหรือรวม {LATE_MAX_MINUTES}{' '}
             นาทีต่อรอบ 26–25 (ยึดอย่างใดอย่างหนึ่งถึงก่อน)
           </Text>
           {loading ? (
-            <ActivityIndicator color={c.primary} style={{ marginVertical: 20 }} />
+            <ActivityIndicator color={tc.primary} style={{ marginVertical: 20 }} />
           ) : quotaFull ? (
             <View>
-              <Text style={styles.meta}>
+              <Text style={[styles.meta, themed.meta]}>
                 รอบ 26–25 ของวันที่เลือก: ใช้ไปแล้ว {countThisCycle} /{' '}
                 {LATE_MAX_PER_MONTH} ครั้ง · {minutesThisCycle} / {LATE_MAX_MINUTES}{' '}
                 นาที
               </Text>
-              <Text style={styles.quotaBanner}>
+              <Text style={[styles.quotaBanner, themed.quotaBanner]}>
                 ใช้สิทธิขอเข้าสายครบแล้ว — ไม่สามารถบันทึกเพิ่มในรอบนี้ได้
               </Text>
-              <Pressable style={styles.btnCloseFull} onPress={onClose}>
-                <Text style={styles.btnCloseFullText}>ปิด</Text>
+              <Pressable style={[styles.btnCloseFull, themed.btnCloseFull]} onPress={onClose}>
+                <Text style={[styles.btnCloseFullText, themed.btnCloseFullText]}>ปิด</Text>
               </Pressable>
             </View>
           ) : (
             <ScrollView keyboardShouldPersistTaps="handled">
-              <Text style={styles.meta}>
+              <Text style={[styles.meta, themed.meta]}>
                 รอบ 26–25 ของวันที่เลือก: ใช้ไปแล้ว {countThisCycle} /{' '}
                 {LATE_MAX_PER_MONTH} ครั้ง · {minutesThisCycle} / {LATE_MAX_MINUTES}{' '}
                 นาที · เหลือ {remainingMinutes} นาที
@@ -275,30 +279,30 @@ export function LateRequestModal({
                 onChange={(d) => setWorkDate(d ?? parseBangkokYmdToLocalDate(defaultWorkDateYmd))}
                 disabled={saving}
               />
-              <Text style={styles.label}>นาทีที่ขอ (1–{remainingMinutes})</Text>
+              <Text style={[styles.label, themed.label]}>นาทีที่ขอ (1–{remainingMinutes})</Text>
               <TextInput
-                style={styles.input}
+                style={[styles.input, themed.input]}
                 value={minutes}
                 onChangeText={setMinutes}
                 keyboardType="number-pad"
                 placeholder="15"
-                placeholderTextColor={c.textMuted}
+                placeholderTextColor={tc.textMuted}
               />
-              <Text style={styles.label}>หมายเหตุ (ถ้ามี)</Text>
+              <Text style={[styles.label, themed.label]}>หมายเหตุ (ถ้ามี)</Text>
               <TextInput
-                style={[styles.input, styles.tall]}
+                style={[styles.input, themed.input, styles.tall]}
                 value={note}
                 onChangeText={setNote}
                 placeholder="เช่น รถติด / ฝนตก"
-                placeholderTextColor={c.textMuted}
+                placeholderTextColor={tc.textMuted}
                 multiline
               />
               <View style={styles.actions}>
-                <Pressable style={styles.btnGhost} onPress={onClose}>
-                  <Text style={styles.btnGhostText}>ปิด</Text>
+                <Pressable style={[styles.btnGhost, themed.btnGhost]} onPress={onClose}>
+                  <Text style={[styles.btnGhostText, themed.btnGhostText]}>ปิด</Text>
                 </Pressable>
                 <Pressable
-                  style={[styles.btnPrimary, saving && styles.disabled]}
+                  style={[styles.btnPrimary, themed.btnPrimary, saving && styles.disabled]}
                   disabled={saving}
                   onPress={() => void submit()}>
                   <Text style={styles.btnPrimaryText}>
@@ -312,6 +316,44 @@ export function LateRequestModal({
       </View>
     </Modal>
   );
+}
+
+function createLateModalThemeStyles(colors: AppTheme['colors']) {
+  return StyleSheet.create({
+    backdrop: { backgroundColor: colors.overlay },
+    card: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    title: { color: colors.text },
+    sub: { color: colors.textMuted },
+    meta: { color: colors.primaryDark },
+    quotaBanner: {
+      backgroundColor: colors.warningBg,
+      borderColor: colors.warningBorder,
+      color: colors.warningTitle,
+    },
+    btnCloseFull: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    btnCloseFullText: { color: colors.text },
+    label: { color: colors.textSecondary },
+    input: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      color: colors.text,
+    },
+    btnGhost: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    btnGhostText: { color: colors.text },
+    btnPrimary: { backgroundColor: colors.primaryDark },
+  });
 }
 
 const styles = StyleSheet.create({

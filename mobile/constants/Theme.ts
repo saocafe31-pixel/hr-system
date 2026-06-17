@@ -1,8 +1,8 @@
 /**
- * FOLIAGE — โทน Premium Dark (พื้นเข้ม เขียวมะกอก #A6B874 ไฮไลต์ทอง #C2A86B)
+ * FOLIAGE — โทนธีมหลักของแอป
  * อ้างอิงจากแบรนด์แอป / สแปลชจอ
  */
-export const NatureTheme = {
+export const ClassicDarkTheme = {
   colors: {
     /** พื้นหลังหลัก */
     canvas: '#121212',
@@ -77,3 +77,82 @@ export const NatureTheme = {
     scrollBottom: 28,
   },
 } as const;
+
+export type AppThemeId = 'classicDark' | 'foliageLight';
+
+export const FoliageLightTheme = {
+  colors: {
+    /** พื้นหลังหลัก — โทนขาวสะอาดตามภาพแบรนด์ */
+    canvas: '#F8FAF1',
+    /** การ์ด / พื้นผิว */
+    surface: '#FFFFFF',
+    surfaceElevated: '#FFFFFF',
+    surfaceMuted: '#F1F5DF',
+    border: 'rgba(143, 164, 59, 0.48)',
+    borderSoft: 'rgba(143, 164, 59, 0.28)',
+    /** ข้อความ */
+    text: '#25311F',
+    textSecondary: 'rgba(37, 49, 31, 0.74)',
+    textMuted: 'rgba(37, 49, 31, 0.48)',
+    /** แบรนด์ / ปุ่มหลัก */
+    primary: '#A9BB4F',
+    primaryMuted: '#8FA43B',
+    primaryLight: 'rgba(169, 187, 79, 0.24)',
+    primaryDark: '#6F842E',
+    /** ทองนวล — ขอบ / ไฮไลต์ */
+    accentWarm: '#D0AD61',
+    accentWarmLight: 'rgba(208, 173, 97, 0.18)',
+    /** เข้างาน */
+    checkIn: '#9FB348',
+    /** แชท / โทนน้ำ */
+    river: '#5E9E91',
+    riverLight: 'rgba(94, 158, 145, 0.14)',
+    /** ลาป่วย — แถบเน้นแชทเข้า-ออก */
+    leaveSickBar: '#9277C9',
+    leaveSickBg: 'rgba(146, 119, 201, 0.14)',
+    /** ขอเข้าสาย — แชทเข้า-ออก (แถบส้ม) */
+    lateNoticeBar: '#E49353',
+    lateNoticeBg: 'rgba(228, 147, 83, 0.14)',
+    lateNoticeHeaderBg: 'rgba(228, 147, 83, 0.24)',
+    /** แท็บบาร์ */
+    tabBar: '#FFFFFF',
+    tabBarBorder: 'rgba(143, 164, 59, 0.3)',
+    tint: '#8FA43B',
+    /** ข้อผิดพลาด */
+    error: '#C95C5C',
+    errorBg: 'rgba(201, 92, 92, 0.12)',
+    /** การ์ดเตือน */
+    warningBg: 'rgba(208, 173, 97, 0.14)',
+    warningBorder: 'rgba(208, 173, 97, 0.34)',
+    warningTitle: '#9A7430',
+    warningBody: 'rgba(37, 49, 31, 0.7)',
+    warningHint: 'rgba(37, 49, 31, 0.46)',
+    overlay: 'rgba(37, 49, 31, 0.42)',
+    shadow: '#7B8742',
+    /** ชิป / แท็ก */
+    chip: '#EEF3D8',
+    chipActive: 'rgba(175, 194, 90, 0.24)',
+    chipText: 'rgba(37, 49, 31, 0.62)',
+    chipTextActive: '#6F842E',
+    /** ลิงก์ / แอดมิน */
+    link: '#517DA8',
+    linkLight: 'rgba(81, 125, 168, 0.12)',
+    /** ข้อความบนปุ่มสี accent */
+    onAccent: '#FFFFFF',
+  },
+  radius: ClassicDarkTheme.radius,
+  spacing: ClassicDarkTheme.spacing,
+} as const;
+
+/**
+ * Theme base เดิมสำหรับไฟล์ที่ยังใช้ StyleSheet แบบ static อยู่
+ * ต้องคงเป็น Premium Dark เพื่อให้ตัวเลือก "ธีมเดิม" กลับไปโทนดำเดิมจริง
+ */
+export const NatureTheme = ClassicDarkTheme;
+
+export const AppThemes = {
+  classicDark: ClassicDarkTheme,
+  foliageLight: FoliageLightTheme,
+} as const;
+
+export type AppTheme = (typeof AppThemes)[AppThemeId];

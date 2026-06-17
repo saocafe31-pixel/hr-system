@@ -187,6 +187,26 @@ export type WorkScheduleAssignmentRow = {
   created_at: string;
 };
 
+export type EmployeeHolidayDateRow = {
+  id: string;
+  user_id: string;
+  /** วันที่หยุด (YYYY-MM-DD) */
+  holiday_date: string;
+  created_by: string | null;
+  created_at: string;
+};
+
+export type CompanyHolidayDateRow = {
+  id: string;
+  /** วันที่หยุดบริษัท (YYYY-MM-DD) */
+  holiday_date: string;
+  title: string;
+  description: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ChatMessage = {
   id: string;
   user_id: string;

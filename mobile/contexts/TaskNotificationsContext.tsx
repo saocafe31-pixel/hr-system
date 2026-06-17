@@ -12,7 +12,8 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { router } from 'expo-router';
 
 import { FriendlyConfirmModal } from '@/components/FriendlyNoticeModal';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   emitCommunitySeen,
@@ -29,8 +30,6 @@ import type {
   TaskNotificationRow,
 } from '@/lib/types';
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
 const COMMUNITY_SEEN_PREFIX = '@foliage/community_notif_seen_v1';
 
 type TaskNotificationsContextValue = {
@@ -109,6 +108,8 @@ type SnapshotNotifRow = {
 
 export function TaskNotificationsProvider({ children }: { children: React.ReactNode }) {
   const { session } = useAuth();
+  const { theme } = useAppTheme();
+  const styles = useMemo(() => createTaskNotificationStyles(theme), [theme]);
   const uid = session?.user?.id ?? null;
   /** พนักงานทุกคนใช้กระดิ่งได้ — รวมแจ้งเตือนงาน + การถูกกล่าวถึงในแชท */
   const enabled = !!uid;
@@ -632,20 +633,30 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
   );
 }
 
-const styles = StyleSheet.create({
+function createTaskNotificationStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const isLightTheme = c.canvas === '#F8FAF1';
+
+  return StyleSheet.create({
   mgrBack: {
     flex: 1,
     backgroundColor: c.overlay,
     justifyContent: 'flex-end',
   },
   mgrCard: {
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: c.surface,
     borderTopLeftRadius: r.xl,
     borderTopRightRadius: r.xl,
     padding: 18,
     maxHeight: '92%',
     borderWidth: 1,
     borderColor: c.borderSoft,
+    shadowColor: c.shadow,
+    shadowOpacity: isLightTheme ? 0.14 : 0,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: -6 },
+    elevation: isLightTheme ? 4 : 0,
   },
   mgrH1: {
     fontSize: 18,
@@ -664,17 +675,23 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: c.border,
-    backgroundColor: c.surface,
+    borderColor: c.primaryMuted,
+    backgroundColor: c.primaryLight,
   },
   notifReadAllBtnText: { fontSize: 11, color: c.primaryDark, fontWeight: '700' },
   notifRow: {
-    paddingVertical: 8,
+    paddingVertical: 10,
+    paddingHorizontal: isLightTheme ? 10 : 0,
     borderBottomWidth: 1,
-    borderColor: c.warningBorder,
+    borderColor: c.borderSoft,
+    borderRadius: isLightTheme ? r.sm : 0,
+    marginBottom: isLightTheme ? 6 : 0,
+    backgroundColor: isLightTheme ? c.surfaceElevated : 'transparent',
   },
   notifRowUnread: {
     backgroundColor: c.primaryLight,
+    borderLeftWidth: isLightTheme ? 4 : 0,
+    borderLeftColor: c.primaryMuted,
   },
   notifKind: {
     fontSize: 11,
@@ -683,12 +700,12 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     letterSpacing: 0.3,
   },
-  notifBody: { fontSize: 13, color: c.warningBody },
-  notifTime: { fontSize: 11, color: c.warningHint, marginTop: 4 },
+  notifBody: { fontSize: 13, color: c.textSecondary, lineHeight: 18 },
+  notifTime: { fontSize: 11, color: c.textMuted, marginTop: 4 },
   empty: { textAlign: 'center', color: c.textMuted, marginTop: 24 },
   sheetSecondaryBtn: {
     marginTop: 10,
-    backgroundColor: c.surface,
+    backgroundColor: isLightTheme ? c.surfaceMuted : c.surface,
     paddingVertical: 12,
     borderRadius: r.sm,
     alignItems: 'center',
@@ -710,4 +727,5 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 13,
   },
-});
+  });
+}

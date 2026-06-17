@@ -23,14 +23,15 @@ import {
 import { AnnouncementCarousel } from '@/components/AnnouncementCarousel';
 import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { DatePickerField } from '@/components/DatePickerField';
-import { FriendlyNoticeModal } from '@/components/FriendlyNoticeModal';
+import { FriendlyConfirmModal, FriendlyNoticeModal } from '@/components/FriendlyNoticeModal';
 import { LeaveRequestModal } from '@/components/LeaveRequestModal';
 import { LateRequestModal } from '@/components/LateRequestModal';
 import { UserAvatar } from '@/components/UserAvatar';
 import { WellbeingMoodModal } from '@/components/WellbeingMoodModal';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
-import { NatureTheme } from '@/constants/Theme';
+import { NatureTheme, type AppTheme } from '@/constants/Theme';
 import {
   parseAnnouncementSettings,
   type AnnouncementSlide,
@@ -52,12 +53,24 @@ import {
 import { currentYearBangkok } from '@/lib/leaveLateRules';
 import { distanceMeters } from '@/lib/geo';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
+import {
+  companyHolidayMapByDate,
+  fetchCompanyHolidayDates,
+} from '@/lib/companyHolidays';
+import {
+  buildAssignmentByUserDate,
+  buildHolidayByUserDate,
+  resolveScheduleDayStatus,
+  resolvedScheduleDayStatusForUser,
+} from '@/lib/scheduleDayResolution';
 import { priorityColor, sortByPriorityThenCreated } from '@/lib/taskHelpers';
 import { supabase } from '@/lib/supabase';
 import type {
   AttendanceLog,
   AttendanceOvertimeRequestRow,
   Branch,
+  CompanyHolidayDateRow,
+  EmployeeHolidayDateRow,
   TaskPriority,
   WorkScheduleRow,
 } from '@/lib/types';
@@ -119,6 +132,7 @@ type TodayShiftAssignmentRow = {
   work_date: string;
   shift_id: string;
   allowed_branch_id?: number | null;
+  created_at?: string;
 };
 
 type TodayLegacyScheduleRow = {
@@ -161,6 +175,9 @@ type CalendarCell = {
   ymd: string | null;
   rows: MyScheduleCalendarRow[];
   markerSource: 'shift' | 'legacy' | 'memo' | null;
+  companyHoliday: CompanyHolidayDateRow | null;
+  employeeHoliday: boolean;
+  approvedLeave: SummaryLeaveRow | null;
 };
 
 type CalendarChecklistItem = {
@@ -206,6 +223,23 @@ const BREAK_END_MESSAGES_DEFAULT = [
   'ทำงาน ทำงาน ทำงาน',
   'เวลาพักมีมากมายในหลุมศพ แต่ตอนนี้ต้องทำงานแล้วนะ',
 ];
+
+const LEAVE_PROMPT_MESSAGES_DEFAULT = [
+  'กรุณาตรวจสอบยอดวันลาคงเหลือก่อนส่งคำขอ',
+  'หากลาหลายวัน โปรดระบุวันที่ให้ครบถ้วนและแนบหลักฐานถ้าจำเป็น',
+  'คำขอลาจะส่งถึงผู้จัดการเพื่อพิจารณา — รอการอนุมัติก่อนลาจริงนะ',
+];
+
+const HOLIDAY_PROMPT_MESSAGES_DEFAULT = [
+  'วันนี้เป็นวันหยุดตามตาราง — พักผ่อนให้เต็มที่นะ 🌿',
+  'วันนี้ไม่ต้องเข้างานตามกะ — ขอให้มีความสุขกับวันหยุด',
+  'ระบบบันทึกว่าวันนี้เป็นวันหยุดของคุณ — หากมีงานด่วนโปรดประสานหัวหน้าทีม',
+];
+
+type TodayHolidayContext = {
+  title: string;
+  detail?: string;
+};
 
 function bangkokYmd(d: Date): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -324,6 +358,16 @@ function leaveStatusSuffixTh(status: SummaryLeaveRow['status']): string {
   return status === 'pending' ? ' (รออนุมัติ)' : '';
 }
 
+function approvedLeaveForYmd(
+  leaves: SummaryLeaveRow[],
+  ymd: string
+): SummaryLeaveRow | null {
+  for (const row of leaves) {
+    if (ymd >= row.starts_on && ymd <= row.ends_on) return row;
+  }
+  return null;
+}
+
 function lateRequestMinutesByWorkDate(rows: SummaryLateRequestRow[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const row of rows) {
@@ -394,9 +438,16 @@ async function fetchOpenTasksForAttendance(uid: string): Promise<OpenTaskRow[]> 
 
 export default function AttendanceScreen() {
   const toast = useCuteToast();
+  const { themeId, theme } = useAppTheme();
   const { profile, session } = useAuth();
   const router = useRouter();
   const { width } = useWindowDimensions();
+  const isLightTheme = themeId === 'foliageLight';
+  const themeColors = theme.colors;
+  const themeStyles = useMemo(
+    () => (isLightTheme ? createAttendanceLightStyles(themeColors) : null),
+    [isLightTheme, themeColors]
+  );
   const [branches, setBranches] = useState<Branch[]>([]);
   const [logs, setLogs] = useState<AttendanceLog[]>([]);
   const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
@@ -430,6 +481,21 @@ export default function AttendanceScreen() {
   const [breakEndMessages, setBreakEndMessages] = useState<string[]>(
     BREAK_END_MESSAGES_DEFAULT
   );
+  const [leavePromptMessages, setLeavePromptMessages] = useState<string[]>(
+    LEAVE_PROMPT_MESSAGES_DEFAULT
+  );
+  const [leavePromptOpen, setLeavePromptOpen] = useState(false);
+  const [leavePromptMessage, setLeavePromptMessage] = useState('');
+  const [holidayPromptMessages, setHolidayPromptMessages] = useState<string[]>(
+    HOLIDAY_PROMPT_MESSAGES_DEFAULT
+  );
+  const [holidayPromptOpen, setHolidayPromptOpen] = useState(false);
+  const [holidayPromptTitle, setHolidayPromptTitle] = useState('');
+  const [holidayPromptMessage, setHolidayPromptMessage] = useState('');
+  const [todayHolidayContext, setTodayHolidayContext] = useState<TodayHolidayContext | null>(
+    null
+  );
+  const holidayPromptShownRef = useRef<string | null>(null);
   const [nowTick, setNowTick] = useState(() => new Date());
 
   /** หลายสาขาทับซ้อน — เลือกสาขาที่เข้างาน */
@@ -488,6 +554,11 @@ export default function AttendanceScreen() {
     Record<string, { note: string; checklist: CalendarChecklistItem[] }>
   >({});
   const [scheduleMemoYmdSet, setScheduleMemoYmdSet] = useState<Set<string>>(() => new Set());
+  const [companyHolidayRows, setCompanyHolidayRows] = useState<CompanyHolidayDateRow[]>([]);
+  const [scheduleApprovedLeaves, setScheduleApprovedLeaves] = useState<SummaryLeaveRow[]>([]);
+  const [scheduleResolvedHolidayYmds, setScheduleResolvedHolidayYmds] = useState<Set<string>>(
+    () => new Set()
+  );
   const endReminderSentRef = useRef<string | null>(null);
 
   const [branchPickLatLon, setBranchPickLatLon] = useState<{
@@ -543,11 +614,25 @@ export default function AttendanceScreen() {
       uid != null && uid !== ''
         ? supabase
             .from('work_schedule_assignments')
-            .select('work_date, shift_id, allowed_branch_id')
+            .select('work_date, shift_id, allowed_branch_id, created_at')
             .eq('user_id', uid)
             .eq('work_date', todayYmdForLeave)
             .maybeSingle()
         : Promise.resolve({ data: null as TodayShiftAssignmentRow | null });
+    const companyHolTodayReq = supabase
+      .from('company_holiday_dates')
+      .select('title, description')
+      .eq('holiday_date', todayYmdForLeave)
+      .maybeSingle();
+    const empHolTodayReq =
+      uid != null && uid !== ''
+        ? supabase
+            .from('employee_holiday_dates')
+            .select('created_at')
+            .eq('user_id', uid)
+            .eq('holiday_date', todayYmdForLeave)
+            .maybeSingle()
+        : Promise.resolve({ data: null as { created_at: string } | null });
     const legacyScheduleReq =
       uid != null && uid !== ''
         ? supabase
@@ -593,8 +678,12 @@ export default function AttendanceScreen() {
       { data: annRow },
       { data: breakStartRow },
       { data: breakEndRow },
+      { data: leavePromptRow },
+      { data: holidayPromptRow },
       { data: leaveTodayRows },
       { data: shiftAssignmentRow },
+      { data: companyHolTodayRow },
+      { data: empHolTodayRow },
       { data: legacyScheduleRow },
       { data: overtimeRow },
       { data: notifPrefRow },
@@ -617,8 +706,20 @@ export default function AttendanceScreen() {
         .select('value')
         .eq('key', 'attendance_break_end_messages')
         .maybeSingle(),
+      supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'attendance_leave_prompt_messages')
+        .maybeSingle(),
+      supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'attendance_holiday_prompt_messages')
+        .maybeSingle(),
       approvedLeaveTodayReq,
       shiftAssignmentReq,
+      companyHolTodayReq,
+      empHolTodayReq,
       legacyScheduleReq,
       overtimeReq,
       notifPrefsReq,
@@ -646,6 +747,12 @@ export default function AttendanceScreen() {
     setBreakEndMessages(
       parseSettingsMessages(breakEndRow?.value, BREAK_END_MESSAGES_DEFAULT)
     );
+    setLeavePromptMessages(
+      parseSettingsMessages(leavePromptRow?.value, LEAVE_PROMPT_MESSAGES_DEFAULT)
+    );
+    setHolidayPromptMessages(
+      parseSettingsMessages(holidayPromptRow?.value, HOLIDAY_PROMPT_MESSAGES_DEFAULT)
+    );
 
     setOnApprovedLeaveToday(((leaveTodayRows ?? []) as { id: string }[]).length > 0);
     setPendingOvertimeRequest((overtimeRow as OvertimeRequestRow | null) ?? null);
@@ -658,6 +765,23 @@ export default function AttendanceScreen() {
     });
 
     const shiftRow = (shiftAssignmentRow as TodayShiftAssignmentRow | null) ?? null;
+    const companyHolToday =
+      (companyHolTodayRow as { title: string; description?: string | null } | null) ?? null;
+    const empHolToday = (empHolTodayRow as { created_at: string } | null) ?? null;
+    const personalHolidayDay =
+      !!empHolToday &&
+      resolveScheduleDayStatus(shiftRow?.created_at, empHolToday.created_at) === 'holiday';
+    let todayHolCtx: TodayHolidayContext | null = null;
+    if (companyHolToday?.title?.trim()) {
+      todayHolCtx = {
+        title: companyHolToday.title.trim(),
+        detail: companyHolToday.description?.trim() || undefined,
+      };
+    } else if (personalHolidayDay) {
+      todayHolCtx = {
+        title: 'วันหยุดส่วนตัว',
+      };
+    }
     const shiftData = shiftRow?.shift_id
       ? await supabase
           .from('work_shifts')
@@ -725,6 +849,14 @@ export default function AttendanceScreen() {
       }
     }
 
+    if (todayHolCtx) {
+      setTodayHolidayContext(todayHolCtx);
+      setTodayWorkPlan(null);
+      setTodayPlanLabel(`วันนี้: วันหยุด — ${todayHolCtx.title}`);
+    } else {
+      setTodayHolidayContext(null);
+    }
+
     if (uid) {
       const em = await fetchLatestTodayEmojiByUserIds([uid]);
       setMyTodayEmoji(em[uid] ?? null);
@@ -764,6 +896,43 @@ export default function AttendanceScreen() {
     () => new Set(scheduleCalendarRows.map((r) => r.ymd)).size,
     [scheduleCalendarRows]
   );
+  const scheduleLeaveDaysCount = useMemo(() => {
+    const { startYmd, endYmd } = scheduleMonthPeriod;
+    const days = new Set<string>();
+    for (const row of scheduleApprovedLeaves) {
+      for (const ymd of listYmdRange(row.starts_on, row.ends_on)) {
+        if (ymd >= startYmd && ymd <= endYmd) days.add(ymd);
+      }
+    }
+    return days.size;
+  }, [scheduleApprovedLeaves, scheduleMonthPeriod]);
+  const scheduleHolidayDaysCount = useMemo(() => {
+    const { startYmd, endYmd } = scheduleMonthPeriod;
+    let count = 0;
+    for (const ymd of listYmdRange(startYmd, endYmd)) {
+      if (scheduleResolvedHolidayYmds.has(ymd)) count += 1;
+    }
+    return count;
+  }, [scheduleMonthPeriod, scheduleResolvedHolidayYmds]);
+  const companyHolidayByDate = useMemo(
+    () => companyHolidayMapByDate(companyHolidayRows),
+    [companyHolidayRows]
+  );
+  const selectedScheduleCompanyHoliday = useMemo(
+    () => (scheduleSelectedYmd ? companyHolidayByDate.get(scheduleSelectedYmd) ?? null : null),
+    [companyHolidayByDate, scheduleSelectedYmd]
+  );
+  const selectedScheduleEmployeeHoliday = useMemo(
+    () => !!(scheduleSelectedYmd && scheduleResolvedHolidayYmds.has(scheduleSelectedYmd)),
+    [scheduleResolvedHolidayYmds, scheduleSelectedYmd]
+  );
+  const selectedScheduleApprovedLeave = useMemo(
+    () =>
+      scheduleSelectedYmd
+        ? approvedLeaveForYmd(scheduleApprovedLeaves, scheduleSelectedYmd)
+        : null,
+    [scheduleApprovedLeaves, scheduleSelectedYmd]
+  );
   const scheduleGridCells = useMemo(() => {
     const { startYmd, endYmd } = scheduleMonthPeriod;
     const first = ymdToDate(startYmd);
@@ -771,22 +940,58 @@ export default function AttendanceScreen() {
     const lead = (firstDowSun0 + 6) % 7; // Monday-first calendar
     const dates = listYmdRange(startYmd, endYmd);
     const cells: CalendarCell[] = [];
-    for (let i = 0; i < lead; i += 1) cells.push({ ymd: null, rows: [], markerSource: null });
+    for (let i = 0; i < lead; i += 1) {
+      cells.push({
+        ymd: null,
+        rows: [],
+        markerSource: null,
+        companyHoliday: null,
+        employeeHoliday: false,
+        approvedLeave: null,
+      });
+    }
     for (const ymd of dates) {
       const rows = scheduleRowsByYmd.get(ymd) ?? [];
       const hasMemo = scheduleMemoYmdSet.has(ymd);
-      const markerSource = rows.find((r) => r.source === 'shift')
-        ? 'shift'
-        : rows.length > 0
-          ? 'legacy'
-          : hasMemo
-            ? 'memo'
-            : null;
-      cells.push({ ymd, rows, markerSource });
+      const approvedLeave = approvedLeaveForYmd(scheduleApprovedLeaves, ymd);
+      const employeeHoliday = scheduleResolvedHolidayYmds.has(ymd);
+      const markerSource = approvedLeave || employeeHoliday
+        ? null
+        : rows.find((r) => r.source === 'shift')
+          ? 'shift'
+          : rows.length > 0
+            ? 'legacy'
+            : hasMemo
+              ? 'memo'
+              : null;
+      cells.push({
+        ymd,
+        rows,
+        markerSource,
+        companyHoliday: companyHolidayByDate.get(ymd) ?? null,
+        employeeHoliday,
+        approvedLeave,
+      });
     }
-    while (cells.length % 7 !== 0) cells.push({ ymd: null, rows: [], markerSource: null });
+    while (cells.length % 7 !== 0) {
+      cells.push({
+        ymd: null,
+        rows: [],
+        markerSource: null,
+        companyHoliday: null,
+        employeeHoliday: false,
+        approvedLeave: null,
+      });
+    }
     return cells;
-  }, [scheduleMonthPeriod, scheduleRowsByYmd, scheduleMemoYmdSet]);
+  }, [
+    scheduleMonthPeriod,
+    scheduleRowsByYmd,
+    scheduleMemoYmdSet,
+    companyHolidayByDate,
+    scheduleApprovedLeaves,
+    scheduleResolvedHolidayYmds,
+  ]);
   const todayYmdInBangkok = useMemo(() => bangkokYmd(new Date()), []);
   const selectedScheduleRows = useMemo(() => {
     if (!scheduleSelectedYmd) return scheduleCalendarRows;
@@ -1069,6 +1274,20 @@ export default function AttendanceScreen() {
       scheduleReload();
     }, [scheduleReload])
   );
+
+  useEffect(() => {
+    if (loading || !todayHolidayContext) return;
+    const today = bangkokYmd(new Date());
+    if (holidayPromptShownRef.current === today) return;
+    const base = pickRandomMessage(holidayPromptMessages);
+    const parts = [base, todayHolidayContext.detail].filter(Boolean);
+    setHolidayPromptTitle(`วันนี้เป็นวันหยุด: ${todayHolidayContext.title}`);
+    setHolidayPromptMessage(
+      parts.join('\n\n') || 'วันนี้เป็นวันหยุดตามตาราง — ขอให้พักผ่อนให้เต็มที่'
+    );
+    setHolidayPromptOpen(true);
+    holidayPromptShownRef.current = today;
+  }, [loading, todayHolidayContext, holidayPromptMessages]);
 
   useEffect(() => {
     const off = onLeaveStatusChanged(() => {
@@ -1801,6 +2020,20 @@ export default function AttendanceScreen() {
     }
   }
 
+  function requestLeave() {
+    if (onApprovedLeaveToday) return;
+    const msg = pickRandomMessage(leavePromptMessages);
+    setLeavePromptMessage(
+      msg || 'กรุณาตรวจสอบรายละเอียดก่อนส่งคำขอลา'
+    );
+    setLeavePromptOpen(true);
+  }
+
+  function confirmLeavePrompt() {
+    setLeavePromptOpen(false);
+    setLeaveModalOpen(true);
+  }
+
   async function markBreak(kind: 'break_start' | 'break_end') {
     if (!session?.user?.id) return;
     if (onApprovedLeaveToday) {
@@ -1982,10 +2215,11 @@ export default function AttendanceScreen() {
     const { startYmd, endYmd } = scheduleMonthPeriod;
     setScheduleCalendarLoading(true);
     try {
-      const [assignmentRes, legacyRes, memoRes] = await Promise.all([
+      const [assignmentRes, legacyRes, memoRes, companyHolRes, empHolRes, leaveRes] =
+        await Promise.all([
         supabase
           .from('work_schedule_assignments')
-          .select('work_date, shift_id, allowed_branch_id')
+          .select('work_date, shift_id, allowed_branch_id, created_at')
           .eq('user_id', uid)
           .gte('work_date', startYmd)
           .lte('work_date', endYmd)
@@ -2003,6 +2237,20 @@ export default function AttendanceScreen() {
           .eq('user_id', uid)
           .gte('work_date', startYmd)
           .lte('work_date', endYmd),
+        fetchCompanyHolidayDates({ startYmd, endYmd }).catch(() => [] as CompanyHolidayDateRow[]),
+        supabase
+          .from('employee_holiday_dates')
+          .select('id, user_id, holiday_date, created_at')
+          .eq('user_id', uid)
+          .gte('holiday_date', startYmd)
+          .lte('holiday_date', endYmd),
+        supabase
+          .from('leave_requests')
+          .select('starts_on, ends_on, leave_type, status')
+          .eq('user_id', uid)
+          .eq('status', 'approved')
+          .lte('starts_on', endYmd)
+          .gte('ends_on', startYmd),
       ]);
       if (assignmentRes.error) {
         throw new Error(`โหลดมอบหมายกะไม่สำเร็จ: ${assignmentRes.error.message}`);
@@ -2014,8 +2262,47 @@ export default function AttendanceScreen() {
         throw new Error(`โหลดโน้ตปฏิทินไม่สำเร็จ: ${memoRes.error.message}`);
       }
 
-      const assignments = (assignmentRes.data ??
-        []) as Array<{ work_date: string; shift_id: string; allowed_branch_id?: number | null }>;
+      const approvedLeaves = ((leaveRes.data ?? []) as SummaryLeaveRow[]) ?? [];
+      setScheduleApprovedLeaves(approvedLeaves);
+
+      const employeeHolidayRows = ((empHolRes.data ?? []) as EmployeeHolidayDateRow[]) ?? [];
+      const holidayByUserDate = buildHolidayByUserDate(employeeHolidayRows);
+
+      const assignments = (assignmentRes.data ?? []) as Array<{
+        work_date: string;
+        shift_id: string;
+        allowed_branch_id?: number | null;
+        created_at?: string;
+      }>;
+      const assignmentByUserDate = buildAssignmentByUserDate(
+        assignments.map((row) => ({
+          user_id: uid,
+          work_date: row.work_date,
+          created_at: row.created_at ?? '',
+        }))
+      );
+      const resolvedHolidayYmds = new Set<string>();
+      for (const row of employeeHolidayRows) {
+        const status = resolvedScheduleDayStatusForUser(
+          uid,
+          row.holiday_date,
+          holidayByUserDate,
+          assignmentByUserDate
+        );
+        if (status === 'holiday') resolvedHolidayYmds.add(row.holiday_date);
+      }
+      setScheduleResolvedHolidayYmds(resolvedHolidayYmds);
+
+      const dayShowsWork = (ymd: string) => {
+        if (approvedLeaveForYmd(approvedLeaves, ymd)) return false;
+        const status = resolvedScheduleDayStatusForUser(
+          uid,
+          ymd,
+          holidayByUserDate,
+          assignmentByUserDate
+        );
+        return status !== 'holiday';
+      };
       const branchNameById = new Map<number, string>();
       for (const br of branches) {
         branchNameById.set(br.id, br.branch_name || br.branch_code || `สาขา ${br.id}`);
@@ -2083,9 +2370,11 @@ export default function AttendanceScreen() {
         }
       }
       setScheduleMemoYmdSet(nextMemoYmd);
+      setCompanyHolidayRows(companyHolRes);
 
       const out: MyScheduleCalendarRow[] = [];
       for (const ymd of listYmdRange(startYmd, endYmd)) {
+        if (!dayShowsWork(ymd)) continue;
         const shift = dailyShiftMap.get(ymd);
         if (shift) {
           out.push(shift);
@@ -2103,7 +2392,15 @@ export default function AttendanceScreen() {
         }
       }
       setScheduleCalendarRows(out);
-      if (out.length === 0) {
+      const hasCompanyHol = companyHolRes.some(
+        (h) => h.holiday_date >= startYmd && h.holiday_date <= endYmd
+      );
+      if (
+        out.length === 0 &&
+        resolvedHolidayYmds.size === 0 &&
+        approvedLeaves.length === 0 &&
+        !hasCompanyHol
+      ) {
         toast.info(
           'ไม่พบตารางในเดือนนี้',
           'ตรวจสอบว่าบัญชีนี้ถูกมอบหมายกะ/ตารางงานในเดือนที่เลือกแล้ว'
@@ -2138,6 +2435,16 @@ export default function AttendanceScreen() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'work_schedules' },
+        () => void loadScheduleCalendar()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'employee_holiday_dates' },
+        () => void loadScheduleCalendar()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'leave_requests' },
         () => void loadScheduleCalendar()
       )
       .subscribe();
@@ -2234,7 +2541,7 @@ export default function AttendanceScreen() {
   const uid = session?.user?.id ?? '';
 
   return (
-    <View style={styles.screen}>
+    <View style={[styles.screen, themeStyles?.screen]}>
       {uid ? (
         <>
           <LeaveRequestModal
@@ -2259,10 +2566,12 @@ export default function AttendanceScreen() {
         transparent
         animationType="fade"
         onRequestClose={cancelBranchPick}>
-        <Pressable style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]} onPress={cancelBranchPick}>
-          <Pressable style={styles.sheetCardTall} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>เลือกสาขาที่เข้างาน</Text>
-            <Text style={styles.sheetSub}>
+        <Pressable
+          style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]}
+          onPress={cancelBranchPick}>
+          <Pressable style={[styles.sheetCardTall, themeStyles?.sheetCardTall]} onPress={() => {}}>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>เลือกสาขาที่เข้างาน</Text>
+            <Text style={[styles.sheetSub, themeStyles?.sheetSub]}>
               ตำแหน่งของคุณอยู่ในรัศมีหลายสาขา — กรุณาเลือกสาขาที่กำลังเข้างาน
             </Text>
             <ScrollView
@@ -2277,19 +2586,22 @@ export default function AttendanceScreen() {
                     key={m.br.id}
                     style={({ pressed }) => [
                       styles.branchPickRow,
+                      themeStyles?.branchPickRow,
                       pressed && styles.branchPickRowPressed,
                     ]}
                     onPress={() => selectBranchForCheckIn(m)}>
-                    <Text style={styles.branchPickName}>{label}</Text>
-                    <Text style={styles.branchPickDist}>
+                    <Text style={[styles.branchPickName, themeStyles?.branchPickName]}>{label}</Text>
+                    <Text style={[styles.branchPickDist, themeStyles?.branchPickDist]}>
                       ห่าง ~{Math.round(m.distanceM)} ม.
                     </Text>
                   </Pressable>
                 );
               })}
             </ScrollView>
-            <Pressable style={styles.sheetSecondaryBtn} onPress={cancelBranchPick}>
-              <Text style={styles.sheetSecondaryBtnText}>ยกเลิก</Text>
+            <Pressable
+              style={[styles.sheetSecondaryBtn, themeStyles?.sheetSecondaryBtn]}
+              onPress={cancelBranchPick}>
+              <Text style={[styles.sheetSecondaryBtnText, themeStyles?.sheetSecondaryBtnText]}>ยกเลิก</Text>
             </Pressable>
           </Pressable>
         </Pressable>
@@ -2300,39 +2612,41 @@ export default function AttendanceScreen() {
         transparent
         animationType="slide"
         onRequestClose={cancelOffSite}>
-        <Pressable style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]} onPress={cancelOffSite}>
-          <Pressable style={styles.sheetCardTall} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>เข้างานนอกรัศมีสาขา</Text>
-            <Text style={styles.sheetSub}>
+        <Pressable
+          style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]}
+          onPress={cancelOffSite}>
+          <Pressable style={[styles.sheetCardTall, themeStyles?.sheetCardTall]} onPress={() => {}}>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>เข้างานนอกรัศมีสาขา</Text>
+            <Text style={[styles.sheetSub, themeStyles?.sheetSub]}>
               ระบุตำแหน่งหรือสถานที่ทำงานปัจจุบัน และหมายเหตุ (เช่น WFH
               / ทำงานนอกสถานที่)
             </Text>
-            <Text style={styles.offSiteLabel}>ตำแหน่ง / สถานที่</Text>
+            <Text style={[styles.offSiteLabel, themeStyles?.offSiteLabel]}>ตำแหน่ง / สถานที่</Text>
             <TextInput
-              style={styles.offSiteInput}
+              style={[styles.offSiteInput, themeStyles?.offSiteInput]}
               value={offSiteLocation}
               onChangeText={(t) => setOffSiteLocation(t.slice(0, 200))}
               placeholder="เช่น บ้าน · ไซต์ลูกค้า สีลม"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={themeColors.textMuted}
               multiline
             />
-            <Text style={styles.offSiteLabel}>หมายเหตุ</Text>
+            <Text style={[styles.offSiteLabel, themeStyles?.offSiteLabel]}>หมายเหตุ</Text>
             <TextInput
-              style={styles.offSiteInput}
+              style={[styles.offSiteInput, themeStyles?.offSiteInput]}
               value={offSiteRemark}
               onChangeText={(t) => setOffSiteRemark(t.slice(0, 200))}
               placeholder="เช่น WFH · ประชุมนอกสถานที่"
-              placeholderTextColor={NatureTheme.colors.textMuted}
+              placeholderTextColor={themeColors.textMuted}
               multiline
             />
             <View style={styles.offSiteActions}>
               <Pressable
-                style={[styles.sheetSecondaryBtn, styles.offSiteActionBtn]}
+                style={[styles.sheetSecondaryBtn, themeStyles?.sheetSecondaryBtn, styles.offSiteActionBtn]}
                 onPress={cancelOffSite}>
-                <Text style={styles.sheetSecondaryBtnText}>ยกเลิก</Text>
+                <Text style={[styles.sheetSecondaryBtnText, themeStyles?.sheetSecondaryBtnText]}>ยกเลิก</Text>
               </Pressable>
               <Pressable
-                style={[styles.sheetPrimaryBtn, styles.offSiteActionBtn]}
+                style={[styles.sheetPrimaryBtn, themeStyles?.sheetPrimaryBtn, styles.offSiteActionBtn]}
                 onPress={confirmOffSiteCheckIn}>
                 <Text style={styles.sheetPrimaryBtnText}>ถัดไป (เลือกอารมณ์)</Text>
               </Pressable>
@@ -2354,19 +2668,19 @@ export default function AttendanceScreen() {
         animationType="fade"
         onRequestClose={() => setCheckOutConfirmOpen(false)}>
         <Pressable
-          style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]}
+          style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]}
           onPress={() => setCheckOutConfirmOpen(false)}>
-          <Pressable style={styles.sheetCard} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>ยืนยันบันทึกออกงาน</Text>
-            <Text style={styles.sheetBody}>ต้องการบันทึกเวลาออกงานตอนนี้ใช่ไหม?</Text>
+          <Pressable style={[styles.sheetCard, themeStyles?.sheetCard]} onPress={() => {}}>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>ยืนยันบันทึกออกงาน</Text>
+            <Text style={[styles.sheetBody, themeStyles?.sheetBody]}>ต้องการบันทึกเวลาออกงานตอนนี้ใช่ไหม?</Text>
             <View style={styles.sheetActionRow}>
               <Pressable
-                style={[styles.sheetSecondaryBtn, styles.sheetActionHalf]}
+                style={[styles.sheetSecondaryBtn, themeStyles?.sheetSecondaryBtn, styles.sheetActionHalf]}
                 onPress={() => setCheckOutConfirmOpen(false)}>
-                <Text style={styles.sheetSecondaryBtnText}>ยกเลิก</Text>
+                <Text style={[styles.sheetSecondaryBtnText, themeStyles?.sheetSecondaryBtnText]}>ยกเลิก</Text>
               </Pressable>
               <Pressable
-                style={[styles.sheetPrimaryBtn, styles.sheetActionHalf]}
+                style={[styles.sheetPrimaryBtn, themeStyles?.sheetPrimaryBtn, styles.sheetActionHalf]}
                 onPress={() => {
                   setCheckOutConfirmOpen(false);
                   void startAttendance('check_out');
@@ -2384,15 +2698,15 @@ export default function AttendanceScreen() {
         animationType="fade"
         onRequestClose={() => setCheckoutDoneOpen(false)}>
         <Pressable
-          style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]}
+          style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]}
           onPress={() => setCheckoutDoneOpen(false)}>
-          <Pressable style={styles.sheetCard} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>บันทึกออกงานแล้ว</Text>
-            <Text style={styles.sheetBody}>
+          <Pressable style={[styles.sheetCard, themeStyles?.sheetCard]} onPress={() => {}}>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>บันทึกออกงานแล้ว</Text>
+            <Text style={[styles.sheetBody, themeStyles?.sheetBody]}>
               ขอให้พักผ่อนพอดี และเดินทางปลอดภัยนะครับ
             </Text>
             <Pressable
-              style={styles.sheetPrimaryBtn}
+              style={[styles.sheetPrimaryBtn, themeStyles?.sheetPrimaryBtn]}
               onPress={() => setCheckoutDoneOpen(false)}>
               <Text style={styles.sheetPrimaryBtnText}>ปิด</Text>
             </Pressable>
@@ -2406,11 +2720,11 @@ export default function AttendanceScreen() {
         animationType="slide"
         onRequestClose={() => setPostCheckInOpen(false)}>
         <Pressable
-          style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]}
+          style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]}
           onPress={() => setPostCheckInOpen(false)}>
-          <Pressable style={styles.sheetCardTall} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>งานที่ยังต้องทำ</Text>
-            <Text style={styles.sheetSub}>
+          <Pressable style={[styles.sheetCardTall, themeStyles?.sheetCardTall]} onPress={() => {}}>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>งานที่ยังต้องทำ</Text>
+            <Text style={[styles.sheetSub, themeStyles?.sheetSub]}>
               รายการจากสถานะ «รอดำเนินการ» และ «กำลังทำ»
             </Text>
             <ScrollView
@@ -2418,16 +2732,16 @@ export default function AttendanceScreen() {
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}>
               {postCheckInTasks.length === 0 ? (
-                <Text style={styles.emptyTasksMsg}>
+                  <Text style={[styles.emptyTasksMsg, themeStyles?.workPlan]}>
                   วันนี้ไม่มีงานค้างเลย คุณจัดการงานได้ดีมาก
                 </Text>
               ) : (
                 postCheckInTasks.map((t) => (
-                  <View key={t.id} style={styles.taskRow}>
-                    <Text style={styles.taskTitle} numberOfLines={2}>
+                  <View key={t.id} style={[styles.taskRow, themeStyles?.taskRow]}>
+                    <Text style={[styles.taskTitle, themeStyles?.taskTitle]} numberOfLines={2}>
                       {t.title}
                     </Text>
-                    <Text style={styles.taskMeta}>
+                    <Text style={[styles.taskMeta, themeStyles?.taskMeta]}>
                       {taskStatusLabelTh(t.status)}
                     </Text>
                   </View>
@@ -2437,16 +2751,16 @@ export default function AttendanceScreen() {
             <View style={styles.sheetActions}>
               {postCheckInTasks.length > 0 ? (
                 <Pressable
-                  style={styles.sheetSecondaryBtn}
+                  style={[styles.sheetSecondaryBtn, themeStyles?.sheetSecondaryBtn]}
                   onPress={() => {
                     setPostCheckInOpen(false);
                     router.push('/tasks');
                   }}>
-                  <Text style={styles.sheetSecondaryBtnText}>ไปหน้างาน</Text>
+                  <Text style={[styles.sheetSecondaryBtnText, themeStyles?.sheetSecondaryBtnText]}>ไปหน้างาน</Text>
                 </Pressable>
               ) : null}
               <Pressable
-                style={styles.sheetPrimaryBtn}
+                style={[styles.sheetPrimaryBtn, themeStyles?.sheetPrimaryBtn]}
                 onPress={() => setPostCheckInOpen(false)}>
                 <Text style={styles.sheetPrimaryBtnText}>ปิด</Text>
               </Pressable>
@@ -2460,10 +2774,10 @@ export default function AttendanceScreen() {
         transparent
         animationType="fade"
         onRequestClose={closeEarlyOvertimePrompt}>
-        <Pressable style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]} onPress={() => {}}>
-          <Pressable style={styles.sheetCard} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>ขออนุมัติ OT ก่อนเวลา?</Text>
-            <Text style={styles.sheetBody}>
+        <Pressable style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]} onPress={() => {}}>
+          <Pressable style={[styles.sheetCard, themeStyles?.sheetCard]} onPress={() => {}}>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>ขออนุมัติ OT ก่อนเวลา?</Text>
+            <Text style={[styles.sheetBody, themeStyles?.sheetBody]}>
               คุณเข้างานก่อนเวลางาน 1 ชั่วโมง ต้องการขออนุมัติโอทีหรือไม่
             </Text>
             {earlyOvertimePrompt ? (
@@ -2472,24 +2786,30 @@ export default function AttendanceScreen() {
                 {earlyOvertimePrompt.minutes} นาที
               </Text>
             ) : null}
-            <Text style={styles.offSiteLabel}>เหตุผลในการทำงานล่วงเวลา</Text>
+            <Text style={[styles.offSiteLabel, themeStyles?.offSiteLabel]}>เหตุผลในการทำงานล่วงเวลา</Text>
             <TextInput
-              style={styles.offSiteInput}
+              style={[styles.offSiteInput, themeStyles?.offSiteInput]}
               value={earlyOvertimeReason}
               onChangeText={setEarlyOvertimeReason}
               placeholder="เช่น เตรียมงานเปิดร้าน / รับออเดอร์ด่วน / เคลียร์งานค้าง"
+              placeholderTextColor={themeColors.textMuted}
               multiline
             />
             <View style={styles.sheetActions}>
               <Pressable
-                style={[styles.sheetSecondaryBtn, earlyOvertimeSaving && styles.disabled]}
+                style={[
+                  styles.sheetSecondaryBtn,
+                  themeStyles?.sheetSecondaryBtn,
+                  earlyOvertimeSaving && styles.disabled,
+                ]}
                 disabled={earlyOvertimeSaving}
                 onPress={closeEarlyOvertimePrompt}>
-                <Text style={styles.sheetSecondaryBtnText}>ไม่ขอ OT</Text>
+                <Text style={[styles.sheetSecondaryBtnText, themeStyles?.sheetSecondaryBtnText]}>ไม่ขอ OT</Text>
               </Pressable>
               <Pressable
                 style={[
                   styles.sheetPrimaryBtn,
+                  themeStyles?.sheetPrimaryBtn,
                   (earlyOvertimeSaving || !earlyOvertimeReason.trim()) && styles.disabled,
                 ]}
                 disabled={earlyOvertimeSaving || !earlyOvertimeReason.trim()}
@@ -2508,21 +2828,22 @@ export default function AttendanceScreen() {
         transparent
         animationType="fade"
         onRequestClose={() => {}}>
-        <Pressable style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]} onPress={() => {}}>
-          <Pressable style={styles.sheetCard} onPress={() => {}}>
-            <Text style={styles.sheetTitle}>ทำงานล่วงเวลา?</Text>
-            <Text style={styles.sheetBody}>
+        <Pressable style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]} onPress={() => {}}>
+          <Pressable style={[styles.sheetCard, themeStyles?.sheetCard]} onPress={() => {}}>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>ทำงานล่วงเวลา?</Text>
+            <Text style={[styles.sheetBody, themeStyles?.sheetBody]}>
               ถึงเวลาออกงานตามตารางแล้ว ต้องการทำ OT ต่อหรือออกงานเลย?
             </Text>
             <Text style={styles.otHintText}>
               ถ้าทำ OT ต่อ ต้องระบุเหตุผล และระบบจะส่งคำขอให้หัวหน้า/HR หลังคุณกดออกงาน
             </Text>
-            <Text style={styles.offSiteLabel}>เหตุผลในการทำงานล่วงเวลา</Text>
+            <Text style={[styles.offSiteLabel, themeStyles?.offSiteLabel]}>เหตุผลในการทำงานล่วงเวลา</Text>
             <TextInput
-              style={styles.offSiteInput}
+              style={[styles.offSiteInput, themeStyles?.offSiteInput]}
               value={otReason}
               onChangeText={setOtReason}
               placeholder="เช่น เคลียร์งานปิดร้าน / ลูกค้าเยอะ / งานด่วน"
+              placeholderTextColor={themeColors.textMuted}
               multiline
             />
             {pendingOvertimeRequest?.response_deadline_at ? (
@@ -2541,14 +2862,19 @@ export default function AttendanceScreen() {
             ) : null}
             <View style={styles.sheetActions}>
               <Pressable
-                style={[styles.sheetSecondaryBtn, otResponding && styles.disabled]}
+                style={[
+                  styles.sheetSecondaryBtn,
+                  themeStyles?.sheetSecondaryBtn,
+                  otResponding && styles.disabled,
+                ]}
                 disabled={otResponding}
                 onPress={() => void respondOvertime(false)}>
-                <Text style={styles.sheetSecondaryBtnText}>ออกงานเลย</Text>
+                <Text style={[styles.sheetSecondaryBtnText, themeStyles?.sheetSecondaryBtnText]}>ออกงานเลย</Text>
               </Pressable>
               <Pressable
                 style={[
                   styles.sheetPrimaryBtn,
+                  themeStyles?.sheetPrimaryBtn,
                   (otResponding || !otReason.trim()) && styles.disabled,
                 ]}
                 disabled={otResponding || !otReason.trim()}
@@ -2564,57 +2890,61 @@ export default function AttendanceScreen() {
         transparent
         animationType="slide"
         onRequestClose={() => setScheduleCalendarOpen(false)}>
-        <View style={[styles.sheetBackdrop, WEB_MODAL_BACKDROP]}>
+        <View style={[styles.sheetBackdrop, themeStyles?.sheetBackdrop, WEB_MODAL_BACKDROP]}>
           <Pressable
             style={StyleSheet.absoluteFill}
             onPress={() => setScheduleCalendarOpen(false)}
           />
-          <View style={[styles.sheetCardTall, styles.calendarSheetCard]}>
+          <View style={[styles.sheetCardTall, themeStyles?.sheetCardTall, styles.calendarSheetCard]}>
             <ScrollView
               style={styles.calendarModalScroll}
               contentContainerStyle={styles.calendarModalContent}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator>
-            <Text style={styles.sheetTitle}>ปฏิทินตารางงานของฉัน</Text>
-            <Text style={styles.sheetSub}>มุมมองรายเดือน · แตะวันที่เพื่อดูรายละเอียด</Text>
+            <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>ปฏิทินตารางงานของฉัน</Text>
+            <Text style={[styles.sheetSub, themeStyles?.sheetSub]}>มุมมองรายเดือน · แตะวันที่เพื่อดูรายละเอียด</Text>
             <View style={styles.monthNavRow}>
               <Pressable
-                style={styles.monthNavBtn}
+                style={[styles.monthNavBtn, themeStyles?.monthNavBtn]}
                 onPress={() =>
                   setScheduleCalendarAnchorDate((prev) => addMonthsLocal(prev ?? new Date(), -1))
                 }>
-                <Text style={styles.monthNavBtnText}>{'< เดือนก่อน'}</Text>
+                <Text style={[styles.monthNavBtnText, themeStyles?.monthNavBtnText]}>{'< เดือนก่อน'}</Text>
               </Pressable>
-              <Text style={styles.monthNavLabel}>
+              <Text style={[styles.monthNavLabel, themeStyles?.monthNavLabel]}>
                 {(scheduleCalendarAnchorDate ?? new Date()).toLocaleDateString('th-TH', {
                   month: 'long',
                   year: 'numeric',
                 })}
               </Text>
               <Pressable
-                style={styles.monthNavBtn}
+                style={[styles.monthNavBtn, themeStyles?.monthNavBtn]}
                 onPress={() =>
                   setScheduleCalendarAnchorDate((prev) => addMonthsLocal(prev ?? new Date(), 1))
                 }>
-                <Text style={styles.monthNavBtnText}>{'เดือนถัดไป >'}</Text>
+                <Text style={[styles.monthNavBtnText, themeStyles?.monthNavBtnText]}>{'เดือนถัดไป >'}</Text>
               </Pressable>
             </View>
-            <Text style={styles.legendSummaryText}>มีตารางงาน {scheduleDaysCount} วัน</Text>
+            <Text style={[styles.legendSummaryText, themeStyles?.legendSummaryText]}>
+              มีตารางงาน {scheduleDaysCount} วัน
+              {scheduleHolidayDaysCount > 0 ? ` · วันหยุด ${scheduleHolidayDaysCount} วัน` : ''}
+              {scheduleLeaveDaysCount > 0 ? ` · ลา ${scheduleLeaveDaysCount} วัน` : ''}
+            </Text>
             {scheduleCalendarLoading ? (
-              <ActivityIndicator color={NatureTheme.colors.primary} style={{ marginVertical: 18 }} />
-            ) : scheduleCalendarRows.length === 0 ? (
-              <Text style={styles.emptyTasksMsg}>เดือนนี้ยังไม่มีตารางงานที่ถูกมอบหมาย</Text>
+              <ActivityIndicator color={themeColors.primary} style={{ marginVertical: 18 }} />
             ) : (
               <>
-                <Text style={styles.calendarTapHint}>แตะวันที่ในปฏิทินเพื่อดูตารางงานของวันนั้น</Text>
+                <Text style={[styles.calendarTapHint, themeStyles?.calendarTapHint]}>
+                  แตะวันที่ในปฏิทินเพื่อดูตารางงาน วันหยุด และการลาของวันนั้น
+                </Text>
                 <View style={styles.calendarWeekHeader}>
                   {['จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส', 'อา'].map((d) => (
-                    <Text key={d} style={styles.calendarWeekHeaderText}>
+                    <Text key={d} style={[styles.calendarWeekHeaderText, themeStyles?.calendarWeekHeaderText]}>
                       {d}
                     </Text>
                   ))}
                 </View>
-                <View style={styles.calendarGrid}>
+                <View style={[styles.calendarGrid, themeStyles?.calendarGrid]}>
                   {scheduleGridCells.map((cell, idx) => {
                     const dayText = cell.ymd ? String(Number(cell.ymd.slice(8, 10))) : '';
                     const selected = !!cell.ymd && cell.ymd === scheduleSelectedYmd;
@@ -2624,8 +2954,11 @@ export default function AttendanceScreen() {
                         key={`${cell.ymd ?? 'blank'}-${idx}`}
                         style={[
                           styles.calendarCell,
+                          themeStyles?.calendarCell,
                           isToday && styles.calendarCellToday,
+                          isToday && themeStyles?.calendarCellToday,
                           selected && styles.calendarCellSelected,
+                          selected && themeStyles?.calendarCellSelected,
                         ]}
                         disabled={!cell.ymd}
                         onPress={() => {
@@ -2634,12 +2967,44 @@ export default function AttendanceScreen() {
                         <Text
                           style={[
                             styles.calendarDayNumber,
+                            themeStyles?.calendarDayNumber,
                             !cell.ymd && styles.calendarDayNumberMuted,
                             isToday && styles.calendarDayNumberToday,
+                            isToday && themeStyles?.calendarDayNumberToday,
                             selected && styles.calendarDayNumberSelected,
+                            selected && themeStyles?.calendarDayNumberSelected,
                           ]}>
                           {dayText}
                         </Text>
+                        {cell.companyHoliday ? (
+                          <Text
+                            style={[
+                              styles.calendarCompanyHolidayText,
+                              themeStyles?.calendarCompanyHolidayText,
+                            ]}
+                            numberOfLines={1}>
+                            {cell.companyHoliday.title}
+                          </Text>
+                        ) : null}
+                        {cell.approvedLeave ? (
+                          <Text
+                            style={[
+                              styles.calendarLeaveText,
+                              themeStyles?.calendarLeaveText,
+                            ]}
+                            numberOfLines={1}>
+                            {leaveTypeLabelTh(cell.approvedLeave.leave_type)}
+                          </Text>
+                        ) : cell.employeeHoliday ? (
+                          <Text
+                            style={[
+                              styles.calendarEmployeeHolidayText,
+                              themeStyles?.calendarEmployeeHolidayText,
+                            ]}
+                            numberOfLines={1}>
+                            วันหยุด
+                          </Text>
+                        ) : null}
                         {cell.markerSource ? (
                           <View
                             style={[
@@ -2653,7 +3018,7 @@ export default function AttendanceScreen() {
                           />
                         ) : null}
                         {cell.markerSource ? (
-                          <Text style={styles.calendarMiniCount}>
+                          <Text style={[styles.calendarMiniCount, themeStyles?.calendarMiniCount]}>
                             {cell.rows.length > 0 ? 'มีงาน' : 'มีโน้ต'}
                           </Text>
                         ) : null}
@@ -2665,9 +3030,11 @@ export default function AttendanceScreen() {
             )}
             <View style={styles.calendarCloseRow}>
               <Pressable
-                style={styles.calendarCloseBtn}
+                style={[styles.calendarCloseBtn, themeStyles?.calendarCloseBtn]}
                 onPress={() => setScheduleCalendarOpen(false)}>
-                <Text style={styles.calendarCloseBtnText}>ปิด</Text>
+                <Text style={[styles.calendarCloseBtnText, themeStyles?.calendarCloseBtnText]}>
+                  ปิด
+                </Text>
               </Pressable>
             </View>
             </ScrollView>
@@ -2675,29 +3042,113 @@ export default function AttendanceScreen() {
           {scheduleDayDetailOpen ? (
             <View style={styles.dayDetailOverlayWrap}>
               <Pressable
-                style={styles.dayDetailBackdrop}
+                style={[styles.dayDetailBackdrop, themeStyles?.dayDetailBackdrop]}
                 onPress={() => setScheduleDayDetailOpen(false)}
               />
-              <View style={styles.dayDetailCard}>
-                <Text style={styles.sheetTitle}>
+              <View style={[styles.dayDetailCard, themeStyles?.dayDetailCard]}>
+                <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>
                   {scheduleSelectedYmd ? `ตารางงานวันที่ ${scheduleSelectedYmd}` : 'ตารางงาน'}
                 </Text>
-                <Text style={styles.sheetSub}>
+                <Text style={[styles.sheetSub, themeStyles?.sheetSub]}>
                   {scheduleDayDetailRows.length > 0
                     ? 'รายละเอียดตารางงานที่มอบหมายในวันดังกล่าว'
-                    : 'วันนี้ยังไม่มีตารางงาน แต่คุณสามารถจดโน้ต/เช็กลิสต์ได้'}
+                    : selectedScheduleApprovedLeave
+                      ? 'วันนี้มีการลาที่อนุมัติแล้ว'
+                      : selectedScheduleEmployeeHoliday
+                        ? 'วันนี้เป็นวันหยุดตามตาราง'
+                        : 'วันนี้ยังไม่มีตารางงาน แต่คุณสามารถจดโน้ต/เช็กลิสต์ได้'}
                 </Text>
                 <ScrollView style={styles.taskScroll} showsVerticalScrollIndicator={false}>
+                  {selectedScheduleCompanyHoliday ? (
+                    <View
+                      style={[
+                        styles.companyHolidayBanner,
+                        themeStyles?.companyHolidayBanner,
+                      ]}>
+                      <Text
+                        style={[
+                          styles.companyHolidayBannerLabel,
+                          themeStyles?.companyHolidayBannerLabel,
+                        ]}>
+                        วันหยุดประจำปีบริษัท
+                      </Text>
+                      <Text
+                        style={[
+                          styles.companyHolidayBannerTitle,
+                          themeStyles?.companyHolidayBannerTitle,
+                        ]}>
+                        {selectedScheduleCompanyHoliday.title}
+                      </Text>
+                      {selectedScheduleCompanyHoliday.description?.trim() ? (
+                        <Text
+                          style={[
+                            styles.companyHolidayBannerDesc,
+                            themeStyles?.companyHolidayBannerDesc,
+                          ]}>
+                          {selectedScheduleCompanyHoliday.description.trim()}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
+                  {selectedScheduleEmployeeHoliday && !selectedScheduleApprovedLeave ? (
+                    <View
+                      style={[
+                        styles.employeeHolidayBanner,
+                        themeStyles?.employeeHolidayBanner,
+                      ]}>
+                      <Text
+                        style={[
+                          styles.employeeHolidayBannerLabel,
+                          themeStyles?.employeeHolidayBannerLabel,
+                        ]}>
+                        วันหยุด
+                      </Text>
+                      <Text
+                        style={[
+                          styles.employeeHolidayBannerTitle,
+                          themeStyles?.employeeHolidayBannerTitle,
+                        ]}>
+                        วันนี้เป็นวันหยุดตามตารางงาน
+                      </Text>
+                    </View>
+                  ) : null}
+                  {selectedScheduleApprovedLeave ? (
+                    <View
+                      style={[styles.scheduleLeaveBanner, themeStyles?.scheduleLeaveBanner]}>
+                      <Text
+                        style={[
+                          styles.scheduleLeaveBannerLabel,
+                          themeStyles?.scheduleLeaveBannerLabel,
+                        ]}>
+                        การลา
+                      </Text>
+                      <Text
+                        style={[
+                          styles.scheduleLeaveBannerTitle,
+                          themeStyles?.scheduleLeaveBannerTitle,
+                        ]}>
+                        {leaveTypeLabelTh(selectedScheduleApprovedLeave.leave_type)} · อนุมัติแล้ว
+                      </Text>
+                      <Text
+                        style={[
+                          styles.scheduleLeaveBannerMeta,
+                          themeStyles?.scheduleLeaveBannerMeta,
+                        ]}>
+                        ช่วงลา {selectedScheduleApprovedLeave.starts_on} –{' '}
+                        {selectedScheduleApprovedLeave.ends_on}
+                      </Text>
+                    </View>
+                  ) : null}
                   {scheduleDayDetailRows.length > 0 ? (
                     scheduleDayDetailRows.map((row, idx) => (
                       <View
                         key={`${row.ymd}-${row.source}-${row.startText}-${idx}`}
-                        style={styles.scheduleCalendarRow}>
-                        <Text style={styles.scheduleCalendarTitle}>{row.title}</Text>
-                        <Text style={styles.scheduleCalendarMeta}>
+                        style={[styles.scheduleCalendarRow, themeStyles?.scheduleCalendarRow]}>
+                        <Text style={[styles.scheduleCalendarTitle, themeStyles?.scheduleCalendarTitle]}>{row.title}</Text>
+                        <Text style={[styles.scheduleCalendarMeta, themeStyles?.scheduleCalendarMeta]}>
                           เวลา {row.startText} - {row.endText}
                         </Text>
-                        <Text style={styles.scheduleCalendarMeta}>
+                        <Text style={[styles.scheduleCalendarMeta, themeStyles?.scheduleCalendarMeta]}>
                           สาขาที่เข้าได้:{' '}
                           {row.allowedBranchId != null
                             ? row.allowedBranchName || `#${row.allowedBranchId}`
@@ -2706,23 +3157,23 @@ export default function AttendanceScreen() {
                       </View>
                     ))
                   ) : (
-                    <Text style={styles.emptyTasksMsg}>ยังไม่มีข้อมูลตารางงาน</Text>
+                    <Text style={[styles.emptyTasksMsg, themeStyles?.workPlan]}>ยังไม่มีข้อมูลตารางงาน</Text>
                   )}
-                  <View style={styles.dayMemoCard}>
-                    <Text style={styles.dayMemoTitle}>บันทึกงานของวัน (คล้ายกิจกรรม)</Text>
+                  <View style={[styles.dayMemoCard, themeStyles?.dayMemoCard]}>
+                    <Text style={[styles.dayMemoTitle, themeStyles?.dayMemoTitle]}>บันทึกงานของวัน (คล้ายกิจกรรม)</Text>
                     {scheduleDayLoading ? (
-                      <ActivityIndicator color={NatureTheme.colors.primary} style={{ marginVertical: 12 }} />
+                      <ActivityIndicator color={themeColors.primary} style={{ marginVertical: 12 }} />
                     ) : (
                       <>
                         <TextInput
-                          style={styles.dayMemoInput}
+                          style={[styles.dayMemoInput, themeStyles?.dayMemoInput]}
                           value={scheduleDayNote}
                           onChangeText={setScheduleDayNote}
                           placeholder="เพิ่มโน้ตของวันนี้..."
-                          placeholderTextColor={NatureTheme.colors.textMuted}
+                          placeholderTextColor={themeColors.textMuted}
                           multiline
                         />
-                        <Text style={styles.dayMemoSectionTitle}>เช็กลิสต์</Text>
+                        <Text style={[styles.dayMemoSectionTitle, themeStyles?.dayMemoSectionTitle]}>เช็กลิสต์</Text>
                         {scheduleDayChecklist.length === 0 ? (
                           <Text style={styles.dayMemoEmpty}>ยังไม่มีรายการเช็กลิสต์</Text>
                         ) : (
@@ -2740,7 +3191,7 @@ export default function AttendanceScreen() {
                                 <FontAwesome
                                   name={item.done ? 'check-square-o' : 'square-o'}
                                   size={18}
-                                  color={item.done ? NatureTheme.colors.checkIn : NatureTheme.colors.textMuted}
+                                  color={item.done ? themeColors.checkIn : themeColors.textMuted}
                                 />
                               </Pressable>
                               <Text style={[styles.dayChecklistLabel, item.done && styles.dayChecklistLabelDone]}>
@@ -2751,21 +3202,21 @@ export default function AttendanceScreen() {
                                 onPress={() =>
                                   setScheduleDayChecklist((prev) => prev.filter((it) => it.id !== item.id))
                                 }>
-                                <FontAwesome name="trash-o" size={16} color={NatureTheme.colors.error} />
+                                <FontAwesome name="trash-o" size={16} color={themeColors.error} />
                               </Pressable>
                             </View>
                           ))
                         )}
                         <View style={styles.dayChecklistAddRow}>
                           <TextInput
-                            style={styles.dayChecklistAddInput}
+                            style={[styles.dayChecklistAddInput, themeStyles?.dayChecklistAddInput]}
                             value={scheduleDayNewItemText}
                             onChangeText={setScheduleDayNewItemText}
                             placeholder="เพิ่มรายการเช็กลิสต์"
-                            placeholderTextColor={NatureTheme.colors.textMuted}
+                            placeholderTextColor={themeColors.textMuted}
                           />
                           <Pressable
-                            style={styles.dayChecklistAddBtn}
+                            style={[styles.dayChecklistAddBtn, themeStyles?.dayChecklistAddBtn]}
                             onPress={() => {
                               const next = scheduleDayNewItemText.trim();
                               if (!next) return;
@@ -2779,7 +3230,7 @@ export default function AttendanceScreen() {
                               ]);
                               setScheduleDayNewItemText('');
                             }}>
-                            <Text style={styles.dayChecklistAddBtnText}>เพิ่ม</Text>
+                            <Text style={[styles.dayChecklistAddBtnText, themeStyles?.dayChecklistAddBtnText]}>เพิ่ม</Text>
                           </Pressable>
                         </View>
                       </>
@@ -2788,15 +3239,19 @@ export default function AttendanceScreen() {
                 </ScrollView>
                 <View style={styles.sheetActions}>
                   <Pressable
-                    style={[styles.sheetSecondaryBtn, scheduleDaySaving && styles.disabled]}
+                    style={[
+                      styles.sheetSecondaryBtn,
+                      themeStyles?.sheetSecondaryBtn,
+                      scheduleDaySaving && styles.disabled,
+                    ]}
                     disabled={scheduleDaySaving || scheduleDayLoading}
                     onPress={() => void saveScheduleDayMemo()}>
-                    <Text style={styles.sheetSecondaryBtnText}>
+                    <Text style={[styles.sheetSecondaryBtnText, themeStyles?.sheetSecondaryBtnText]}>
                       {scheduleDaySaving ? 'กำลังบันทึก...' : 'บันทึกโน้ต/เช็กลิสต์'}
                     </Text>
                   </Pressable>
                   <Pressable
-                    style={styles.sheetPrimaryBtn}
+                    style={[styles.sheetPrimaryBtn, themeStyles?.sheetPrimaryBtn]}
                     onPress={() => setScheduleDayDetailOpen(false)}>
                     <Text style={styles.sheetPrimaryBtnText}>ปิด</Text>
                   </Pressable>
@@ -2815,10 +3270,10 @@ export default function AttendanceScreen() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onRefresh}
-            tintColor={NatureTheme.colors.primary}
-            colors={[NatureTheme.colors.primary]}
+            tintColor={themeColors.primary}
+            colors={[themeColors.primary]}
             title="ดึงลงเพื่อรีเฟรช"
-            titleColor={NatureTheme.colors.textMuted}
+            titleColor={themeColors.textMuted}
           />
         }
         ListHeaderComponent={
@@ -2829,28 +3284,28 @@ export default function AttendanceScreen() {
               transitionMode={announcementTransitionMode}
               slideHeightPx={announcementSlideHeightPx}
             />
-            <View style={styles.userStrip}>
+            <View style={[styles.userStrip, themeStyles?.userStrip]}>
               <UserAvatar
                 uri={profile?.avatar_url}
                 label={greetName}
                 size={48}
               />
               <View style={styles.userStripText}>
-                <Text style={styles.userGreet}>สวัสดี</Text>
-                <Text style={styles.userName} numberOfLines={1}>
+                <Text style={[styles.userGreet, themeStyles?.userGreet]}>สวัสดี</Text>
+                <Text style={[styles.userName, themeStyles?.userName]} numberOfLines={1}>
                   {greetWithMood}
                 </Text>
               </View>
               <View style={styles.userClock}>
-                <Text style={styles.userClockLabel}>เวลาปัจจุบัน</Text>
-                <Text style={styles.userClockMain}>
+                <Text style={[styles.userClockLabel, themeStyles?.userClockLabel]}>เวลาปัจจุบัน</Text>
+                <Text style={[styles.userClockMain, themeStyles?.userClockMain]}>
                   {nowTick.toLocaleTimeString('th-TH', {
                     hour: '2-digit',
                     minute: '2-digit',
                     second: '2-digit',
                   })}
                 </Text>
-                <Text style={styles.userClockDate}>
+                <Text style={[styles.userClockDate, themeStyles?.userClockDate]}>
                   {nowTick.toLocaleDateString('th-TH', {
                     weekday: 'long',
                     day: 'numeric',
@@ -2861,6 +3316,7 @@ export default function AttendanceScreen() {
               <Pressable
                 style={({ pressed }) => [
                   styles.refreshHeaderBtn,
+                  themeStyles?.refreshHeaderBtn,
                   pressed && !refreshing && styles.refreshHeaderBtnPressed,
                 ]}
                 onPress={() => void onRefresh()}
@@ -2870,22 +3326,22 @@ export default function AttendanceScreen() {
                 <FontAwesome
                   name="refresh"
                   size={22}
-                  color={NatureTheme.colors.primaryDark}
+                  color={themeColors.primaryDark}
                   style={refreshing ? styles.refreshIconBusy : undefined}
                 />
               </Pressable>
             </View>
-            <View style={styles.workCard}>
-              <Text style={styles.workTitle}>เวลาทำงานวันนี้</Text>
+            <View style={[styles.workCard, themeStyles?.workCard]}>
+              <Text style={[styles.workTitle, themeStyles?.workTitle]}>เวลาทำงานวันนี้</Text>
               {todayPlanLabel ? (
-                <Text style={styles.workPlan} numberOfLines={2}>
+                <Text style={[styles.workPlan, themeStyles?.workPlan]} numberOfLines={2}>
                   {todayPlanLabel}
                 </Text>
               ) : (
-                <Text style={styles.workPlanMuted}>ยังไม่พบกะที่มอบหมายสำหรับวันนี้</Text>
+                <Text style={[styles.workPlanMuted, themeStyles?.workPlanMuted]}>ยังไม่พบกะที่มอบหมายสำหรับวันนี้</Text>
               )}
-              <Text style={styles.workTime}>{formatDurationMs(workedTodayMs)}</Text>
-              <Text style={styles.workSub}>
+              <Text style={[styles.workTime, themeStyles?.workTime]}>{formatDurationMs(workedTodayMs)}</Text>
+              <Text style={[styles.workSub, themeStyles?.workSub]}>
                 พักรวม {Math.floor(totalBreakTodayMs / 60000)} นาที
               </Text>
                 {onBreak ? (
@@ -2904,6 +3360,7 @@ export default function AttendanceScreen() {
               <Pressable
                 style={[
                   styles.primary,
+                  themeStyles?.primary,
                   compact && styles.touchCompactBtn,
                   largeTouch && styles.touchLargeBtn,
                   checkInDisabled && styles.disabled,
@@ -2911,7 +3368,7 @@ export default function AttendanceScreen() {
                 onPress={() => startAttendance('check_in')}
                 disabled={checkInDisabled}>
                 <View style={styles.actionBtnInner}>
-                  <FontAwesome name="sign-in" size={16} color={c.onAccent} />
+                  <FontAwesome name="sign-in" size={16} color={themeColors.onAccent} />
                   <Text style={[styles.primaryText, compact && styles.touchCompactBtnText]}>
                     บันทึกเข้างาน
                   </Text>
@@ -2920,6 +3377,7 @@ export default function AttendanceScreen() {
               <Pressable
                 style={[
                   styles.secondary,
+                  themeStyles?.secondary,
                   compact && styles.touchCompactBtn,
                   largeTouch && styles.touchLargeBtn,
                   checkOutDisabled && styles.disabled,
@@ -2927,8 +3385,13 @@ export default function AttendanceScreen() {
                 onPress={() => setCheckOutConfirmOpen(true)}
                 disabled={checkOutDisabled}>
                 <View style={styles.actionBtnInner}>
-                  <FontAwesome name="sign-out" size={16} color={c.text} />
-                  <Text style={[styles.secondaryText, compact && styles.touchCompactBtnText]}>
+                  <FontAwesome name="sign-out" size={16} color={themeColors.text} />
+                  <Text
+                    style={[
+                      styles.secondaryText,
+                      themeStyles?.secondaryText,
+                      compact && styles.touchCompactBtnText,
+                    ]}>
                     บันทึกออกงาน
                   </Text>
                 </View>
@@ -2938,6 +3401,7 @@ export default function AttendanceScreen() {
                   style={[
                     styles.actionCard,
                     styles.breakBtn,
+                    themeStyles?.breakBtn,
                     compact && styles.touchCompactBtn,
                     largeTouch && styles.touchLargeBtn,
                     breakStartDisabled && styles.disabled,
@@ -2945,14 +3409,15 @@ export default function AttendanceScreen() {
                   onPress={() => markBreak('break_start')}
                   disabled={breakStartDisabled}>
                   <View style={styles.actionBtnStack}>
-                    <FontAwesome name="pause" size={14} color={c.warningTitle} />
-                    <Text style={styles.breakBtnText}>พักเบรก</Text>
+                    <FontAwesome name="pause" size={14} color={themeColors.warningTitle} />
+                    <Text style={[styles.breakBtnText, themeStyles?.breakBtnText]}>พักเบรก</Text>
                   </View>
                 </Pressable>
                 <Pressable
                   style={[
                     styles.actionCard,
                     styles.resumeBtn,
+                    themeStyles?.resumeBtn,
                     compact && styles.touchCompactBtn,
                     largeTouch && styles.touchLargeBtn,
                     breakEndDisabled && styles.disabled,
@@ -2960,32 +3425,38 @@ export default function AttendanceScreen() {
                   onPress={() => markBreak('break_end')}
                   disabled={breakEndDisabled}>
                   <View style={styles.actionBtnStack}>
-                    <FontAwesome name="play" size={14} color={c.primaryDark} />
-                    <Text style={styles.resumeBtnText}>เริ่มงาน (หลังพัก)</Text>
+                    <FontAwesome name="play" size={14} color={themeColors.river} />
+                    <Text style={[styles.resumeBtnText, themeStyles?.resumeBtnText]}>เริ่มงาน (หลังพัก)</Text>
                   </View>
                 </Pressable>
                 <Pressable
                   style={[
                     styles.actionCard,
                     styles.leaveBtn,
+                    themeStyles?.leaveBtn,
                     onApprovedLeaveToday && styles.disabled,
                   ]}
-                  onPress={() => setLeaveModalOpen(true)}
+                  onPress={requestLeave}
                   disabled={onApprovedLeaveToday}>
                   <View style={styles.actionBtnStack}>
-                    <FontAwesome name="file-text-o" size={14} color={c.river} />
-                    <Text style={[styles.leaveBtnText, compact && styles.touchCompactBtnText]}>
+                    <FontAwesome name="file-text-o" size={14} color={themeColors.link} />
+                    <Text style={[styles.leaveBtnText, themeStyles?.leaveBtnText, compact && styles.touchCompactBtnText]}>
                       ลางาน
                     </Text>
                   </View>
                 </Pressable>
                 <Pressable
-                  style={[styles.actionCard, styles.lateBtn, lateDisabled && styles.disabled]}
+                  style={[
+                    styles.actionCard,
+                    styles.lateBtn,
+                    themeStyles?.lateBtn,
+                    lateDisabled && styles.disabled,
+                  ]}
                   onPress={() => setLateModalOpen(true)}
                   disabled={lateDisabled}>
                   <View style={styles.actionBtnStack}>
-                    <FontAwesome name="clock-o" size={14} color={c.accentWarm} />
-                    <Text style={[styles.lateBtnText, compact && styles.touchCompactBtnText]}>
+                    <FontAwesome name="clock-o" size={14} color={themeColors.lateNoticeBar} />
+                    <Text style={[styles.lateBtnText, themeStyles?.lateBtnText, compact && styles.touchCompactBtnText]}>
                       ขอเข้าสาย
                     </Text>
                   </View>
@@ -2997,43 +3468,44 @@ export default function AttendanceScreen() {
               <Pressable
                 style={[
                   styles.scheduleViewBtn,
+                  themeStyles?.scheduleViewBtn,
                   compact && styles.touchCompactBtn,
                   largeTouch && styles.touchLargeBtn,
                 ]}
                 onPress={() => setScheduleCalendarOpen(true)}>
                 <View style={styles.actionBtnInner}>
-                  <FontAwesome name="calendar" size={15} color={c.primaryDark} />
-                  <Text style={styles.scheduleViewBtnText}>ตารางเข้าออกงานของฉัน</Text>
+                  <FontAwesome name="calendar" size={15} color={themeColors.primaryDark} />
+                  <Text style={[styles.scheduleViewBtnText, themeStyles?.scheduleViewBtnText]}>ตารางเข้าออกงานของฉัน</Text>
                 </View>
               </Pressable>
             </View>
             {pendingCount > 0 ? (
               <Pressable
-                style={styles.pendingCard}
+                style={[styles.pendingCard, themeStyles?.pendingCard]}
                 onPress={() => router.push('/tasks')}>
                 <View style={styles.pendingHeadRow}>
                   <View>
-                    <Text style={styles.pendingEyebrow}>Work Status</Text>
-                    <Text style={styles.pendingTitle}>งานที่กำลังทำ / ค้างอยู่</Text>
+                    <Text style={[styles.pendingEyebrow, themeStyles?.pendingEyebrow]}>Work Status</Text>
+                    <Text style={[styles.pendingTitle, themeStyles?.userName]}>งานที่กำลังทำ / ค้างอยู่</Text>
                   </View>
-                  <View style={styles.pendingCountPill}>
+                  <View style={[styles.pendingCountPill, themeStyles?.pendingCountPill]}>
                     <Text style={styles.pendingCountNum}>{pendingCount}</Text>
                     <Text style={styles.pendingCountLabel}>งาน</Text>
                   </View>
                 </View>
                 <View style={styles.pendingStatsRow}>
-                  <View style={styles.pendingStatChip}>
-                    <Text style={styles.pendingStatValue}>{activeTaskCount}</Text>
-                    <Text style={styles.pendingStatLabel}>กำลังทำ</Text>
+                  <View style={[styles.pendingStatChip, themeStyles?.pendingStatChip]}>
+                    <Text style={[styles.pendingStatValue, themeStyles?.pendingStatValue]}>{activeTaskCount}</Text>
+                    <Text style={[styles.pendingStatLabel, themeStyles?.pendingStatLabel]}>กำลังทำ</Text>
                   </View>
-                  <View style={styles.pendingStatChip}>
-                    <Text style={styles.pendingStatValue}>{waitingTaskCount}</Text>
-                    <Text style={styles.pendingStatLabel}>รอดำเนินการ</Text>
+                  <View style={[styles.pendingStatChip, themeStyles?.pendingStatChip]}>
+                    <Text style={[styles.pendingStatValue, themeStyles?.pendingStatValue]}>{waitingTaskCount}</Text>
+                    <Text style={[styles.pendingStatLabel, themeStyles?.pendingStatLabel]}>รอดำเนินการ</Text>
                   </View>
-                  <Text style={styles.pendingHint}>แตะเพื่อจัดการงานทั้งหมด</Text>
+                  <Text style={[styles.pendingHint, themeStyles?.pendingHint]}>แตะเพื่อจัดการงานทั้งหมด</Text>
                 </View>
                 {workStatusPreviewTasks.map((t) => (
-                  <View key={t.id} style={styles.pendingLineRow}>
+                  <View key={t.id} style={[styles.pendingLineRow, themeStyles?.pendingLineRow]}>
                     <View
                       style={[
                         styles.pendingPriBar,
@@ -3045,10 +3517,10 @@ export default function AttendanceScreen() {
                       ]}
                     />
                     <View style={styles.pendingLineBody}>
-                      <Text style={styles.pendingLine} numberOfLines={1}>
+                      <Text style={[styles.pendingLine, themeStyles?.pendingLine]} numberOfLines={1}>
                         {t.title}
                       </Text>
-                      <Text style={styles.pendingLineMeta}>
+                      <Text style={[styles.pendingLineMeta, themeStyles?.pendingLineMeta]}>
                         {taskStatusLabelTh(t.status)}
                       </Text>
                     </View>
@@ -3061,133 +3533,139 @@ export default function AttendanceScreen() {
                 ) : null}
               </Pressable>
             ) : null}
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryTitle}>ตารางสรุปเวลาเข้า-ออกงาน</Text>
-              <Text style={styles.summaryHint}>รอบวันที่ 26 ของเดือนก่อน ถึง 25 ของเดือนที่เลือก</Text>
+            <View style={[styles.summaryCard, themeStyles?.summaryCard]}>
+              <Text style={[styles.summaryTitle, themeStyles?.summaryTitle]}>ตารางสรุปเวลาเข้า-ออกงาน</Text>
+              <Text style={[styles.summaryHint, themeStyles?.summaryHint]}>รอบวันที่ 26 ของเดือนก่อน ถึง 25 ของเดือนที่เลือก</Text>
               <DatePickerField
                 label="เลือกเดือนสำหรับสรุป"
                 value={summaryAnchorDate}
                 onChange={(d) => setSummaryAnchorDate(d ?? new Date())}
                 disabled={summaryLoading || exporting}
               />
-              <Text style={styles.summaryPeriodText}>
+              <Text style={[styles.summaryPeriodText, themeStyles?.summaryPeriodText]}>
                 ช่วงที่แสดง: {period.startYmd} - {period.endYmd}
               </Text>
               <View style={styles.durationSummaryGrid}>
-                <View style={styles.durationSummaryCard}>
-                  <Text style={styles.durationSummaryLabel}>เวลาทำงานรวม</Text>
-                  <Text style={styles.durationSummaryValue}>
+                <View style={[styles.durationSummaryCard, themeStyles?.durationSummaryCard]}>
+                  <Text style={[styles.durationSummaryLabel, themeStyles?.durationSummaryLabel]}>เวลาทำงานรวม</Text>
+                  <Text style={[styles.durationSummaryValue, themeStyles?.durationSummaryValue]}>
                     {formatDurationMinutesTh(summaryTotals.workMinutes)}
                   </Text>
                 </View>
-                <View style={styles.durationSummaryCard}>
-                  <Text style={styles.durationSummaryLabel}>เวลาพักรวม</Text>
-                  <Text style={styles.durationSummaryValue}>
+                <View style={[styles.durationSummaryCard, themeStyles?.durationSummaryCard]}>
+                  <Text style={[styles.durationSummaryLabel, themeStyles?.durationSummaryLabel]}>เวลาพักรวม</Text>
+                  <Text style={[styles.durationSummaryValue, themeStyles?.durationSummaryValue]}>
                     {formatDurationMinutesTh(summaryTotals.breakMinutes)}
                   </Text>
                 </View>
-                <View style={styles.durationSummaryCard}>
-                  <Text style={styles.durationSummaryLabel}>OT รวม</Text>
-                  <Text style={styles.durationSummaryValue}>
+                <View style={[styles.durationSummaryCard, themeStyles?.durationSummaryCard]}>
+                  <Text style={[styles.durationSummaryLabel, themeStyles?.durationSummaryLabel]}>OT รวม</Text>
+                  <Text style={[styles.durationSummaryValue, themeStyles?.durationSummaryValue]}>
                     {formatDurationMinutesTh(summaryTotals.overtimeMinutes)}
                   </Text>
                 </View>
               </View>
               <View style={styles.summaryExportRow}>
                 <Pressable
-                  style={[styles.summaryExportBtn, exporting && styles.disabled]}
+                  style={[styles.summaryExportBtn, themeStyles?.summaryExportBtn, exporting && styles.disabled]}
                   disabled={exporting || summaryLoading}
                   onPress={() => void exportCsv()}>
-                  <Text style={styles.summaryExportBtnText}>ดาวน์โหลด CSV</Text>
+                  <Text style={[styles.summaryExportBtnText, themeStyles?.summaryExportBtnText]}>ดาวน์โหลด CSV</Text>
                 </Pressable>
                 <Pressable
-                  style={[styles.summaryExportBtnAlt, exporting && styles.disabled]}
+                  style={[styles.summaryExportBtnAlt, themeStyles?.summaryExportBtnAlt, exporting && styles.disabled]}
                   disabled={exporting || summaryLoading}
                   onPress={() => void exportPdf()}>
-                  <Text style={styles.summaryExportBtnAltText}>ดาวน์โหลด PDF</Text>
+                  <Text style={[styles.summaryExportBtnAltText, themeStyles?.summaryExportBtnAltText]}>ดาวน์โหลด PDF</Text>
                 </Pressable>
               </View>
               {summaryLoading ? (
                 <ActivityIndicator
-                  color={NatureTheme.colors.primary}
+                  color={themeColors.primary}
                   style={styles.summaryLoading}
                 />
               ) : (
                 <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                   <View>
-                    <View style={[styles.summaryTableRow, styles.summaryHeaderRow]}>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colDate]}>
+                    <View
+                      style={[
+                        styles.summaryTableRow,
+                        themeStyles?.summaryTableRow,
+                        styles.summaryHeaderRow,
+                        themeStyles?.summaryHeaderRow,
+                      ]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colDate]}>
                         วันที่
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colTime]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colTime]}>
                         เวลาเข้างาน
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colTime]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colTime]}>
                         เวลาออกงาน
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
                         เวลารวมทำงาน
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
                         เวลาพัก
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colDuration]}>
                         OT
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colOtStatus]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colOtStatus]}>
                         สถานะ OT
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colEmp]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colEmp]}>
                         รหัสพนักงาน
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colLocation]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colLocation]}>
                         สถานที่เข้างาน
                       </Text>
-                      <Text style={[styles.summaryCell, styles.summaryHeaderCell, styles.colNote]}>
+                      <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.summaryHeaderCell, styles.colNote]}>
                         หมายเหตุ
                       </Text>
                     </View>
                     {summaryRows.map((row) => (
-                      <View key={row.dateYmd} style={styles.summaryTableRow}>
-                        <Text style={[styles.summaryCell, styles.colDate]}>{row.dateYmd}</Text>
-                        <Text style={[styles.summaryCell, styles.colTime]}>{row.checkIn}</Text>
-                        <Text style={[styles.summaryCell, styles.colTime]}>{row.checkOut}</Text>
-                        <Text style={[styles.summaryCell, styles.colDuration]}>
+                      <View key={row.dateYmd} style={[styles.summaryTableRow, themeStyles?.summaryTableRow]}>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colDate]}>{row.dateYmd}</Text>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colTime]}>{row.checkIn}</Text>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colTime]}>{row.checkOut}</Text>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colDuration]}>
                           {formatDurationMinutesTh(row.workMinutes)}
                         </Text>
-                        <Text style={[styles.summaryCell, styles.colDuration]}>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colDuration]}>
                           {formatDurationMinutesTh(row.breakMinutes)}
                         </Text>
-                        <Text style={[styles.summaryCell, styles.colDuration]}>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colDuration]}>
                           {formatDurationMinutesTh(row.overtimeMinutes)}
                         </Text>
-                        <Text style={[styles.summaryCell, styles.colOtStatus]}>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colOtStatus]}>
                           {row.overtimeApprovalStatus}
                         </Text>
-                        <Text style={[styles.summaryCell, styles.colEmp]}>{row.employeeCode}</Text>
-                        <Text style={[styles.summaryCell, styles.colLocation]}>{row.checkInLocation}</Text>
-                        <Text style={[styles.summaryCell, styles.colNote]}>{row.note}</Text>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colEmp]}>{row.employeeCode}</Text>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colLocation]}>{row.checkInLocation}</Text>
+                        <Text style={[styles.summaryCell, themeStyles?.summaryCell, styles.colNote]}>{row.note}</Text>
                       </View>
                     ))}
                   </View>
                 </ScrollView>
               )}
             </View>
-            <Text style={styles.section}>ประวัติล่าสุด</Text>
+            <Text style={[styles.section, themeStyles?.section]}>ประวัติล่าสุด</Text>
           </>
         }
         ListEmptyComponent={
-          <Text style={styles.empty}>ยังไม่มีบันทึก</Text>
+          <Text style={[styles.empty, themeStyles?.empty]}>ยังไม่มีบันทึก</Text>
         }
         renderItem={({ item }) => (
-          <View style={styles.row}>
-            <Text style={styles.rowTitle}>{attendanceKindLabel(item.kind)}</Text>
-            <Text style={styles.rowMeta}>
+          <View style={[styles.row, themeStyles?.row]}>
+            <Text style={[styles.rowTitle, themeStyles?.rowTitle]}>{attendanceKindLabel(item.kind)}</Text>
+            <Text style={[styles.rowMeta, themeStyles?.rowMeta]}>
               {new Date(item.created_at).toLocaleString('th-TH')}
               {item.within_branch ? '' : ' · นอกสาขา'}
             </Text>
             {item.note ? (
-              <Text style={styles.rowNote} numberOfLines={4}>
+              <Text style={[styles.rowNote, themeStyles?.rowNote]} numberOfLines={4}>
                 {item.note}
               </Text>
             ) : null}
@@ -3202,31 +3680,317 @@ export default function AttendanceScreen() {
         autoDismissMs={2800}
         onClose={() => setBreakNotice(null)}
       />
+      <FriendlyConfirmModal
+        visible={leavePromptOpen}
+        title="แจ้งเตือนก่อนลางาน"
+        message={leavePromptMessage}
+        confirmLabel="ดำเนินการต่อ"
+        cancelLabel="ยกเลิก"
+        tone="leave"
+        onConfirm={confirmLeavePrompt}
+        onCancel={() => setLeavePromptOpen(false)}
+      />
+      <FriendlyConfirmModal
+        visible={holidayPromptOpen}
+        title={holidayPromptTitle}
+        message={holidayPromptMessage}
+        confirmLabel="รับทราบ"
+        cancelLabel="ปิด"
+        tone="leave"
+        onConfirm={() => setHolidayPromptOpen(false)}
+        onCancel={() => setHolidayPromptOpen(false)}
+      />
     </View>
   );
+}
+
+function createAttendanceLightStyles(colors: AppTheme['colors']) {
+  const sectionAccent = {
+    borderLeftWidth: 4,
+    borderLeftColor: colors.primaryMuted,
+    paddingLeft: 10,
+  };
+
+  return StyleSheet.create({
+    screen: { backgroundColor: '#FFFFFF' },
+    userStrip: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+      shadowColor: colors.shadow,
+      shadowOpacity: 0.16,
+      shadowRadius: 18,
+      shadowOffset: { width: 0, height: 7 },
+      elevation: 2,
+    },
+    userGreet: { color: colors.primaryDark },
+    userName: { color: colors.text },
+    userClockLabel: { color: colors.textMuted },
+    userClockMain: { color: colors.primaryDark },
+    userClockDate: { color: colors.textMuted },
+    refreshHeaderBtn: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    workCard: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+      shadowColor: colors.shadow,
+      shadowOpacity: 0.18,
+      shadowRadius: 18,
+      shadowOffset: { width: 0, height: 8 },
+      elevation: 2,
+    },
+    workTitle: { color: colors.primaryDark },
+    workTime: { color: colors.primaryDark },
+    workSub: { color: colors.textSecondary },
+    workPlan: { color: colors.primaryDark },
+    workPlanMuted: { color: colors.textMuted },
+    primary: {
+      backgroundColor: colors.primaryDark,
+      borderColor: colors.primaryMuted,
+      borderWidth: 1,
+    },
+    secondary: {
+      backgroundColor: colors.surface,
+      borderColor: colors.primaryMuted,
+      borderWidth: 1.5,
+    },
+    secondaryText: { color: colors.text },
+    scheduleViewBtn: {
+      backgroundColor: colors.primaryLight,
+      borderColor: colors.primaryMuted,
+      borderWidth: 1.5,
+    },
+    scheduleViewBtnText: { color: colors.primaryDark },
+    breakBtn: {
+      backgroundColor: colors.accentWarmLight,
+      borderColor: colors.accentWarm,
+      borderWidth: 1.5,
+    },
+    breakBtnText: { color: colors.warningTitle },
+    resumeBtn: {
+      backgroundColor: colors.riverLight,
+      borderColor: colors.river,
+      borderWidth: 1.5,
+    },
+    resumeBtnText: { color: colors.river },
+    leaveBtn: {
+      backgroundColor: colors.linkLight,
+      borderColor: colors.link,
+      borderWidth: 1.5,
+    },
+    leaveBtnText: { color: colors.link },
+    lateBtn: {
+      backgroundColor: colors.lateNoticeBg,
+      borderColor: colors.lateNoticeBar,
+      borderWidth: 1.5,
+    },
+    lateBtnText: { color: colors.lateNoticeBar },
+    pendingCard: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    pendingEyebrow: { color: colors.primaryDark },
+    pendingTitle: sectionAccent,
+    pendingCountPill: { backgroundColor: colors.primary },
+    pendingStatChip: { backgroundColor: colors.primaryLight },
+    pendingStatValue: { color: colors.primaryDark },
+    pendingStatLabel: { color: colors.primaryDark },
+    pendingHint: { color: colors.textMuted },
+    pendingLineRow: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.borderSoft,
+      borderWidth: 1,
+    },
+    pendingLine: { color: colors.text },
+    pendingLineMeta: { color: colors.textMuted },
+    summaryCard: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1.5 },
+    summaryTitle: { color: colors.text, ...sectionAccent },
+    summaryHint: { color: colors.textMuted },
+    summaryPeriodText: { color: colors.textSecondary },
+    durationSummaryCard: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      borderWidth: 1.2,
+    },
+    durationSummaryLabel: { color: colors.textMuted },
+    durationSummaryValue: { color: colors.primaryDark },
+    summaryExportBtn: {
+      backgroundColor: colors.primaryLight,
+      borderColor: colors.primaryMuted,
+      borderWidth: 1.5,
+    },
+    summaryExportBtnText: { color: colors.primaryDark },
+    summaryExportBtnAlt: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    summaryExportBtnAltText: { color: colors.text },
+    summaryTableRow: { borderBottomColor: colors.borderSoft },
+    summaryHeaderRow: { backgroundColor: colors.surfaceMuted, borderTopColor: colors.borderSoft },
+    summaryCell: { color: colors.text },
+    section: { color: colors.text },
+    row: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1.3 },
+    rowTitle: { color: colors.text },
+    rowMeta: { color: colors.textMuted },
+    rowNote: { color: colors.textSecondary },
+    empty: { color: colors.textMuted },
+    sheetBackdrop: { backgroundColor: colors.overlay },
+    sheetCard: { backgroundColor: '#FFFFFF', borderColor: colors.border, borderWidth: 1.5 },
+    sheetCardTall: { backgroundColor: '#FFFFFF', borderColor: colors.border, borderWidth: 1.5 },
+    sheetTitle: { color: colors.text },
+    sheetSub: { color: colors.textMuted },
+    sheetBody: { color: colors.textSecondary },
+    sheetPrimaryBtn: { backgroundColor: colors.primaryDark },
+    sheetSecondaryBtn: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      borderWidth: 1.5,
+    },
+    sheetSecondaryBtnText: { color: colors.primaryDark },
+    offSiteInput: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      color: colors.text,
+    },
+    offSiteLabel: { color: colors.textSecondary },
+    branchPickRow: { backgroundColor: colors.surfaceMuted, borderColor: colors.border, borderWidth: 1.3 },
+    branchPickName: { color: colors.text },
+    branchPickDist: { color: colors.textMuted },
+    taskRow: { backgroundColor: colors.surfaceMuted, borderColor: colors.border, borderWidth: 1.3 },
+    taskTitle: { color: colors.text },
+    taskMeta: { color: colors.textMuted },
+    calendarCloseBtn: { backgroundColor: colors.primaryDark },
+    calendarCloseBtnText: { color: colors.onAccent },
+    legendSummaryText: { color: colors.primaryDark },
+    calendarTapHint: { color: colors.textSecondary },
+    emptyTasksMsg: { color: colors.primaryDark },
+    monthNavBtn: { backgroundColor: '#FFFFFF', borderColor: colors.primaryMuted, borderWidth: 1.5 },
+    monthNavBtnText: { color: colors.primaryDark },
+    monthNavLabel: {
+      color: colors.primaryDark,
+      backgroundColor: colors.primaryLight,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: 12,
+      paddingVertical: 8,
+      overflow: 'hidden',
+    },
+    calendarGrid: { borderColor: colors.border, borderWidth: 1.5, backgroundColor: '#FFFFFF' },
+    calendarCell: { backgroundColor: '#FFFFFF', borderColor: colors.borderSoft },
+    calendarCellSelected: {
+      backgroundColor: colors.primaryLight,
+      borderColor: colors.primaryDark,
+      borderWidth: 1.5,
+    },
+    calendarCellToday: { borderColor: colors.primaryDark, borderWidth: 2 },
+    calendarDayNumber: { color: colors.text },
+    calendarDayNumberToday: { color: colors.primaryDark },
+    calendarDayNumberSelected: { color: colors.primaryDark },
+    calendarMiniCount: { color: colors.textMuted },
+    calendarCompanyHolidayText: { color: '#DC2626' },
+    calendarEmployeeHolidayText: { color: '#DC2626' },
+    calendarLeaveText: { color: colors.leaveSickBar },
+    companyHolidayBanner: {
+      backgroundColor: '#FEF2F2',
+      borderColor: '#FECACA',
+      borderWidth: 1,
+    },
+    companyHolidayBannerLabel: { color: '#DC2626' },
+    companyHolidayBannerTitle: { color: '#991B1B' },
+    companyHolidayBannerDesc: { color: colors.textMuted },
+    employeeHolidayBanner: {
+      backgroundColor: '#FEF2F2',
+      borderColor: '#FECACA',
+      borderWidth: 1,
+    },
+    employeeHolidayBannerLabel: { color: '#DC2626' },
+    employeeHolidayBannerTitle: { color: '#991B1B' },
+    scheduleLeaveBanner: {
+      backgroundColor: colors.leaveSickBg,
+      borderColor: colors.leaveSickBar,
+      borderWidth: 1,
+    },
+    scheduleLeaveBannerLabel: { color: colors.leaveSickBar },
+    scheduleLeaveBannerTitle: { color: colors.leaveSickBar },
+    scheduleLeaveBannerMeta: { color: colors.textMuted },
+    calendarWeekHeaderText: { color: colors.textMuted },
+    dayDetailBackdrop: { backgroundColor: colors.overlay },
+    dayDetailCard: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1.5 },
+    scheduleCalendarRow: { backgroundColor: colors.surfaceMuted, borderColor: colors.border, borderWidth: 1.2 },
+    scheduleCalendarTitle: { color: colors.text },
+    scheduleCalendarMeta: { color: colors.textSecondary },
+    dayMemoCard: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1.3 },
+    dayMemoTitle: { color: colors.text },
+    dayMemoInput: { backgroundColor: colors.surfaceMuted, borderColor: colors.border, color: colors.text },
+    dayMemoSectionTitle: { color: colors.textSecondary, ...sectionAccent },
+    dayChecklistAddInput: {
+      backgroundColor: colors.surfaceMuted,
+      borderColor: colors.border,
+      color: colors.text,
+    },
+    dayChecklistAddBtn: {
+      backgroundColor: colors.primaryLight,
+      borderColor: colors.primaryMuted,
+      borderWidth: 1.3,
+    },
+    dayChecklistAddBtnText: { color: colors.primaryDark },
+  });
 }
 
 const c = NatureTheme.colors;
 const r = NatureTheme.radius;
 const s = NatureTheme.spacing;
+const attendancePalette = {
+  canvas: c.canvas,
+  surface: c.surface,
+  surfaceElevated: c.surfaceElevated,
+  surfaceMuted: c.surfaceMuted,
+  border: c.borderSoft,
+  borderStrong: c.primaryMuted,
+  mint: c.primaryDark,
+  mintDeep: c.checkIn,
+  aqua: c.river,
+  aquaLight: c.riverLight,
+  sunshine: c.accentWarm,
+  sunshineLight: c.accentWarmLight,
+  coral: c.accentWarm,
+  coralLight: c.accentWarmLight,
+  violet: c.primaryDark,
+  violetLight: c.primaryLight,
+  sky: c.river,
+  skyLight: c.riverLight,
+  shadow: c.shadow,
+  overlay: c.overlay,
+};
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, padding: s.screen, backgroundColor: c.canvas },
+  screen: { flex: 1, padding: s.screen, backgroundColor: attendancePalette.canvas },
   listContent: { paddingBottom: s.scrollBottom },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   userStrip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: s.gapRow,
-    backgroundColor: c.surface,
+    backgroundColor: attendancePalette.surfaceElevated,
     borderRadius: r.md,
     padding: s.card,
     marginBottom: s.section,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
+    shadowColor: attendancePalette.shadow,
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
   },
   userStripText: { flex: 1, minWidth: 0 },
-  userGreet: { fontSize: 12, color: c.textMuted },
+  userGreet: { fontSize: 12, color: attendancePalette.aqua },
   userName: { fontSize: 17, fontWeight: '700', color: c.text, marginTop: 2 },
   userClock: {
     minWidth: 104,
@@ -3236,7 +4000,7 @@ const styles = StyleSheet.create({
   userClockMain: {
     fontSize: 20,
     fontWeight: '700',
-    color: c.primaryDark,
+    color: attendancePalette.sunshine,
     fontVariant: ['tabular-nums'],
   },
   userClockDate: {
@@ -3252,33 +4016,38 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderRadius: r.sm,
     borderWidth: 1,
-    borderColor: c.borderSoft,
-    backgroundColor: c.surfaceElevated,
+    borderColor: attendancePalette.border,
+    backgroundColor: attendancePalette.surfaceMuted,
   },
   refreshHeaderBtnPressed: { opacity: 0.88 },
   refreshIconBusy: { opacity: 0.45 },
   workCard: {
-    backgroundColor: c.surface,
+    backgroundColor: attendancePalette.surfaceElevated,
     borderRadius: r.md,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.borderStrong,
     padding: s.card,
     marginBottom: s.section,
     alignItems: 'center',
+    shadowColor: attendancePalette.shadow,
+    shadowOpacity: 0.2,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
   },
-  workTitle: { fontSize: 12, color: c.textMuted },
+  workTitle: { fontSize: 12, color: attendancePalette.aqua, fontWeight: '800' },
   workTime: {
     marginTop: 4,
     fontSize: 28,
     fontWeight: '700',
-    color: c.primaryDark,
+    color: attendancePalette.mint,
     fontVariant: ['tabular-nums'],
   },
   workSub: { marginTop: 2, fontSize: 12, color: c.textSecondary },
   workPlan: {
     marginTop: 6,
     fontSize: 12,
-    color: c.primaryDark,
+    color: attendancePalette.mint,
     textAlign: 'center',
     fontWeight: '600',
   },
@@ -3292,8 +4061,8 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontSize: 12,
     color: c.warningTitle,
-    backgroundColor: c.warningBg,
-    borderColor: c.warningBorder,
+    backgroundColor: attendancePalette.sunshineLight,
+    borderColor: attendancePalette.sunshine,
     borderWidth: 1,
     borderRadius: r.sm,
     paddingHorizontal: 10,
@@ -3330,33 +4099,33 @@ const styles = StyleSheet.create({
     color: c.textMuted,
   },
   primary: {
-    backgroundColor: c.checkIn,
+    backgroundColor: attendancePalette.mintDeep,
     paddingVertical: 12,
     borderRadius: r.lg,
     alignItems: 'center',
-    shadowColor: c.shadow,
+    shadowColor: attendancePalette.mint,
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    elevation: 2,
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    elevation: 3,
   },
   secondary: {
-    backgroundColor: c.surface,
+    backgroundColor: attendancePalette.surface,
     borderWidth: 1.5,
-    borderColor: c.border,
+    borderColor: attendancePalette.sky,
     paddingVertical: 12,
     borderRadius: r.lg,
     alignItems: 'center',
   },
   scheduleViewBtn: {
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.violetLight,
     borderWidth: 1,
-    borderColor: c.primaryMuted,
+    borderColor: attendancePalette.violet,
     borderRadius: r.lg,
     paddingVertical: 11,
     alignItems: 'center',
   },
-  scheduleViewBtnText: { color: c.primaryDark, fontWeight: '700', fontSize: 14 },
+  scheduleViewBtnText: { color: attendancePalette.violet, fontWeight: '800', fontSize: 14 },
   touchCompactBtn: {
     paddingVertical: 10,
     borderRadius: r.md,
@@ -3379,46 +4148,46 @@ const styles = StyleSheet.create({
   },
   secondaryText: { color: c.text, fontWeight: '600', fontSize: 16 },
   breakBtn: {
-    backgroundColor: c.accentWarmLight,
+    backgroundColor: attendancePalette.sunshineLight,
     borderRadius: r.md,
     paddingVertical: 8,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: c.warningBorder,
+    borderColor: attendancePalette.sunshine,
   },
-  breakBtnText: { color: c.warningTitle, fontWeight: '700' },
+  breakBtnText: { color: attendancePalette.sunshine, fontWeight: '800' },
   resumeBtn: {
-    backgroundColor: c.primaryLight,
+    backgroundColor: attendancePalette.aquaLight,
     borderRadius: r.md,
     paddingVertical: 8,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: c.primaryMuted,
+    borderColor: attendancePalette.aqua,
   },
-  resumeBtnText: { color: c.primaryDark, fontWeight: '700' },
+  resumeBtnText: { color: attendancePalette.aqua, fontWeight: '800' },
   leaveBtn: {
-    backgroundColor: c.riverLight,
+    backgroundColor: attendancePalette.skyLight,
     borderRadius: r.md,
     paddingVertical: 8,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: c.river,
+    borderColor: attendancePalette.sky,
   },
-  leaveBtnText: { color: c.river, fontWeight: '700', fontSize: 14 },
+  leaveBtnText: { color: attendancePalette.sky, fontWeight: '800', fontSize: 14 },
   lateBtn: {
-    backgroundColor: c.accentWarmLight,
+    backgroundColor: attendancePalette.coralLight,
     borderRadius: r.md,
     paddingVertical: 8,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: c.accentWarm,
+    borderColor: attendancePalette.coral,
   },
-  lateBtnText: { color: c.accentWarm, fontWeight: '700', fontSize: 14 },
+  lateBtnText: { color: attendancePalette.coral, fontWeight: '800', fontSize: 14 },
   disabled: { opacity: 0.6 },
   pendingCard: {
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: attendancePalette.surfaceElevated,
     borderWidth: 1,
-    borderColor: c.primaryMuted,
+    borderColor: attendancePalette.borderStrong,
     borderRadius: r.md,
     padding: s.card,
     marginBottom: s.section,
@@ -3432,7 +4201,7 @@ const styles = StyleSheet.create({
   },
   pendingEyebrow: {
     fontSize: 11,
-    color: c.primaryDark,
+    color: attendancePalette.aqua,
     fontWeight: '800',
     textTransform: 'uppercase',
     letterSpacing: 0.4,
@@ -3441,7 +4210,7 @@ const styles = StyleSheet.create({
   pendingCountPill: {
     minWidth: 58,
     borderRadius: r.md,
-    backgroundColor: c.primary,
+    backgroundColor: attendancePalette.mintDeep,
     paddingVertical: 8,
     paddingHorizontal: 10,
     alignItems: 'center',
@@ -3459,20 +4228,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    backgroundColor: c.primaryLight,
+    backgroundColor: attendancePalette.aquaLight,
     borderRadius: 999,
     paddingVertical: 5,
     paddingHorizontal: 9,
   },
-  pendingStatValue: { color: c.primaryDark, fontSize: 12, fontWeight: '900' },
-  pendingStatLabel: { color: c.primaryDark, fontSize: 11, fontWeight: '700' },
+  pendingStatValue: { color: attendancePalette.aqua, fontSize: 12, fontWeight: '900' },
+  pendingStatLabel: { color: attendancePalette.aqua, fontSize: 11, fontWeight: '700' },
   pendingHint: { fontSize: 12, color: c.textMuted },
   pendingLineRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     marginTop: 8,
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.surfaceMuted,
     borderRadius: r.sm,
     padding: 9,
   },
@@ -3486,15 +4255,15 @@ const styles = StyleSheet.create({
   pendingLineMeta: { fontSize: 11, color: c.textMuted, marginTop: 2 },
   pendingMore: { fontSize: 12, color: c.textMuted, marginTop: 8, fontStyle: 'italic' },
   summaryCard: {
-    backgroundColor: c.surface,
+    backgroundColor: attendancePalette.surface,
     borderRadius: r.md,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
     padding: s.card,
     marginBottom: s.section,
     gap: 8,
   },
-  summaryTitle: { fontSize: 16, fontWeight: '700', color: c.text },
+  summaryTitle: { fontSize: 16, fontWeight: '800', color: c.text },
   summaryHint: { fontSize: 12, color: c.textMuted, marginBottom: 2 },
   summaryPeriodText: { fontSize: 12, color: c.textSecondary },
   durationSummaryGrid: {
@@ -3508,43 +4277,43 @@ const styles = StyleSheet.create({
     minWidth: 145,
     padding: 10,
     borderRadius: r.md,
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: attendancePalette.surfaceElevated,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
   },
   durationSummaryLabel: { color: c.textMuted, fontSize: 11, fontWeight: '700' },
-  durationSummaryValue: { color: c.primaryDark, fontSize: 16, fontWeight: '900', marginTop: 3 },
+  durationSummaryValue: { color: attendancePalette.mint, fontSize: 16, fontWeight: '900', marginTop: 3 },
   summaryExportRow: { flexDirection: 'row', gap: 8 },
   summaryExportBtn: {
     flex: 1,
-    backgroundColor: c.primaryLight,
+    backgroundColor: attendancePalette.aquaLight,
     borderWidth: 1,
-    borderColor: c.primaryMuted,
+    borderColor: attendancePalette.aqua,
     borderRadius: r.sm,
     paddingVertical: 10,
     alignItems: 'center',
   },
-  summaryExportBtnText: { color: c.primaryDark, fontWeight: '700' },
+  summaryExportBtnText: { color: attendancePalette.aqua, fontWeight: '800' },
   summaryExportBtnAlt: {
     flex: 1,
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.violetLight,
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: attendancePalette.violet,
     borderRadius: r.sm,
     paddingVertical: 10,
     alignItems: 'center',
   },
-  summaryExportBtnAltText: { color: c.text, fontWeight: '700' },
+  summaryExportBtnAltText: { color: attendancePalette.violet, fontWeight: '800' },
   summaryLoading: { marginVertical: 14 },
   summaryTableRow: {
     flexDirection: 'row',
     borderBottomWidth: 1,
-    borderBottomColor: c.borderSoft,
+    borderBottomColor: attendancePalette.border,
   },
   summaryHeaderRow: {
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.surfaceMuted,
     borderTopWidth: 1,
-    borderTopColor: c.borderSoft,
+    borderTopColor: attendancePalette.border,
   },
   summaryCell: {
     paddingHorizontal: 8,
@@ -3560,32 +4329,32 @@ const styles = StyleSheet.create({
   colEmp: { width: 110 },
   colLocation: { width: 220 },
   colNote: { width: 260 },
-  section: { fontWeight: '700', marginBottom: 6, fontSize: 16, color: c.text },
+  section: { fontWeight: '800', marginBottom: 6, fontSize: 16, color: c.text },
   row: {
-    backgroundColor: c.surface,
+    backgroundColor: attendancePalette.surface,
     padding: s.card,
     borderRadius: r.sm,
     marginBottom: s.gap,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
   },
   rowTitle: { fontWeight: '600', fontSize: 15, color: c.text },
   rowMeta: { color: c.textMuted, marginTop: 4, fontSize: 13 },
   empty: { color: c.textMuted, textAlign: 'center', marginTop: 14 },
   sheetBackdrop: {
     flex: 1,
-    backgroundColor: c.overlay,
+    backgroundColor: attendancePalette.overlay,
     justifyContent: 'flex-end',
   },
   sheetCard: {
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: attendancePalette.surfaceElevated,
     borderTopLeftRadius: r.xl,
     borderTopRightRadius: r.xl,
     paddingHorizontal: 22,
     paddingTop: 20,
     paddingBottom: 28,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
     borderBottomWidth: 0,
   },
   dayDetailOverlayWrap: {
@@ -3596,13 +4365,13 @@ const styles = StyleSheet.create({
   },
   dayDetailBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: c.overlay,
+    backgroundColor: attendancePalette.overlay,
   },
   dayDetailCard: {
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: attendancePalette.surfaceElevated,
     borderRadius: r.lg,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
     paddingHorizontal: 18,
     paddingTop: 16,
     paddingBottom: 14,
@@ -3613,7 +4382,7 @@ const styles = StyleSheet.create({
     maxHeight: '86%',
   },
   sheetCardTall: {
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: attendancePalette.surfaceElevated,
     borderTopLeftRadius: r.xl,
     borderTopRightRadius: r.xl,
     paddingHorizontal: 20,
@@ -3621,9 +4390,9 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
     maxHeight: '78%',
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
     borderBottomWidth: 0,
-    shadowColor: c.shadow,
+    shadowColor: attendancePalette.shadow,
     shadowOffset: { width: 0, height: -2 },
     shadowOpacity: 0.1,
     shadowRadius: 10,
@@ -3652,7 +4421,7 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 12,
     lineHeight: 18,
-    color: c.warningTitle,
+    color: attendancePalette.sunshine,
     textAlign: 'center',
   },
   otHintText: {
@@ -3665,27 +4434,27 @@ const styles = StyleSheet.create({
   taskScroll: { maxHeight: 280, marginBottom: 8 },
   emptyTasksMsg: {
     fontSize: 15,
-    color: c.primaryDark,
+    color: attendancePalette.mint,
     textAlign: 'center',
     lineHeight: 24,
     paddingVertical: 20,
     paddingHorizontal: 8,
   },
   taskRow: {
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.surfaceMuted,
     borderRadius: r.sm,
     padding: 12,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
   },
   scheduleCalendarRow: {
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.surfaceMuted,
     borderRadius: r.sm,
     padding: 12,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
   },
   calendarLegendRow: {
     flexDirection: 'row',
@@ -3705,12 +4474,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: r.sm,
     borderWidth: 1,
-    borderColor: c.border,
-    backgroundColor: c.surfaceElevated,
+    borderColor: attendancePalette.border,
+    backgroundColor: attendancePalette.surface,
   },
   monthNavBtnText: {
     fontSize: 12,
-    color: c.primaryDark,
+    color: attendancePalette.mint,
     fontWeight: '700',
   },
   monthNavLabel: {
@@ -3725,7 +4494,7 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
   },
   calendarCloseBtn: {
-    backgroundColor: c.primary,
+    backgroundColor: attendancePalette.mintDeep,
     borderRadius: r.md,
     alignItems: 'center',
     paddingVertical: 10,
@@ -3751,9 +4520,9 @@ const styles = StyleSheet.create({
     color: c.textSecondary,
     fontWeight: '600',
   },
-  dotShift: { backgroundColor: c.primaryDark },
-  dotLegacy: { backgroundColor: c.accentWarm },
-  dotMemo: { backgroundColor: c.checkIn },
+  dotShift: { backgroundColor: attendancePalette.mint },
+  dotLegacy: { backgroundColor: attendancePalette.sunshine },
+  dotMemo: { backgroundColor: attendancePalette.aqua },
   calendarTapHint: {
     fontSize: 12,
     color: c.textMuted,
@@ -3761,9 +4530,9 @@ const styles = StyleSheet.create({
   },
   selectedDetailCard: {
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
     borderRadius: r.sm,
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.surfaceMuted,
     padding: 10,
     marginBottom: 8,
   },
@@ -3794,23 +4563,23 @@ const styles = StyleSheet.create({
     borderRadius: r.md,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
   },
   calendarCell: {
     width: '14.2857%',
     aspectRatio: 1,
     borderWidth: 0.5,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.surfaceMuted,
   },
   calendarCellSelected: {
-    backgroundColor: c.primaryLight,
-    borderColor: c.primaryMuted,
+    backgroundColor: attendancePalette.aquaLight,
+    borderColor: attendancePalette.aqua,
   },
   calendarCellToday: {
-    borderColor: c.checkIn,
+    borderColor: attendancePalette.mint,
     borderWidth: 2,
   },
   calendarDayNumber: {
@@ -3819,10 +4588,10 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   calendarDayNumberToday: {
-    color: c.checkIn,
+    color: attendancePalette.mint,
   },
   calendarDayNumberSelected: {
-    color: c.primaryDark,
+    color: attendancePalette.aqua,
     fontWeight: '700',
   },
   calendarDayNumberMuted: {
@@ -3839,6 +4608,95 @@ const styles = StyleSheet.create({
     marginTop: 3,
     fontSize: 10,
     color: c.textMuted,
+  },
+  calendarCompanyHolidayText: {
+    marginTop: 2,
+    fontSize: 8,
+    fontWeight: '900',
+    color: '#DC2626',
+    textAlign: 'center',
+  },
+  calendarEmployeeHolidayText: {
+    marginTop: 2,
+    fontSize: 8,
+    fontWeight: '900',
+    color: '#DC2626',
+    textAlign: 'center',
+  },
+  calendarLeaveText: {
+    marginTop: 2,
+    fontSize: 8,
+    fontWeight: '900',
+    color: c.leaveSickBar,
+    textAlign: 'center',
+  },
+  companyHolidayBanner: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+  },
+  companyHolidayBannerLabel: {
+    color: '#DC2626',
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  companyHolidayBannerTitle: {
+    color: '#991B1B',
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  companyHolidayBannerDesc: {
+    color: c.textMuted,
+    fontSize: 14,
+    marginTop: 8,
+    lineHeight: 20,
+  },
+  employeeHolidayBanner: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+  },
+  employeeHolidayBannerLabel: {
+    color: '#DC2626',
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  employeeHolidayBannerTitle: {
+    color: '#991B1B',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  scheduleLeaveBanner: {
+    backgroundColor: c.leaveSickBg,
+    borderColor: c.leaveSickBar,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+  },
+  scheduleLeaveBannerLabel: {
+    color: c.leaveSickBar,
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  scheduleLeaveBannerTitle: {
+    color: c.leaveSickBar,
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  scheduleLeaveBannerMeta: {
+    color: c.textMuted,
+    fontSize: 13,
+    marginTop: 6,
   },
   scheduleDetailList: {
     maxHeight: 180,
@@ -3874,8 +4732,8 @@ const styles = StyleSheet.create({
   dayMemoCard: {
     marginTop: 8,
     borderWidth: 1,
-    borderColor: c.borderSoft,
-    backgroundColor: c.surface,
+    borderColor: attendancePalette.border,
+    backgroundColor: attendancePalette.surface,
     borderRadius: r.md,
     padding: 12,
   },
@@ -3887,9 +4745,9 @@ const styles = StyleSheet.create({
   },
   dayMemoInput: {
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: attendancePalette.border,
     borderRadius: r.sm,
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: attendancePalette.surfaceElevated,
     color: c.text,
     minHeight: 72,
     textAlignVertical: 'top',
@@ -3913,7 +4771,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingVertical: 6,
     borderBottomWidth: 1,
-    borderBottomColor: c.borderSoft,
+    borderBottomColor: attendancePalette.border,
   },
   dayChecklistCheck: {
     width: 24,
@@ -3941,9 +4799,9 @@ const styles = StyleSheet.create({
   dayChecklistAddInput: {
     flex: 1,
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: attendancePalette.border,
     borderRadius: r.sm,
-    backgroundColor: c.surfaceElevated,
+    backgroundColor: attendancePalette.surfaceElevated,
     color: c.text,
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -3952,12 +4810,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: r.sm,
-    backgroundColor: c.primaryLight,
+    backgroundColor: attendancePalette.aquaLight,
     borderWidth: 1,
-    borderColor: c.primaryMuted,
+    borderColor: attendancePalette.aqua,
   },
   dayChecklistAddBtnText: {
-    color: c.primaryDark,
+    color: attendancePalette.aqua,
     fontSize: 12,
     fontWeight: '700',
   },
@@ -3972,29 +4830,29 @@ const styles = StyleSheet.create({
   },
   sheetActionHalf: { flex: 1 },
   sheetPrimaryBtn: {
-    backgroundColor: c.checkIn,
+    backgroundColor: attendancePalette.mintDeep,
     paddingVertical: 14,
     borderRadius: r.md,
     alignItems: 'center',
   },
   sheetPrimaryBtnText: { color: c.onAccent, fontWeight: '700', fontSize: 16 },
   sheetSecondaryBtn: {
-    backgroundColor: c.surface,
+    backgroundColor: attendancePalette.surface,
     paddingVertical: 14,
     borderRadius: r.md,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: attendancePalette.border,
   },
-  sheetSecondaryBtnText: { color: c.primaryDark, fontWeight: '700', fontSize: 15 },
+  sheetSecondaryBtnText: { color: attendancePalette.aqua, fontWeight: '800', fontSize: 15 },
   branchPickScroll: { maxHeight: 320, marginBottom: 12 },
   branchPickRow: {
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: attendancePalette.surfaceMuted,
     borderRadius: r.md,
     padding: 14,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderColor: attendancePalette.border,
   },
   branchPickRowPressed: { opacity: 0.92 },
   branchPickName: { fontSize: 16, fontWeight: '700', color: c.text },
@@ -4008,13 +4866,13 @@ const styles = StyleSheet.create({
   },
   offSiteInput: {
     borderWidth: 1,
-    borderColor: c.border,
+    borderColor: attendancePalette.border,
     borderRadius: r.sm,
     padding: 12,
     minHeight: 52,
     maxHeight: 88,
     textAlignVertical: 'top',
-    backgroundColor: c.surface,
+    backgroundColor: attendancePalette.surface,
     color: c.text,
     fontSize: 14,
     marginBottom: 4,

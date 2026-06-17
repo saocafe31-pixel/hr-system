@@ -1,10 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Animated, Easing, Image, StyleSheet, Text, View } from 'react-native';
 
-import { NatureTheme } from '@/constants/Theme';
+import { FoliageLightTheme, type AppTheme } from '@/constants/Theme';
+import { useOptionalAppTheme } from '@/contexts/AppThemeContext';
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
 const LOADING_LOGO_URL =
   'https://qidohlmeyhsofuntbmbw.supabase.co/storage/v1/object/public/logo/MENU.png';
 
@@ -16,6 +15,14 @@ type AppLoadingScreenProps = {
 export function AppLoadingScreen({
   title = 'กำลังเตรียมข้อมูล',
 }: AppLoadingScreenProps) {
+  const appTheme = useOptionalAppTheme();
+  const theme = appTheme?.theme ?? FoliageLightTheme;
+  const isLightTheme = (appTheme?.themeId ?? 'foliageLight') === 'foliageLight';
+  const c = theme.colors;
+  const styles = useMemo(
+    () => createLoadingStyles(c, theme.radius, isLightTheme),
+    [c, isLightTheme, theme.radius]
+  );
   const pulse = useRef(new Animated.Value(0)).current;
   const scan = useRef(new Animated.Value(0)).current;
 
@@ -109,10 +116,22 @@ export function AppLoadingScreen({
   );
 }
 
-const styles = StyleSheet.create({
+function createLoadingStyles(
+  c: AppTheme['colors'],
+  r: AppTheme['radius'],
+  isLightTheme: boolean
+) {
+  const lightLoadingBg = '#DDE8B8';
+  const logoStageSize = isLightTheme ? 66 : 58;
+  const glowSize = isLightTheme ? 60 : 52;
+  const logoShellSize = isLightTheme ? 54 : 46;
+  const logoSize = isLightTheme ? 52 : 44;
+  const logoShineHeight = isLightTheme ? 72 : 62;
+
+  return StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: c.canvas,
+    backgroundColor: isLightTheme ? lightLoadingBg : c.canvas,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 12,
@@ -125,43 +144,43 @@ const styles = StyleSheet.create({
     paddingHorizontal: 0,
   },
   logoStage: {
-    width: 58,
-    height: 58,
+    width: logoStageSize,
+    height: logoStageSize,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 8,
   },
   glow: {
     position: 'absolute',
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: c.primaryLight,
+    width: glowSize,
+    height: glowSize,
+    borderRadius: glowSize / 2,
+    backgroundColor: isLightTheme ? 'rgba(255,255,255,0.46)' : c.primaryLight,
   },
   logoShell: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
+    width: logoShellSize,
+    height: logoShellSize,
+    borderRadius: logoShellSize / 2,
     backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
   },
   logo: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: logoSize,
+    height: logoSize,
+    borderRadius: logoSize / 2,
   },
   logoShine: {
     position: 'absolute',
     width: 10,
-    height: 62,
+    height: logoShineHeight,
     backgroundColor: 'rgba(255,255,255,0.28)',
   },
   title: {
     fontSize: 11,
     fontWeight: '900',
-    color: c.textSecondary,
+    color: isLightTheme ? c.primaryDark : c.textSecondary,
     textAlign: 'center',
     marginBottom: 7,
   },
@@ -169,10 +188,10 @@ const styles = StyleSheet.create({
     width: 112,
     height: 5,
     borderRadius: 999,
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: isLightTheme ? 'rgba(111, 132, 46, 0.18)' : c.surfaceMuted,
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: c.borderSoft,
+    borderWidth: isLightTheme ? 0.5 : 1,
+    borderColor: isLightTheme ? 'rgba(111, 132, 46, 0.26)' : c.borderSoft,
   },
   progressFill: {
     position: 'absolute',
@@ -181,8 +200,8 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: '52%',
     borderRadius: 999,
-    backgroundColor: c.primaryMuted,
-    opacity: 0.72,
+    backgroundColor: isLightTheme ? c.primaryDark : c.primaryMuted,
+    opacity: isLightTheme ? 0.86 : 0.72,
   },
   progressScan: {
     position: 'absolute',
@@ -190,7 +209,7 @@ const styles = StyleSheet.create({
     bottom: -2,
     width: 34,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.42)',
+    backgroundColor: isLightTheme ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.42)',
   },
   statusRow: {
     flexDirection: 'row',
@@ -202,11 +221,12 @@ const styles = StyleSheet.create({
     width: 5,
     height: 5,
     borderRadius: 3,
-    backgroundColor: c.checkIn,
+    backgroundColor: isLightTheme ? c.primaryDark : c.checkIn,
   },
   statusText: {
-    color: c.textSecondary,
+    color: isLightTheme ? c.textSecondary : c.textSecondary,
     fontSize: 9,
     fontWeight: '700',
   },
 });
+}

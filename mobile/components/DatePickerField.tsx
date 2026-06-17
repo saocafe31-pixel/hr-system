@@ -1,6 +1,7 @@
 import {
   createElement,
   useEffect,
+  useMemo,
   useState,
   type ChangeEvent,
 } from 'react';
@@ -16,7 +17,8 @@ import DateTimePicker, {
   DateTimePickerAndroid,
 } from '@react-native-community/datetimepicker';
 
-import { NatureTheme } from '@/constants/Theme';
+import { NatureTheme, type AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { dateToBangkokYmd } from '@/lib/taskHelpers';
 
 type Props = {
@@ -65,6 +67,10 @@ export function DatePickerField({
   minimumDate,
   maximumDate,
 }: Props) {
+  const { theme, themeId } = useAppTheme();
+  const tc = theme.colors;
+  const themed = useMemo(() => createDatePickerThemeStyles(tc), [tc]);
+  const lightMode = themeId === 'foliageLight';
   const [iosOpen, setIosOpen] = useState(false);
   const [temp, setTemp] = useState<Date>(value ?? new Date());
 
@@ -103,14 +109,20 @@ export function DatePickerField({
 
   return (
     <View style={styles.root}>
-      <Text style={styles.label}>{label}</Text>
+      <Text style={[styles.label, themed.label]}>{label}</Text>
       <Pressable
-        style={[styles.field, disabled && styles.fieldDisabled]}
+        style={[styles.field, themed.field, disabled && styles.fieldDisabled]}
         onPress={openPicker}
         disabled={disabled}
         accessibilityRole="button"
         accessibilityLabel={label}>
-        <Text style={[styles.fieldText, !value && styles.placeholder]}>
+        <Text
+          style={[
+            styles.fieldText,
+            themed.fieldText,
+            !value && styles.placeholder,
+            !value && themed.placeholder,
+          ]}>
           {formatTh(value)}
         </Text>
       </Pressable>
@@ -121,13 +133,13 @@ export function DatePickerField({
           transparent
           animationType="fade"
           onRequestClose={() => setIosOpen(false)}>
-          <View style={[styles.modalRoot, WEB_DATE_MODAL]}>
+          <View style={[styles.modalRoot, themed.modalRoot, WEB_DATE_MODAL]}>
             <Pressable
               style={styles.modalFlex}
               onPress={() => setIosOpen(false)}
             />
-            <View style={styles.sheet}>
-              <Text style={styles.sheetTitle}>เลือกวันที่</Text>
+            <View style={[styles.sheet, themed.sheet]}>
+              <Text style={[styles.sheetTitle, themed.sheetTitle]}>เลือกวันที่</Text>
               {Platform.OS === 'web' ? (
                 <View style={styles.pickerWrap}>
                   {createElement('input', {
@@ -149,10 +161,14 @@ export function DatePickerField({
                       fontSize: 18,
                       padding: '14px 12px',
                       borderRadius: r.sm,
-                      border: `1px solid ${c.border}`,
+                      border: `2px solid ${tc.border}`,
                       boxSizing: 'border-box',
-                      color: c.text,
-                      backgroundColor: c.surface,
+                      color: tc.text,
+                      backgroundColor: lightMode ? '#FFFFFF' : tc.surfaceMuted,
+                      colorScheme: lightMode ? 'light' : 'dark',
+                      outline: 'none',
+                      boxShadow: lightMode ? `0 0 0 3px ${tc.primaryLight}` : 'none',
+                      WebkitTextFillColor: tc.text,
                     },
                   })}
                 </View>
@@ -179,15 +195,15 @@ export function DatePickerField({
                     onChange(null);
                     setIosOpen(false);
                   }}>
-                  <Text style={styles.linkText}>ล้างวันที่</Text>
+                  <Text style={[styles.linkText, themed.linkText]}>ล้างวันที่</Text>
                 </Pressable>
                 <View style={styles.sheetRight}>
                   <Pressable
                     style={styles.textBtn}
                     onPress={() => setIosOpen(false)}>
-                    <Text style={styles.cancelText}>ยกเลิก</Text>
+                    <Text style={[styles.cancelText, themed.cancelText]}>ยกเลิก</Text>
                   </Pressable>
-                  <Pressable style={styles.okBtn} onPress={confirmIos}>
+                  <Pressable style={[styles.okBtn, themed.okBtn]} onPress={confirmIos}>
                     <Text style={styles.okText}>ตกลง</Text>
                   </Pressable>
                 </View>
@@ -198,6 +214,33 @@ export function DatePickerField({
       )}
     </View>
   );
+}
+
+function createDatePickerThemeStyles(colors: AppTheme['colors']) {
+  return StyleSheet.create({
+    label: { color: colors.textSecondary },
+    field: {
+      borderColor: colors.border,
+      borderWidth: 2,
+      backgroundColor: colors.surface,
+    },
+    fieldText: { color: colors.text },
+    placeholder: { color: colors.textMuted },
+    modalRoot: { backgroundColor: colors.overlay },
+    sheet: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 2,
+      shadowColor: colors.shadow,
+      shadowOpacity: 0.18,
+      shadowRadius: 18,
+      shadowOffset: { width: 0, height: 8 },
+    },
+    sheetTitle: { color: colors.text },
+    linkText: { color: colors.link },
+    cancelText: { color: colors.textMuted },
+    okBtn: { backgroundColor: colors.primaryDark },
+  });
 }
 
 const styles = StyleSheet.create({

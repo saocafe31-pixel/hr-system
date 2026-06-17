@@ -24,7 +24,8 @@ import { FriendlyConfirmModal } from '@/components/FriendlyNoticeModal';
 import { TaskProgressBar } from '@/components/TaskProgressBar';
 import { UserAvatar } from '@/components/UserAvatar';
 import { WorkAnalyticsPanel } from '@/components/WorkAnalyticsPanel';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import {
@@ -374,6 +375,9 @@ export default function TeamScreen() {
   const role = useRole();
   const admin = isAdmin(role);
   const managerScope = isManagerOrAdmin(role);
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createTeamStyles(theme), [theme]);
   const [profiles, setProfiles] = useState<TeamMemberCard[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3036,7 +3040,7 @@ export default function TeamScreen() {
               <TextInput
                 style={styles.assignFormInput}
                 placeholder="เช่น นัดลูกค้า บริษัท …"
-                placeholderTextColor={NatureTheme.colors.textMuted}
+                placeholderTextColor={c.textMuted}
                 value={assignTitle}
                 onChangeText={setAssignTitle}
                 editable={!assigning}
@@ -3046,7 +3050,7 @@ export default function TeamScreen() {
               <TextInput
                 style={[styles.assignFormInput, styles.assignFormTall]}
                 placeholder="การนัดหมาย การประสานกับทีม ฯลฯ"
-                placeholderTextColor={NatureTheme.colors.textMuted}
+                placeholderTextColor={c.textMuted}
                 value={assignDesc}
                 onChangeText={setAssignDesc}
                 multiline
@@ -3098,7 +3102,7 @@ export default function TeamScreen() {
                     value={line.text}
                     onChangeText={(v) => updateAssignChecklistLine(line.id, v)}
                     placeholder="หัวข้อย่อย"
-                    placeholderTextColor={NatureTheme.colors.textMuted}
+                    placeholderTextColor={c.textMuted}
                     editable={!assigning}
                   />
                   <Pressable
@@ -3141,7 +3145,7 @@ export default function TeamScreen() {
                   <TextInput
                     style={styles.assignTeamSearch}
                     placeholder="ค้นหาชื่อพนักงาน ชื่อเล่น หรืออีเมล…"
-                    placeholderTextColor={NatureTheme.colors.textMuted}
+                    placeholderTextColor={c.textMuted}
                     value={assignTeamSearch}
                     onChangeText={setAssignTeamSearch}
                     editable={!assigning}
@@ -3197,14 +3201,14 @@ export default function TeamScreen() {
               })}
               <View style={[styles.actions, { marginTop: 12 }]}>
                 <Pressable onPress={() => setAssignModalOpen(false)} disabled={assigning}>
-                  <Text style={{ color: NatureTheme.colors.text }}>ยกเลิก</Text>
+                  <Text style={{ color: c.text }}>ยกเลิก</Text>
                 </Pressable>
                 <Pressable
                   style={[styles.save, assigning && styles.disabled]}
                   onPress={() => void assignTaskToMember()}
                   disabled={assigning}>
                   {assigning ? (
-                    <ActivityIndicator color={NatureTheme.colors.onAccent} />
+                    <ActivityIndicator color={c.onAccent} />
                   ) : (
                     <Text style={styles.saveText}>มอบหมายงาน</Text>
                   )}
@@ -3231,11 +3235,16 @@ export default function TeamScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createTeamStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   screen: { flex: 1, backgroundColor: c.canvas },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   h2: { fontSize: 18, fontWeight: '700', marginBottom: 8, color: c.text },
@@ -3369,6 +3378,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: c.text,
+    ...sectionAccent,
   },
   sectionSubText: { fontSize: 12, color: c.textMuted, marginBottom: 8 },
   memberWorkCard: {
@@ -3984,4 +3994,5 @@ const styles = StyleSheet.create({
   },
   attendanceSaveBtnText: { color: c.onAccent, fontSize: 12, fontWeight: '700' },
   attendanceEditMuted: { color: c.textMuted, fontSize: 12 },
-});
+  });
+}

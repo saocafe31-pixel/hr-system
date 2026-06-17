@@ -23,6 +23,7 @@ import { LateRequestHistoryCard } from '@/components/LateRequestHistoryCard';
 import { ProfileClaimsCard } from '@/components/ProfileClaimsCard';
 import { ProfilePayslipCard } from '@/components/ProfilePayslipCard';
 import { UserAvatar } from '@/components/UserAvatar';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { isAdmin, isManagerOrAdmin, useAuth, useRole } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { pickAvatarFromLibrary, uploadAvatarUri } from '@/lib/avatarUpload';
@@ -32,7 +33,7 @@ import {
   formatDirectoryValue,
   HR_DIRECTORY_FIELDS,
 } from '@/lib/employeeDirectoryDisplay';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
 import { useTabUnreadBadges } from '@/contexts/TabUnreadBadgesContext';
 import {
   getNotificationPermissionStatus,
@@ -86,6 +87,7 @@ import type {
 
 type ProfileSectionKey =
   | 'profile'
+  | 'appearance'
   | 'notifications'
   | 'leaveLate'
   | 'hr'
@@ -107,6 +109,12 @@ const PROFILE_SECTIONS: Array<{
     title: 'โปรไฟล์',
     subtitle: 'รูป ชื่อ เบอร์โทร และสุขภาวะ',
     icon: 'user',
+  },
+  {
+    key: 'appearance',
+    title: 'ธีมแอป',
+    subtitle: 'เลือกธีมเดิมหรือธีมสว่าง FOLIAGE',
+    icon: 'paint-brush',
   },
   {
     key: 'notifications',
@@ -301,6 +309,11 @@ function buildWorkStartByYmd(
 export default function ProfileScreen() {
   const toast = useCuteToast();
   const { profile, refreshProfile, signOut, session } = useAuth();
+  const { themeId, theme, setThemeId } = useAppTheme();
+  const themeColors = theme.colors;
+  const c = themeColors;
+  const styles = useMemo(() => createProfileStyles(theme), [theme]);
+  const themeStyles = {} as Partial<typeof styles>;
   const role = useRole();
   const router = useRouter();
   const admin = isAdmin(role);
@@ -1168,22 +1181,22 @@ export default function ProfileScreen() {
   return (
     <>
       <ScrollView
-        style={styles.screen}
+        style={[styles.screen, themeStyles?.screen]}
         contentContainerStyle={styles.screenContent}
         keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onPullRefresh}
-            tintColor={NatureTheme.colors.primary}
-            colors={[NatureTheme.colors.primary]}
+            tintColor={themeColors.primary}
+            colors={[themeColors.primary]}
             title="ดึงลงเพื่อรีเฟรช"
-            titleColor={NatureTheme.colors.textMuted}
+            titleColor={themeColors.textMuted}
           />
         }>
         {activeSection === null ? (
           <>
-            <View style={styles.profileMenuHero}>
+            <View style={[styles.profileMenuHero, themeStyles?.profileMenuHero]}>
               <View style={styles.profileMenuHeroTop}>
                 <UserAvatar
                   uri={avatarUriForDisplay}
@@ -1191,18 +1204,18 @@ export default function ProfileScreen() {
                   size={64}
                 />
                 <View style={styles.profileMenuHeroText}>
-                  <Text style={styles.profileMenuHeroTitle} numberOfLines={1}>
+                  <Text style={[styles.profileMenuHeroTitle, themeStyles?.profileMenuHeroTitle]} numberOfLines={1}>
                     {fullName.trim() || profile?.full_name || profile?.email || 'โปรไฟล์'}
                   </Text>
-                  <Text style={styles.profileMenuHeroSub} numberOfLines={1}>
+                  <Text style={[styles.profileMenuHeroSub, themeStyles?.profileMenuHeroSub]} numberOfLines={1}>
                     {profile?.email ?? session?.user?.email ?? 'ยังไม่มีอีเมล'}
                   </Text>
-                  <Text style={styles.profileMenuHeroRole}>
+                  <Text style={[styles.profileMenuHeroRole, themeStyles?.profileMenuHeroRole]}>
                     {profile?.role ?? 'employee'}
                   </Text>
                 </View>
               </View>
-              <Text style={styles.profileMenuHeroHint}>
+              <Text style={[styles.profileMenuHeroHint, themeStyles?.profileMenuHeroHint]}>
                 เลือกหมวดที่ต้องการจัดการ เพื่อเปิดรายละเอียดเฉพาะส่วนนั้น
               </Text>
             </View>
@@ -1211,13 +1224,13 @@ export default function ProfileScreen() {
               {visibleProfileSections.map((section) => (
                 <Pressable
                   key={section.key}
-                  style={styles.profileMenuCard}
+                  style={[styles.profileMenuCard, themeStyles?.profileMenuCard]}
                   onPress={() => setActiveSection(section.key)}>
-                  <View style={styles.profileMenuIcon}>
-                    <FontAwesome name={section.icon} size={22} color={c.primaryDark} />
+                  <View style={[styles.profileMenuIcon, themeStyles?.profileMenuIcon]}>
+                    <FontAwesome name={section.icon} size={22} color={themeColors.primaryDark} />
                   </View>
-                  <Text style={styles.profileMenuTitle}>{section.title}</Text>
-                  <Text style={styles.profileMenuSub}>{section.subtitle}</Text>
+                  <Text style={[styles.profileMenuTitle, themeStyles?.profileMenuTitle]}>{section.title}</Text>
+                  <Text style={[styles.profileMenuSub, themeStyles?.profileMenuSub]}>{section.subtitle}</Text>
                 </Pressable>
               ))}
             </View>
@@ -1225,20 +1238,20 @@ export default function ProfileScreen() {
         ) : (
           <>
             {activeSectionMeta ? (
-              <View style={styles.profileSectionHeader}>
+              <View style={[styles.profileSectionHeader, themeStyles?.profileSectionHeader]}>
                 <Pressable
-                  style={styles.profileBackBtn}
+                  style={[styles.profileBackBtn, themeStyles?.profileBackBtn]}
                   onPress={() => setActiveSection(null)}>
-                  <FontAwesome name="chevron-left" size={13} color={c.primaryDark} />
-                  <Text style={styles.profileBackBtnText}>กลับสู่เมนูโปรไฟล์</Text>
+                  <FontAwesome name="chevron-left" size={13} color={themeColors.primaryDark} />
+                  <Text style={[styles.profileBackBtnText, themeStyles?.profileBackBtnText]}>กลับสู่เมนูโปรไฟล์</Text>
                 </Pressable>
                 <View style={styles.profileSectionTitleRow}>
-                  <View style={styles.profileSectionIcon}>
-                    <FontAwesome name={activeSectionMeta.icon} size={20} color={c.onAccent} />
+                  <View style={[styles.profileSectionIcon, themeStyles?.profileSectionIcon]}>
+                    <FontAwesome name={activeSectionMeta.icon} size={20} color={themeColors.onAccent} />
                   </View>
                   <View style={styles.profileSectionTitleText}>
-                    <Text style={styles.profileSectionTitle}>{activeSectionMeta.title}</Text>
-                    <Text style={styles.profileSectionSub}>{activeSectionMeta.subtitle}</Text>
+                    <Text style={[styles.profileSectionTitle, themeStyles?.profileSectionTitle]}>{activeSectionMeta.title}</Text>
+                    <Text style={[styles.profileSectionSub, themeStyles?.profileSectionSub]}>{activeSectionMeta.subtitle}</Text>
                   </View>
                 </View>
               </View>
@@ -1258,7 +1271,7 @@ export default function ProfileScreen() {
               onPress={onChangeAvatar}
               disabled={uploadingAvatar}>
               {uploadingAvatar ? (
-                <ActivityIndicator color={NatureTheme.colors.primary} />
+                <ActivityIndicator color={c.primary} />
               ) : (
                 <Text style={styles.avatarBtnText}>เปลี่ยนรูปโปรไฟล์</Text>
               )}
@@ -1308,10 +1321,73 @@ export default function ProfileScreen() {
           </>
         ) : null}
 
+        {activeSection === 'appearance' ? (
+          <>
+            <Text style={[styles.sectionTitle, themeStyles?.sectionTitle]}>ธีมแอป</Text>
+            <Text style={[styles.themeSettingsSub, themeStyles?.themeSettingsSub]}>
+              ธีมสว่างใช้พื้นหลังขาวและเขียว FOLIAGE ตามภาพแบรนด์ ส่วนธีมเดิมจะคงโทน Premium Dark เดิมของแอป
+            </Text>
+            <View style={styles.themeChoiceGrid}>
+              {[
+                {
+                  id: 'classicDark' as const,
+                  title: 'ธีมเดิม',
+                  subtitle: 'Premium Dark · เขียวมะกอก / ทอง',
+                  swatches: ['#121212', '#252525', '#A6B874'],
+                },
+                {
+                  id: 'foliageLight' as const,
+                  title: 'ธีมสว่าง FOLIAGE',
+                  subtitle: 'พื้นหลังขาว · เขียวอ่อนตามภาพ',
+                  swatches: ['#FFFFFF', '#F1F5DF', '#AFC25A'],
+                },
+              ].map((option) => {
+                const selected = themeId === option.id;
+                return (
+                  <Pressable
+                    key={option.id}
+                    style={[
+                      styles.themeChoiceCard,
+                      themeStyles?.themeChoiceCard,
+                      selected && {
+                        backgroundColor: themeColors.primaryLight,
+                        borderColor: themeColors.primary,
+                      },
+                    ]}
+                    onPress={() => {
+                      void setThemeId(option.id).then(() => {
+                        toast.success('เปลี่ยนธีมแล้ว', `เลือก ${option.title} เรียบร้อย`);
+                      });
+                    }}>
+                    <View style={styles.themeChoiceTopRow}>
+                      <View style={styles.themeSwatchRow}>
+                        {option.swatches.map((swatch) => (
+                          <View
+                            key={swatch}
+                            style={[styles.themeSwatch, { backgroundColor: swatch }]}
+                          />
+                        ))}
+                      </View>
+                      {selected ? (
+                        <FontAwesome name="check-circle" size={20} color={themeColors.primaryDark} />
+                      ) : null}
+                    </View>
+                    <Text style={[styles.themeChoiceTitle, themeStyles?.themeChoiceTitle]}>{option.title}</Text>
+                    <Text style={[styles.themeChoiceSub, themeStyles?.themeChoiceSub]}>{option.subtitle}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            <Text style={[styles.themeSettingsHint, themeStyles?.themeSettingsHint]}>
+              ธีมสว่าง FOLIAGE ถูกใช้เป็นฐานสีของทั้งแอปแล้ว รวมถึง header, tabbar, loading screen, ตาราง และ popup หลัก
+            </Text>
+          </>
+        ) : null}
+
         {activeSection === 'notifications' ? (
           <>
-        <Text style={styles.sectionTitle}>สถานะแจ้งเตือน</Text>
-        <Text style={styles.sectionSub}>
+        <Text style={[styles.sectionTitle, themeStyles?.sectionTitle]}>สถานะแจ้งเตือน</Text>
+        <Text style={[styles.sectionSub, themeStyles?.sectionSub]}>
           ตรวจสอบ permission, ความสามารถ badge และขอสิทธิ์ใหม่ได้ทันที
         </Text>
         <View style={styles.hrCard}>
@@ -1334,7 +1410,7 @@ export default function ProfileScreen() {
             onPress={requestNotifAgain}
             disabled={notifBusy}>
             {notifBusy ? (
-              <ActivityIndicator color={NatureTheme.colors.onAccent} />
+              <ActivityIndicator color={c.onAccent} />
             ) : (
               <Text style={styles.primaryText}>ขอสิทธิ์อีกครั้ง</Text>
             )}
@@ -1378,8 +1454,8 @@ export default function ProfileScreen() {
 
         {activeSection === 'leaveLate' ? (
           <>
-        <Text style={styles.sectionTitle}>ลา & เข้าสาย</Text>
-        <Text style={styles.sectionSub}>
+        <Text style={[styles.sectionTitle, themeStyles?.sectionTitle]}>ลา & เข้าสาย</Text>
+        <Text style={[styles.sectionSub, themeStyles?.sectionSub]}>
           สรุปโควตาปี {quotaY} · นับวันลาเฉพาะที่อนุมัติแล้ว · ขอเข้าสายจำกัดตามรอบ 26–25
           — สรุปเวลาสายตามรอบ 26–25 อยู่ด้านล่าง
         </Text>
@@ -1720,14 +1796,14 @@ export default function ProfileScreen() {
 
         {activeSection === 'hr' ? (
           <>
-        <Text style={styles.sectionTitle}>ข้อมูลพนักงาน (HR)</Text>
-        <Text style={styles.sectionSub}>
+        <Text style={[styles.sectionTitle, themeStyles?.sectionTitle]}>ข้อมูลพนักงาน (HR)</Text>
+        <Text style={[styles.sectionSub, themeStyles?.sectionSub]}>
           ข้อมูลพนักงานพื้นฐานจากระบบ HR
         </Text>
         {hrLoading ? (
           <ActivityIndicator
             style={{ marginVertical: 16 }}
-            color={NatureTheme.colors.primary}
+            color={c.primary}
           />
         ) : !profile?.employee_id ? (
           <Text style={styles.muted}>
@@ -1778,8 +1854,8 @@ export default function ProfileScreen() {
 
         {activeSection === 'teamDirectory' && managerScope && profile?.role === 'manager' ? (
           <>
-            <Text style={styles.sectionTitle}>พนักงานในสาขา</Text>
-            <Text style={styles.sectionSub}>
+            <Text style={[styles.sectionTitle, themeStyles?.sectionTitle]}>พนักงานในสาขา</Text>
+            <Text style={[styles.sectionSub, themeStyles?.sectionSub]}>
               แสดงเฉพาะพนักงานที่อยู่สาขาเดียวกับคุณ (ตามสิทธิ์ระบบ)
             </Text>
             {dirList.map((row) => (
@@ -1801,8 +1877,8 @@ export default function ProfileScreen() {
 
         {activeSection === 'adminDirectory' && admin ? (
           <>
-            <Text style={styles.sectionTitle}>พนักงานทั้งหมด (แอดมิน)</Text>
-            <Text style={styles.sectionSub}>
+            <Text style={[styles.sectionTitle, themeStyles?.sectionTitle]}>พนักงานทั้งหมด (แอดมิน)</Text>
+            <Text style={[styles.sectionSub, themeStyles?.sectionSub]}>
               แตะรายการเพื่อแก้ไขข้อมูล HR / รหัส legacy
             </Text>
             {dirList.map((row) => (
@@ -2050,7 +2126,7 @@ export default function ProfileScreen() {
                 onPress={saveCroppedAvatar}
                 disabled={avatarCropSaving}>
                 {avatarCropSaving ? (
-                  <ActivityIndicator color={NatureTheme.colors.onAccent} />
+                  <ActivityIndicator color={c.onAccent} />
                 ) : (
                   <Text style={styles.primaryText}>บันทึกรูปนี้</Text>
                 )}
@@ -2063,11 +2139,16 @@ export default function ProfileScreen() {
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
-const s = NatureTheme.spacing;
+function createProfileStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const s = theme.spacing;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   screen: { flex: 1, backgroundColor: c.canvas },
   screenContent: { padding: s.screen, paddingBottom: s.scrollBottom },
   profileMenuHero: {
@@ -2183,6 +2264,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+    ...sectionAccent,
   },
   profileSectionIcon: {
     width: 42,
@@ -2588,8 +2670,65 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '700',
     color: c.text,
+    ...sectionAccent,
   },
   sectionSub: { fontSize: 12, color: c.textMuted, marginTop: 4, marginBottom: 10 },
+  themeSettingsSub: {
+    marginTop: 6,
+    marginBottom: 12,
+    fontSize: 13,
+    lineHeight: 19,
+    color: c.textMuted,
+  },
+  themeChoiceGrid: {
+    gap: 10,
+  },
+  themeChoiceCard: {
+    padding: 14,
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  themeChoiceTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  themeSwatchRow: {
+    flexDirection: 'row',
+    gap: 7,
+  },
+  themeSwatch: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.55)',
+  },
+  themeChoiceTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: c.text,
+  },
+  themeChoiceSub: {
+    marginTop: 4,
+    fontSize: 12,
+    color: c.textMuted,
+    lineHeight: 17,
+  },
+  themeSettingsHint: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: r.md,
+    backgroundColor: c.primaryLight,
+    borderWidth: 1,
+    borderColor: c.primaryMuted,
+    color: c.primaryDark,
+    fontSize: 12,
+    lineHeight: 18,
+  },
   muted: { fontSize: 14, color: c.textMuted, lineHeight: 20 },
   mono: { fontFamily: 'monospace', fontSize: 12, color: c.textSecondary },
   hrCard: {
@@ -2709,4 +2848,5 @@ const styles = StyleSheet.create({
   cropCenterBtn: { marginTop: 0, width: '100%' },
   cropCancelBtn: { flex: 1, marginTop: 0 },
   cropSaveBtn: { flex: 1, marginTop: 0 },
-});
+  });
+}

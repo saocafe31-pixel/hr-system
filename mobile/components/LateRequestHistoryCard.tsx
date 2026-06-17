@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { currentYearBangkok } from '@/lib/leaveLateRules';
 import { supabase } from '@/lib/supabase';
@@ -67,6 +68,9 @@ function formatCreatedAtTh(iso: string): string {
 
 export function LateRequestHistoryCard({ userId, canManage = false, onChanged }: Props) {
   const toast = useCuteToast();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createLateRequestHistoryStyles(theme), [theme]);
   const [rows, setRows] = useState<LateRequestHistoryRow[]>([]);
   const [open, setOpen] = useState(false);
   const [editRow, setEditRow] = useState<LateRequestHistoryRow | null>(null);
@@ -200,6 +204,7 @@ export function LateRequestHistoryCard({ userId, canManage = false, onChanged }:
             <LateRequestRow
               key={row.id}
               row={row}
+              styles={styles}
               canManage={canManage}
               onManage={openEditor}
             />
@@ -227,6 +232,7 @@ export function LateRequestHistoryCard({ userId, canManage = false, onChanged }:
                   <LateRequestRow
                     key={`modal-${row.id}`}
                     row={row}
+                    styles={styles}
                     canManage={canManage}
                     onManage={openEditor}
                   />
@@ -313,10 +319,12 @@ export function LateRequestHistoryCard({ userId, canManage = false, onChanged }:
 
 function LateRequestRow({
   row,
+  styles,
   canManage = false,
   onManage,
 }: {
   row: LateRequestHistoryRow;
+  styles: ReturnType<typeof createLateRequestHistoryStyles>;
   canManage?: boolean;
   onManage?: (row: LateRequestHistoryRow) => void;
 }) {
@@ -340,10 +348,15 @@ function LateRequestRow({
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
+function createLateRequestHistoryStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   card: {
     marginTop: 12,
     padding: 12,
@@ -353,7 +366,7 @@ const styles = StyleSheet.create({
     borderColor: c.borderSoft,
   },
   header: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
-  title: { fontSize: 16, fontWeight: '800', color: c.text },
+  title: { fontSize: 16, fontWeight: '800', color: c.text, ...sectionAccent },
   sub: { marginTop: 3, fontSize: 12, color: c.textMuted, lineHeight: 17 },
   openBtn: {
     borderRadius: r.sm,
@@ -483,4 +496,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modalCloseText: { fontWeight: '700', color: c.textSecondary },
-});
+  });
+}

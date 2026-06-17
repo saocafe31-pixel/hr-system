@@ -1,34 +1,24 @@
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { DarkTheme, Theme as NavigationTheme, ThemeProvider } from '@react-navigation/native';
+import {
+  DarkTheme,
+  DefaultTheme,
+  Theme as NavigationTheme,
+  ThemeProvider,
+} from '@react-navigation/native';
 import { useFonts } from 'expo-font';
 import Head from 'expo-router/head';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
 import { AppLoadingScreen } from '@/components/AppLoadingScreen';
+import { AppThemeProvider, useAppTheme } from '@/contexts/AppThemeContext';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { CuteToastProvider } from '@/contexts/CuteToastContext';
-import { NatureTheme } from '@/constants/Theme';
-
-const nc = NatureTheme.colors;
-
-const FoliageNavigationTheme: NavigationTheme = {
-  ...DarkTheme,
-  colors: {
-    ...DarkTheme.colors,
-    primary: nc.primary,
-    background: nc.canvas,
-    card: nc.surface,
-    text: nc.text,
-    border: nc.borderSoft,
-    notification: nc.checkIn,
-  },
-};
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -62,28 +52,52 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <AuthProvider>
-        <CuteToastProvider>
-          <RootLayoutNav />
-        </CuteToastProvider>
-      </AuthProvider>
+      <AppThemeProvider>
+        <AuthProvider>
+          <CuteToastProvider>
+            <RootLayoutNav />
+          </CuteToastProvider>
+        </AuthProvider>
+      </AppThemeProvider>
     </GestureHandlerRootView>
   );
 }
 
 function RootLayoutNav() {
+  const { themeId, theme } = useAppTheme();
+  const nc = theme.colors;
+  const isLightTheme = themeId === 'foliageLight';
+  const navigationTheme = useMemo<NavigationTheme>(
+    () => ({
+      ...(isLightTheme ? DefaultTheme : DarkTheme),
+      colors: {
+        ...(isLightTheme ? DefaultTheme.colors : DarkTheme.colors),
+        primary: nc.primary,
+        background: nc.canvas,
+        card: nc.surface,
+        text: nc.text,
+        border: nc.borderSoft,
+        notification: nc.checkIn,
+      },
+    }),
+    [isLightTheme, nc]
+  );
+
   return (
-    <ThemeProvider value={FoliageNavigationTheme}>
-      <StatusBar style="light" />
+    <ThemeProvider value={navigationTheme}>
+      <StatusBar style={isLightTheme ? 'dark' : 'light'} />
       {Platform.OS === 'web' ? (
         <Head>
           <link rel="manifest" href="/manifest.json" />
           <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
           <link rel="icon" type="image/png" href="/apple-touch-icon.png" />
-          <meta name="theme-color" content="#121212" />
+          <meta name="theme-color" content={nc.canvas} />
           <meta name="apple-mobile-web-app-title" content="FOLIAGE" />
           <meta name="apple-mobile-web-app-capable" content="yes" />
-          <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+          <meta
+            name="apple-mobile-web-app-status-bar-style"
+            content={isLightTheme ? 'default' : 'black-translucent'}
+          />
           <meta name="mobile-web-app-capable" content="yes" />
         </Head>
       ) : null}

@@ -3,7 +3,8 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle, Line, Polyline, Text as SvgText } from 'react-native-svg';
 
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import {
   computeLateFromAttendanceData,
   payrollPeriodCheckInIsoRange,
@@ -13,8 +14,6 @@ import {
 import { supabase } from '@/lib/supabase';
 import type { WorkScheduleRow } from '@/lib/types';
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
 const ANALYTICS_ALL_MONTHS_KEY = 'all';
 const ANALYTICS_PAGE_SIZE = 1000;
 
@@ -244,7 +243,15 @@ async function fetchAllPaged<T>(
   return all;
 }
 
-function MultiMetricLineChart({ lines }: { lines: MetricLine[] }) {
+function MultiMetricLineChart({
+  lines,
+  styles,
+  colors,
+}: {
+  lines: MetricLine[];
+  styles: ReturnType<typeof createWorkAnalyticsStyles>;
+  colors: AppTheme['colors'];
+}) {
   const scrollRef = useRef<ScrollView>(null);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const points = lines[0]?.points ?? [];
@@ -338,7 +345,7 @@ function MultiMetricLineChart({ lines }: { lines: MetricLine[] }) {
                 x2={chartW - rightPad}
                 y1={y}
                 y2={y}
-                stroke={c.borderSoft}
+                stroke={colors.borderSoft}
                 strokeWidth={1}
               />
             );
@@ -349,7 +356,7 @@ function MultiMetricLineChart({ lines }: { lines: MetricLine[] }) {
               x2={xOf(activeIndex)}
               y1={topPad}
               y2={chartH - bottomPad + 8}
-              stroke={c.textMuted}
+              stroke={colors.textMuted}
               strokeWidth={1}
               strokeDasharray="4 4"
             />
@@ -359,7 +366,7 @@ function MultiMetricLineChart({ lines }: { lines: MetricLine[] }) {
               key={`label-${point.key}`}
               x={xOf(index)}
               y={chartH - 18}
-              fill={c.textMuted}
+              fill={colors.textMuted}
               fontSize={10}
               textAnchor="middle">
               {point.label}
@@ -392,7 +399,7 @@ function MultiMetricLineChart({ lines }: { lines: MetricLine[] }) {
                   cx={xOf(index)}
                   cy={yOf(point.value, max)}
                   r={hasValue ? 3.2 : 2}
-                  fill={hasValue ? line.color : c.surfaceMuted}
+                  fill={hasValue ? line.color : colors.surfaceMuted}
                   stroke={line.color}
                   strokeWidth={hasValue ? 0 : 1}
                 />
@@ -426,6 +433,9 @@ export function WorkAnalyticsPanel({
   visibleUserIds,
   employeeNameByProfile,
 }: WorkAnalyticsPanelProps) {
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createWorkAnalyticsStyles(theme), [theme]);
   const [analyticsMonthFilter, setAnalyticsMonthFilter] = useState(monthKeyOf(new Date()));
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
@@ -905,6 +915,8 @@ export function WorkAnalyticsPanel({
           : '-'}
       </Text>
       <MultiMetricLineChart
+        styles={styles}
+        colors={c}
         lines={[
           {
             key: 'wellbeing',
@@ -1057,7 +1069,15 @@ export function WorkAnalyticsPanel({
   );
 }
 
-const styles = StyleSheet.create({
+function createWorkAnalyticsStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
+
+  return StyleSheet.create({
   analyticsPanel: {
     marginBottom: 18,
     padding: 14,
@@ -1185,6 +1205,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
     color: c.text,
+    ...sectionAccent,
   },
   lineChartCard: {
     marginTop: 8,
@@ -1395,4 +1416,5 @@ const styles = StyleSheet.create({
   },
   analyticsRankName: { fontSize: 13, color: c.text, fontWeight: '700' },
   analyticsRankMeta: { fontSize: 11, color: c.textMuted, marginTop: 2 },
-});
+  });
+}

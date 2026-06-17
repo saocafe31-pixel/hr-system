@@ -8,7 +8,8 @@ import {
   View,
 } from 'react-native';
 
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { pickAndUploadExpenseEvidence } from '@/lib/uploadExpenseEvidence';
 import { supabase } from '@/lib/supabase';
@@ -95,6 +96,9 @@ function formatDateTimeTh(iso: string | null | undefined): string {
 
 export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props) {
   const toast = useCuteToast();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createProfileClaimsStyles(theme), [theme]);
   const [salaryBase, setSalaryBase] = useState('');
   const [salaryAmount, setSalaryAmount] = useState('');
   const [salaryNote, setSalaryNote] = useState('');
@@ -459,7 +463,7 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
           disabled={salarySaving || salaryEligibilityLoading || !salaryWindowOpen || !!activeSalaryClaimStatus}
           onPress={() => void submitSalaryClaim()}>
           {salarySaving ? (
-            <ActivityIndicator color={NatureTheme.colors.onAccent} />
+            <ActivityIndicator color={c.onAccent} />
           ) : (
             <Text style={styles.primaryBtnText}>ส่งคำขอเบิกเงินเดือน</Text>
           )}
@@ -486,7 +490,7 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
             <View key={row.id} style={styles.historyCard}>
               <View style={styles.historyCardTop}>
                 <Text style={styles.historyAmount}>{money(Number(row.requested_amount || 0))} บาท</Text>
-                <Text style={[styles.statusPill, statusPillToneStyle(row.status)]}>
+                <Text style={[styles.statusPill, statusPillToneStyle(row.status, styles)]}>
                   {claimStatusLabelTh(row.status)}
                 </Text>
               </View>
@@ -577,7 +581,7 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
           disabled={expenseSaving}
           onPress={() => void submitExpenseClaim()}>
           {expenseSaving ? (
-            <ActivityIndicator color={NatureTheme.colors.onAccent} />
+            <ActivityIndicator color={c.onAccent} />
           ) : (
             <Text style={styles.primaryBtnText}>ส่งคำขอเบิกค่าใช้จ่าย</Text>
           )}
@@ -603,7 +607,7 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
             <View key={claim.id} style={styles.historyCard}>
               <View style={styles.historyCardTop}>
                 <Text style={styles.historyAmount}>{money(Number(claim.total_amount || 0))} บาท</Text>
-                <Text style={[styles.statusPill, statusPillToneStyle(claim.status)]}>
+                <Text style={[styles.statusPill, statusPillToneStyle(claim.status, styles)]}>
                   {claimStatusLabelTh(claim.status)}
                 </Text>
               </View>
@@ -641,10 +645,15 @@ export function ProfileClaimsCard({ userId, profile, myHr, onSubmitted }: Props)
   );
 }
 
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
+function createProfileClaimsStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   wrap: {
     marginTop: 18,
     padding: 12,
@@ -667,6 +676,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '800',
     color: c.text,
+    ...sectionAccent,
   },
   hint: {
     fontSize: 12,
@@ -762,6 +772,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '900',
     color: c.text,
+    ...sectionAccent,
   },
   emptyText: {
     paddingVertical: 8,
@@ -840,9 +851,13 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   disabled: { opacity: 0.65 },
-});
+  });
+}
 
-function statusPillToneStyle(status: SalaryClaimRow['status']) {
+function statusPillToneStyle(
+  status: SalaryClaimRow['status'],
+  styles: ReturnType<typeof createProfileClaimsStyles>
+) {
   if (status === 'approved') return styles.status_approved;
   if (status === 'rejected') return styles.status_rejected;
   if (status === 'paid') return styles.status_paid;

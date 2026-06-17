@@ -14,7 +14,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
 import { UserAvatar } from '@/components/UserAvatar';
-import { NatureTheme } from '@/constants/Theme';
+import type { AppTheme } from '@/constants/Theme';
+import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
 import { calculateOvertimeMinutes, formatDurationMinutesTh } from '@/lib/attendanceDurations';
@@ -110,9 +111,6 @@ type VoidReissuePrompt = {
   slip: PayrollSlipRow;
   reason: string;
 };
-
-const c = NatureTheme.colors;
-const r = NatureTheme.radius;
 
 const emptyDraft: CompensationDraft = {
   base_salary: '',
@@ -364,6 +362,9 @@ function attendanceLogTimesByYmd(rows: Pick<AttendanceLog, 'kind' | 'created_at'
 export function AdminPayrollPanel() {
   const { session } = useAuth();
   const toast = useCuteToast();
+  const { theme } = useAppTheme();
+  const c = theme.colors;
+  const styles = useMemo(() => createAdminPayrollStyles(theme), [theme]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [employeeDisplayByUserId, setEmployeeDisplayByUserId] = useState<
     Map<string, PayrollEmployeeDisplay>
@@ -1502,7 +1503,7 @@ export function AdminPayrollPanel() {
                       {display.secondary}
                     </Text>
                   </View>
-                  <View style={[styles.statusPill, payrollStatusPillStyle(row.status)]}>
+                  <View style={[styles.statusPill, payrollStatusPillStyle(row.status, styles)]}>
                     <Text style={styles.statusPillText}>{slipStatusLabel(row.status)}</Text>
                   </View>
                 </View>
@@ -1831,6 +1832,7 @@ export function AdminPayrollPanel() {
               <PayrollItemGroup
                 title="รายได้"
                 rows={groupedItems.income}
+                styles={styles}
                 editable={slip.status === 'draft'}
                 deletingItemId={deletingItemId}
                 onDeleteManual={(row) => void deleteManualAdjustment(row)}
@@ -1838,6 +1840,7 @@ export function AdminPayrollPanel() {
               <PayrollItemGroup
                 title="รายการหัก"
                 rows={groupedItems.deduction}
+                styles={styles}
                 editable={slip.status === 'draft'}
                 deletingItemId={deletingItemId}
                 onDeleteManual={(row) => void deleteManualAdjustment(row)}
@@ -1845,6 +1848,7 @@ export function AdminPayrollPanel() {
               <PayrollItemGroup
                 title="เงินคืน/เบิกจ่าย"
                 rows={groupedItems.reimbursement}
+                styles={styles}
                 editable={slip.status === 'draft'}
                 deletingItemId={deletingItemId}
                 onDeleteManual={(row) => void deleteManualAdjustment(row)}
@@ -1973,7 +1977,10 @@ export function AdminPayrollPanel() {
   );
 }
 
-function payrollStatusPillStyle(status: PayrollSlipRow['status']) {
+function payrollStatusPillStyle(
+  status: PayrollSlipRow['status'],
+  styles: ReturnType<typeof createAdminPayrollStyles>
+) {
   if (status === 'paid') return styles.status_paid;
   if (status === 'confirmed') return styles.status_confirmed;
   if (status === 'voided') return styles.status_voided;
@@ -1983,12 +1990,14 @@ function payrollStatusPillStyle(status: PayrollSlipRow['status']) {
 function PayrollItemGroup({
   title,
   rows,
+  styles,
   editable = false,
   deletingItemId,
   onDeleteManual,
 }: {
   title: string;
   rows: PayrollItemRow[];
+  styles: ReturnType<typeof createAdminPayrollStyles>;
   editable?: boolean;
   deletingItemId?: string | null;
   onDeleteManual?: (row: PayrollItemRow) => void;
@@ -2024,7 +2033,15 @@ function PayrollItemGroup({
   );
 }
 
-const styles = StyleSheet.create({
+function createAdminPayrollStyles(theme: AppTheme) {
+  const c = theme.colors;
+  const r = theme.radius;
+  const sectionAccent =
+    c.canvas === '#F8FAF1'
+      ? { borderLeftWidth: 4, borderLeftColor: c.primaryMuted, paddingLeft: 10 }
+      : {};
+
+  return StyleSheet.create({
   card: {
     marginTop: 24,
     padding: 14,
@@ -2033,7 +2050,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: c.borderSoft,
   },
-  title: { fontSize: 18, fontWeight: '800', color: c.text, marginBottom: 6 },
+  title: { fontSize: 18, fontWeight: '800', color: c.text, marginBottom: 6, ...sectionAccent },
   sub: { fontSize: 12, color: c.textMuted, lineHeight: 18 },
   hint: { marginTop: 6, color: c.primaryDark, fontSize: 12, fontWeight: '700' },
   warn: { marginTop: 6, color: c.error, fontSize: 12, fontWeight: '700' },
@@ -2118,7 +2135,7 @@ const styles = StyleSheet.create({
     borderColor: c.borderSoft,
   },
   historyHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
-  historyTitle: { color: c.text, fontSize: 15, fontWeight: '900' },
+  historyTitle: { color: c.text, fontSize: 15, fontWeight: '900', ...sectionAccent },
   historyStatGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   historyStatCard: {
     flexGrow: 1,
@@ -2248,7 +2265,7 @@ const styles = StyleSheet.create({
   employeeSelectPlaceholder: { color: c.textMuted, fontSize: 13, fontWeight: '800' },
   pickerBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.62)',
+    backgroundColor: c.overlay,
     justifyContent: 'flex-end',
   },
   pickerCard: {
@@ -2463,4 +2480,5 @@ const styles = StyleSheet.create({
     backgroundColor: c.errorBg,
   },
   deleteItemText: { color: c.error, fontSize: 10, fontWeight: '900' },
-});
+  });
+}
