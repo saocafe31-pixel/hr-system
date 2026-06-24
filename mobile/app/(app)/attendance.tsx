@@ -31,6 +31,7 @@ import { WellbeingMoodModal } from '@/components/WellbeingMoodModal';
 import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
+import { usePrintDocumentPreview } from '@/contexts/PrintDocumentPreviewContext';
 import { NatureTheme, type AppTheme } from '@/constants/Theme';
 import {
   parseAnnouncementSettings,
@@ -43,6 +44,12 @@ import {
   computeLateFromAttendanceData,
   type AssignmentWithShiftTimes,
 } from '@/lib/computeLateFromAttendance';
+import {
+  expoPrintPageOptions,
+  printDocumentScreenCss,
+  printViewportMeta,
+  shouldUseInAppPrintPreview,
+} from '@/lib/printDocumentSizing';
 import {
   calculateBreakMinutes,
   calculateOvertimeMinutes,
@@ -57,6 +64,16 @@ import {
   companyHolidayMapByDate,
   fetchCompanyHolidayDates,
 } from '@/lib/companyHolidays';
+import {
+  bangkokYmdToday,
+  buildAbsenceDateSet,
+  buildCheckInByDateFromLogs,
+  mergeYmdBounds,
+  payrollPeriodForCalendarMonth,
+  PAYROLL_ABSENCE_DISPUTE_HINT,
+  PAYROLL_ABSENCE_NOTE_DETAIL,
+  PAYROLL_ABSENCE_NOTE_TABLE,
+} from '@/lib/payrollPeriodWork';
 import {
   buildAssignmentByUserDate,
   buildHolidayByUserDate,
@@ -178,6 +195,7 @@ type CalendarCell = {
   companyHoliday: CompanyHolidayDateRow | null;
   employeeHoliday: boolean;
   approvedLeave: SummaryLeaveRow | null;
+  absenceDay: boolean;
 };
 
 type CalendarChecklistItem = {
@@ -438,6 +456,7 @@ async function fetchOpenTasksForAttendance(uid: string): Promise<OpenTaskRow[]> 
 
 export default function AttendanceScreen() {
   const toast = useCuteToast();
+  const { openPrintPreview } = usePrintDocumentPreview();
   const { themeId, theme } = useAppTheme();
   const { profile, session } = useAuth();
   const router = useRouter();
@@ -512,6 +531,15 @@ export default function AttendanceScreen() {
   const [summaryAssignments, setSummaryAssignments] = useState<AssignmentWithShiftTimes[]>([]);
   const [summaryLegacySchedules, setSummaryLegacySchedules] = useState<WorkScheduleRow[]>([]);
   const [summaryOvertimeRequests, setSummaryOvertimeRequests] = useState<AttendanceOvertimeRequestRow[]>([]);
+  const [summaryAssignmentMeta, setSummaryAssignmentMeta] = useState<
+    Array<{ user_id: string; work_date: string; created_at: string }>
+  >([]);
+  const [summaryEmployeeHolidays, setSummaryEmployeeHolidays] = useState<EmployeeHolidayDateRow[]>(
+    []
+  );
+  const [summaryCompanyHolidayDates, setSummaryCompanyHolidayDates] = useState<Set<string>>(
+    () => new Set()
+  );
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [todayPlanLabel, setTodayPlanLabel] = useState<string | null>(null);
@@ -559,6 +587,7 @@ export default function AttendanceScreen() {
   const [scheduleResolvedHolidayYmds, setScheduleResolvedHolidayYmds] = useState<Set<string>>(
     () => new Set()
   );
+  const [scheduleAbsenceYmds, setScheduleAbsenceYmds] = useState<Set<string>>(() => new Set());
   const endReminderSentRef = useRef<string | null>(null);
 
   const [branchPickLatLon, setBranchPickLatLon] = useState<{
@@ -883,6 +912,15 @@ export default function AttendanceScreen() {
     d.setDate(d.getDate() - 1);
     return { startYmd: firstThis, endYmd: bangkokYmd(d) };
   }, [scheduleCalendarAnchorDate]);
+  const schedulePayrollPeriod = useMemo(() => {
+    const base = scheduleCalendarAnchorDate ?? new Date();
+    const { year, month } = ymdPartsInBangkok(base);
+    return payrollPeriodForCalendarMonth(year, month);
+  }, [scheduleCalendarAnchorDate]);
+  const scheduleDataLoadRange = useMemo(
+    () => mergeYmdBounds(scheduleMonthPeriod, schedulePayrollPeriod),
+    [scheduleMonthPeriod, schedulePayrollPeriod]
+  );
   const scheduleRowsByYmd = useMemo(() => {
     const map = new Map<string, MyScheduleCalendarRow[]>();
     for (const row of scheduleCalendarRows) {
@@ -914,6 +952,34 @@ export default function AttendanceScreen() {
     }
     return count;
   }, [scheduleMonthPeriod, scheduleResolvedHolidayYmds]);
+  const scheduleAbsenceDaysCount = scheduleAbsenceYmds.size;
+  const todayYmdBangkok = useMemo(() => bangkokYmd(new Date()), []);
+  const summaryAbsenceDates = useMemo(() => {
+    const uid = session?.user?.id;
+    if (!uid) return new Set<string>();
+    const approvedOnly = summaryLeaves.filter((row) => row.status === 'approved');
+    return buildAbsenceDateSet({
+      userId: uid,
+      startYmd: period.startYmd,
+      endYmd: period.endYmd,
+      asOfYmd: todayYmdBangkok,
+      assignments: summaryAssignmentMeta,
+      employeeHolidays: summaryEmployeeHolidays,
+      companyHolidayDates: summaryCompanyHolidayDates,
+      approvedLeaves: approvedOnly,
+      checkInByDate: buildCheckInByDateFromLogs(summaryLogs),
+    });
+  }, [
+    period.endYmd,
+    period.startYmd,
+    session?.user?.id,
+    summaryAssignmentMeta,
+    summaryCompanyHolidayDates,
+    summaryEmployeeHolidays,
+    summaryLeaves,
+    summaryLogs,
+    todayYmdBangkok,
+  ]);
   const companyHolidayByDate = useMemo(
     () => companyHolidayMapByDate(companyHolidayRows),
     [companyHolidayRows]
@@ -933,6 +999,10 @@ export default function AttendanceScreen() {
         : null,
     [scheduleApprovedLeaves, scheduleSelectedYmd]
   );
+  const selectedScheduleAbsence = useMemo(
+    () => !!(scheduleSelectedYmd && scheduleAbsenceYmds.has(scheduleSelectedYmd)),
+    [scheduleAbsenceYmds, scheduleSelectedYmd]
+  );
   const scheduleGridCells = useMemo(() => {
     const { startYmd, endYmd } = scheduleMonthPeriod;
     const first = ymdToDate(startYmd);
@@ -948,6 +1018,7 @@ export default function AttendanceScreen() {
         companyHoliday: null,
         employeeHoliday: false,
         approvedLeave: null,
+        absenceDay: false,
       });
     }
     for (const ymd of dates) {
@@ -955,7 +1026,9 @@ export default function AttendanceScreen() {
       const hasMemo = scheduleMemoYmdSet.has(ymd);
       const approvedLeave = approvedLeaveForYmd(scheduleApprovedLeaves, ymd);
       const employeeHoliday = scheduleResolvedHolidayYmds.has(ymd);
-      const markerSource = approvedLeave || employeeHoliday
+      const absenceDay =
+        !approvedLeave && !employeeHoliday && scheduleAbsenceYmds.has(ymd);
+      const markerSource = approvedLeave || employeeHoliday || absenceDay
         ? null
         : rows.find((r) => r.source === 'shift')
           ? 'shift'
@@ -971,6 +1044,7 @@ export default function AttendanceScreen() {
         companyHoliday: companyHolidayByDate.get(ymd) ?? null,
         employeeHoliday,
         approvedLeave,
+        absenceDay,
       });
     }
     while (cells.length % 7 !== 0) {
@@ -981,6 +1055,7 @@ export default function AttendanceScreen() {
         companyHoliday: null,
         employeeHoliday: false,
         approvedLeave: null,
+        absenceDay: false,
       });
     }
     return cells;
@@ -991,6 +1066,7 @@ export default function AttendanceScreen() {
     companyHolidayByDate,
     scheduleApprovedLeaves,
     scheduleResolvedHolidayYmds,
+    scheduleAbsenceYmds,
   ]);
   const todayYmdInBangkok = useMemo(() => bangkokYmd(new Date()), []);
   const selectedScheduleRows = useMemo(() => {
@@ -1136,6 +1212,9 @@ export default function AttendanceScreen() {
       setSummaryAssignments([]);
       setSummaryLegacySchedules([]);
       setSummaryOvertimeRequests([]);
+      setSummaryAssignmentMeta([]);
+      setSummaryEmployeeHolidays([]);
+      setSummaryCompanyHolidayDates(new Set());
       return;
     }
     setSummaryLoading(true);
@@ -1149,6 +1228,8 @@ export default function AttendanceScreen() {
         { data: assignmentRows },
         { data: legacyRows },
         { data: overtimeRows },
+        { data: empHolRows },
+        companyHolRows,
       ] = await Promise.all([
         supabase
           .from('attendance_logs')
@@ -1173,7 +1254,7 @@ export default function AttendanceScreen() {
           .lte('work_date', period.endYmd),
         supabase
           .from('work_schedule_assignments')
-          .select('id, work_date, work_shifts(name, start_time, end_time)')
+          .select('id, work_date, created_at, work_shifts(name, start_time, end_time)')
           .eq('user_id', uid)
           .gte('work_date', period.startYmd)
           .lte('work_date', period.endYmd),
@@ -1193,12 +1274,24 @@ export default function AttendanceScreen() {
           .gte('work_date', period.startYmd)
           .lte('work_date', period.endYmd)
           .order('work_date', { ascending: false }),
+        supabase
+          .from('employee_holiday_dates')
+          .select('id, user_id, holiday_date, created_at')
+          .eq('user_id', uid)
+          .gte('holiday_date', period.startYmd)
+          .lte('holiday_date', period.endYmd),
+        fetchCompanyHolidayDates({
+          startYmd: period.startYmd,
+          endYmd: period.endYmd,
+        }).catch(() => [] as CompanyHolidayDateRow[]),
       ]);
       const assignments: AssignmentWithShiftTimes[] = [];
+      const assignmentMeta: Array<{ user_id: string; work_date: string; created_at: string }> = [];
       for (const row of (assignmentRows as unknown[]) ?? []) {
         const r = row as {
           id?: string;
           work_date?: string;
+          created_at?: string;
           work_shifts?: unknown;
         };
         let workShift = r.work_shifts as AssignmentWithShiftTimes['work_shifts'] | null;
@@ -1211,13 +1304,25 @@ export default function AttendanceScreen() {
           work_date: String(r.work_date),
           work_shifts: workShift,
         });
+        assignmentMeta.push({
+          user_id: uid,
+          work_date: String(r.work_date),
+          created_at: r.created_at ?? '',
+        });
       }
       setSummaryLogs((logsRows as AttendanceLog[]) ?? []);
       setSummaryLeaves((leaveRows as SummaryLeaveRow[]) ?? []);
       setSummaryLateRequests((lateRows as SummaryLateRequestRow[]) ?? []);
       setSummaryAssignments(assignments);
+      setSummaryAssignmentMeta(assignmentMeta);
       setSummaryLegacySchedules((legacyRows as WorkScheduleRow[]) ?? []);
       setSummaryOvertimeRequests((overtimeRows as AttendanceOvertimeRequestRow[]) ?? []);
+      setSummaryEmployeeHolidays((empHolRows as EmployeeHolidayDateRow[]) ?? []);
+      setSummaryCompanyHolidayDates(
+        new Set(
+          companyHolRows.map((row) => String(row.holiday_date).slice(0, 10))
+        )
+      );
     } finally {
       setSummaryLoading(false);
     }
@@ -1424,6 +1529,9 @@ export default function AttendanceScreen() {
       const requestedLateMinutes = lateRequestMinutesByYmd.get(ymd) ?? 0;
       const netLate = netLateByYmd.get(ymd);
       const noteParts = [...leaveNotes];
+      if (summaryAbsenceDates.has(ymd)) {
+        noteParts.push(PAYROLL_ABSENCE_NOTE_TABLE);
+      }
       if (requestedLateMinutes > 0 && netLate) {
         noteParts.push(
           `ใช้สิทธิ์ขอเข้าสาย ${requestedLateMinutes} นาที · สายสุทธิ ${netLate.minutes_late} นาที`
@@ -1517,6 +1625,7 @@ export default function AttendanceScreen() {
     period.startYmd,
     profile?.employee_code,
     summaryAssignments,
+    summaryAbsenceDates,
     summaryLateRequests,
     summaryLeaves,
     summaryLegacySchedules,
@@ -1630,16 +1739,27 @@ export default function AttendanceScreen() {
       <html>
       <head>
         <meta charset="UTF-8" />
+        ${printViewportMeta()}
+        <title>ตารางสรุปเวลาเข้า-ออกงาน</title>
         <style>
-          body { font-family: Arial, sans-serif; padding: 16px; color: #203028; }
+          * { box-sizing: border-box; -webkit-text-size-adjust: none; text-size-adjust: none; }
+          @page { size: A4 landscape; margin: 12mm; }
+          body { font-family: 'Sarabun', Arial, sans-serif; padding: 16px; color: #203028; margin: 0; background: #fff; }
+          .report { max-width: 1100px; margin: 0 auto; }
           h1 { font-size: 18px; margin: 0 0 6px; }
           p { font-size: 12px; margin: 0 0 14px; color: #4b5f54; }
           table { width: 100%; border-collapse: collapse; font-size: 11px; }
-          th, td { border: 1px solid #cedbcf; padding: 6px; text-align: left; vertical-align: top; }
+          th, td { border: 1px solid #cedbcf; padding: 6px; text-align: left; vertical-align: top; word-break: keep-all; }
           th { background: #e7f2e8; }
+          @media print {
+            body { padding: 0; }
+            .report { max-width: none; }
+          }
+          ${printDocumentScreenCss('.report', 1100)}
         </style>
       </head>
       <body>
+        <main class="report">
         <h1>ตารางสรุปเวลาเข้า-ออกงาน</h1>
         <p>รอบวันที่ ${htmlEscape(period.startYmd)} ถึง ${htmlEscape(period.endYmd)}</p>
         <table>
@@ -1659,8 +1779,17 @@ export default function AttendanceScreen() {
           </thead>
           <tbody>${rowsHtml}</tbody>
         </table>
+        </main>
       </body>
       </html>`;
+      if (shouldUseInAppPrintPreview(width) && Platform.OS === 'web') {
+        openPrintPreview({
+          html,
+          title: 'ตารางสรุปเวลาเข้า-ออกงาน',
+          shareDialogTitle: 'ดาวน์โหลดรายงานเวลาเข้า-ออกงาน (PDF)',
+        });
+        return;
+      }
       if (Platform.OS === 'web') {
         const w = window.open('', '_blank');
         if (!w) return;
@@ -1670,7 +1799,7 @@ export default function AttendanceScreen() {
         w.print();
         return;
       }
-      const pdf = await Print.printToFileAsync({ html });
+      const pdf = await Print.printToFileAsync({ html, ...expoPrintPageOptions });
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(pdf.uri, {
           mimeType: 'application/pdf',
@@ -1680,7 +1809,7 @@ export default function AttendanceScreen() {
     } finally {
       setExporting(false);
     }
-  }, [period.endYmd, period.startYmd, summaryRows]);
+  }, [openPrintPreview, period.endYmd, period.startYmd, summaryRows, width]);
 
   async function startAttendance(kind: 'check_in' | 'check_out') {
     if (!session?.user?.id) return;
@@ -2213,23 +2342,24 @@ export default function AttendanceScreen() {
     const uid = session?.user?.id;
     if (!uid) return;
     const { startYmd, endYmd } = scheduleMonthPeriod;
+    const { startYmd: loadStart, endYmd: loadEnd } = scheduleDataLoadRange;
     setScheduleCalendarLoading(true);
     try {
-      const [assignmentRes, legacyRes, memoRes, companyHolRes, empHolRes, leaveRes] =
+      const [assignmentRes, legacyRes, memoRes, companyHolRes, empHolRes, leaveRes, attendanceRes] =
         await Promise.all([
         supabase
           .from('work_schedule_assignments')
           .select('work_date, shift_id, allowed_branch_id, created_at')
           .eq('user_id', uid)
-          .gte('work_date', startYmd)
-          .lte('work_date', endYmd)
+          .gte('work_date', loadStart)
+          .lte('work_date', loadEnd)
           .order('work_date', { ascending: true }),
         supabase
           .from('work_schedules')
           .select('start_at, end_at, title')
           .eq('user_id', uid)
-          .lte('start_at', new Date(`${endYmd}T23:59:59+07:00`).toISOString())
-          .gte('end_at', new Date(`${startYmd}T00:00:00+07:00`).toISOString())
+          .lte('start_at', new Date(`${loadEnd}T23:59:59+07:00`).toISOString())
+          .gte('end_at', new Date(`${loadStart}T00:00:00+07:00`).toISOString())
           .order('start_at', { ascending: true }),
         supabase
           .from('attendance_calendar_notes')
@@ -2237,20 +2367,27 @@ export default function AttendanceScreen() {
           .eq('user_id', uid)
           .gte('work_date', startYmd)
           .lte('work_date', endYmd),
-        fetchCompanyHolidayDates({ startYmd, endYmd }).catch(() => [] as CompanyHolidayDateRow[]),
+        fetchCompanyHolidayDates({ startYmd: loadStart, endYmd: loadEnd }).catch(() => [] as CompanyHolidayDateRow[]),
         supabase
           .from('employee_holiday_dates')
           .select('id, user_id, holiday_date, created_at')
           .eq('user_id', uid)
-          .gte('holiday_date', startYmd)
-          .lte('holiday_date', endYmd),
+          .gte('holiday_date', loadStart)
+          .lte('holiday_date', loadEnd),
         supabase
           .from('leave_requests')
           .select('starts_on, ends_on, leave_type, status')
           .eq('user_id', uid)
           .eq('status', 'approved')
-          .lte('starts_on', endYmd)
-          .gte('ends_on', startYmd),
+          .lte('starts_on', loadEnd)
+          .gte('ends_on', loadStart),
+        supabase
+          .from('attendance_logs')
+          .select('kind, created_at')
+          .eq('user_id', uid)
+          .eq('kind', 'check_in')
+          .gte('created_at', new Date(`${schedulePayrollPeriod.startYmd}T00:00:00+07:00`).toISOString())
+          .lte('created_at', new Date(`${schedulePayrollPeriod.endYmd}T23:59:59+07:00`).toISOString()),
       ]);
       if (assignmentRes.error) {
         throw new Error(`โหลดมอบหมายกะไม่สำเร็จ: ${assignmentRes.error.message}`);
@@ -2392,6 +2529,30 @@ export default function AttendanceScreen() {
         }
       }
       setScheduleCalendarRows(out);
+
+      const companyHolidayDates = new Set(
+        companyHolRes.map((row) => String(row.holiday_date).slice(0, 10))
+      );
+      setScheduleAbsenceYmds(
+        buildAbsenceDateSet({
+          userId: uid,
+          startYmd: schedulePayrollPeriod.startYmd,
+          endYmd: schedulePayrollPeriod.endYmd,
+          asOfYmd: bangkokYmdToday(),
+          assignments: assignments.map((row) => ({
+            user_id: uid,
+            work_date: row.work_date,
+            created_at: row.created_at ?? '',
+          })),
+          employeeHolidays: employeeHolidayRows,
+          companyHolidayDates,
+          approvedLeaves,
+          checkInByDate: buildCheckInByDateFromLogs(
+            (attendanceRes.data as Array<{ kind: string; created_at: string }>) ?? []
+          ),
+        })
+      );
+
       const hasCompanyHol = companyHolRes.some(
         (h) => h.holiday_date >= startYmd && h.holiday_date <= endYmd
       );
@@ -2411,7 +2572,7 @@ export default function AttendanceScreen() {
     } finally {
       setScheduleCalendarLoading(false);
     }
-  }, [branches, scheduleMonthPeriod, session?.user?.id, toast]);
+  }, [branches, scheduleDataLoadRange, scheduleMonthPeriod, schedulePayrollPeriod, session?.user?.id, toast]);
 
   useEffect(() => {
     if (!scheduleCalendarOpen) return;
@@ -2901,6 +3062,12 @@ export default function AttendanceScreen() {
               contentContainerStyle={styles.calendarModalContent}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator>
+            <Pressable
+              style={styles.scheduleBackBtn}
+              onPress={() => setScheduleCalendarOpen(false)}>
+              <FontAwesome name="chevron-left" size={13} color={themeColors.primaryDark} />
+              <Text style={[styles.scheduleBackBtnText, themeStyles?.monthNavBtnText]}>ย้อนกลับ</Text>
+            </Pressable>
             <Text style={[styles.sheetTitle, themeStyles?.sheetTitle]}>ปฏิทินตารางงานของฉัน</Text>
             <Text style={[styles.sheetSub, themeStyles?.sheetSub]}>มุมมองรายเดือน · แตะวันที่เพื่อดูรายละเอียด</Text>
             <View style={styles.monthNavRow}>
@@ -2929,7 +3096,16 @@ export default function AttendanceScreen() {
               มีตารางงาน {scheduleDaysCount} วัน
               {scheduleHolidayDaysCount > 0 ? ` · วันหยุด ${scheduleHolidayDaysCount} วัน` : ''}
               {scheduleLeaveDaysCount > 0 ? ` · ลา ${scheduleLeaveDaysCount} วัน` : ''}
+              {scheduleAbsenceDaysCount > 0
+                ? ` · ขาดงานรอบ Payroll ${scheduleAbsenceDaysCount} วัน`
+                : ''}
             </Text>
+            {scheduleAbsenceDaysCount > 0 ? (
+              <Text style={[styles.calendarTapHint, themeStyles?.calendarTapHint]}>
+                นับขาดงานตามรอบ Payroll {schedulePayrollPeriod.startYmd}–{schedulePayrollPeriod.endYmd}{' '}
+                (เฉพาะวันที่ผ่านมาแล้ว)
+              </Text>
+            ) : null}
             {scheduleCalendarLoading ? (
               <ActivityIndicator color={themeColors.primary} style={{ marginVertical: 18 }} />
             ) : (
@@ -3003,6 +3179,15 @@ export default function AttendanceScreen() {
                             ]}
                             numberOfLines={1}>
                             วันหยุด
+                          </Text>
+                        ) : cell.absenceDay ? (
+                          <Text
+                            style={[
+                              styles.calendarAbsenceText,
+                              themeStyles?.calendarAbsenceText,
+                            ]}
+                            numberOfLines={1}>
+                            ขาดงาน
                           </Text>
                         ) : null}
                         {cell.markerSource ? (
@@ -3137,6 +3322,51 @@ export default function AttendanceScreen() {
                         ช่วงลา {selectedScheduleApprovedLeave.starts_on} –{' '}
                         {selectedScheduleApprovedLeave.ends_on}
                       </Text>
+                    </View>
+                  ) : null}
+                  {selectedScheduleAbsence ? (
+                    <View style={[styles.absenceBanner, themeStyles?.absenceBanner]}>
+                      <Text style={[styles.absenceBannerLabel, themeStyles?.absenceBannerLabel]}>
+                        ขาดงาน
+                      </Text>
+                      <Text style={[styles.absenceBannerTitle, themeStyles?.absenceBannerTitle]}>
+                        {PAYROLL_ABSENCE_NOTE_DETAIL}
+                      </Text>
+                      <Text style={[styles.absenceBannerMeta, themeStyles?.absenceBannerMeta]}>
+                        {PAYROLL_ABSENCE_DISPUTE_HINT}
+                      </Text>
+                      <View style={styles.absenceBannerActions}>
+                        <Pressable
+                          style={[styles.absenceActionBtn, themeStyles?.absenceActionBtn]}
+                          onPress={() => {
+                            setScheduleDayDetailOpen(false);
+                            setScheduleCalendarOpen(false);
+                            router.push('/chat');
+                          }}>
+                          <Text
+                            style={[
+                              styles.absenceActionBtnText,
+                              themeStyles?.absenceActionBtnText,
+                            ]}>
+                            แจ้ง HR ผ่านแชท
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          style={[styles.absenceActionBtn, themeStyles?.absenceActionBtn]}
+                          onPress={() => {
+                            setScheduleDayDetailOpen(false);
+                            setScheduleCalendarOpen(false);
+                            router.push('/team');
+                          }}>
+                          <Text
+                            style={[
+                              styles.absenceActionBtnText,
+                              themeStyles?.absenceActionBtnText,
+                            ]}>
+                            เปิดหน้าทีม
+                          </Text>
+                        </Pressable>
+                      </View>
                     </View>
                   ) : null}
                   {scheduleDayDetailRows.length > 0 ? (
@@ -3896,6 +4126,7 @@ function createAttendanceLightStyles(colors: AppTheme['colors']) {
     calendarCompanyHolidayText: { color: '#DC2626' },
     calendarEmployeeHolidayText: { color: '#DC2626' },
     calendarLeaveText: { color: colors.leaveSickBar },
+    calendarAbsenceText: { color: colors.lateNoticeBar },
     companyHolidayBanner: {
       backgroundColor: '#FEF2F2',
       borderColor: '#FECACA',
@@ -3919,6 +4150,20 @@ function createAttendanceLightStyles(colors: AppTheme['colors']) {
     scheduleLeaveBannerLabel: { color: colors.leaveSickBar },
     scheduleLeaveBannerTitle: { color: colors.leaveSickBar },
     scheduleLeaveBannerMeta: { color: colors.textMuted },
+    absenceBanner: {
+      backgroundColor: colors.lateNoticeBg,
+      borderColor: colors.lateNoticeBar,
+      borderWidth: 1,
+    },
+    absenceBannerLabel: { color: colors.lateNoticeBar },
+    absenceBannerTitle: { color: colors.text },
+    absenceBannerMeta: { color: colors.textMuted },
+    absenceActionBtn: {
+      backgroundColor: colors.surface,
+      borderColor: colors.lateNoticeBar,
+      borderWidth: 1,
+    },
+    absenceActionBtnText: { color: colors.lateNoticeBar },
     calendarWeekHeaderText: { color: colors.textMuted },
     dayDetailBackdrop: { backgroundColor: colors.overlay },
     dayDetailCard: { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1.5 },
@@ -4397,6 +4642,19 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 10,
   },
+  scheduleBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    marginBottom: 8,
+    paddingVertical: 4,
+  },
+  scheduleBackBtnText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: c.primaryDark,
+  },
   sheetTitle: {
     fontSize: 18,
     fontWeight: '700',
@@ -4630,6 +4888,13 @@ const styles = StyleSheet.create({
     color: c.leaveSickBar,
     textAlign: 'center',
   },
+  calendarAbsenceText: {
+    marginTop: 2,
+    fontSize: 8,
+    fontWeight: '900',
+    color: c.lateNoticeBar,
+    textAlign: 'center',
+  },
   companyHolidayBanner: {
     backgroundColor: '#FEF2F2',
     borderColor: '#FECACA',
@@ -4697,6 +4962,51 @@ const styles = StyleSheet.create({
     color: c.textMuted,
     fontSize: 13,
     marginTop: 6,
+  },
+  absenceBanner: {
+    backgroundColor: c.lateNoticeBg,
+    borderColor: c.lateNoticeBar,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+  },
+  absenceBannerLabel: {
+    color: c.lateNoticeBar,
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  absenceBannerTitle: {
+    color: c.text,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '700',
+  },
+  absenceBannerMeta: {
+    color: c.textMuted,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 8,
+  },
+  absenceBannerActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+  },
+  absenceActionBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: c.lateNoticeBar,
+    backgroundColor: c.surface,
+  },
+  absenceActionBtnText: {
+    color: c.lateNoticeBar,
+    fontSize: 12,
+    fontWeight: '800',
   },
   scheduleDetailList: {
     maxHeight: 180,

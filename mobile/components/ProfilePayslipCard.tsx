@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
 import type { AppTheme } from '@/constants/Theme';
 import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
+import { usePrintDocumentPreview } from '@/contexts/PrintDocumentPreviewContext';
 import {
   bangkokPayrollPeriodBounds,
   formatPayrollCycleChipTh,
@@ -14,7 +24,9 @@ import {
 } from '@/lib/leaveLateRules';
 import { money } from '@/lib/payroll';
 import { loadPayrollCompanyInfo } from '@/lib/payrollCompanyInfo';
-import { exportPayslipPdf, openPayslipPrintWindow } from '@/lib/payslipPdf';
+import { buildPayslipHtml } from '@/lib/payslipPdf';
+import { fetchPayslipYearToDate } from '@/lib/payrollSlipYtd';
+import { slipHasEmployeeCorrectionRequest } from '@/lib/payrollSlipCorrection';
 import { supabase } from '@/lib/supabase';
 import type { PayrollItemRow, PayrollSlipRow } from '@/lib/types';
 
@@ -22,7 +34,8 @@ type Props = {
   userId: string | null | undefined;
   employeeId?: string | null | undefined;
   employeeName?: string | null | undefined;
-  employeeMeta?: string | null | undefined;
+  employeeCode?: string | null | undefined;
+  employeePosition?: string | null | undefined;
   paymentMethod?: string | null | undefined;
   bankName?: string | null | undefined;
   bankAccount?: string | null | undefined;
@@ -48,12 +61,14 @@ export function ProfilePayslipCard({
   userId,
   employeeId,
   employeeName,
-  employeeMeta,
+  employeeCode,
+  employeePosition,
   paymentMethod,
   bankName,
   bankAccount,
 }: Props) {
   const toast = useCuteToast();
+  const { openPrintPreview } = usePrintDocumentPreview();
   const { theme } = useAppTheme();
   const c = theme.colors;
   const styles = useMemo(() => createProfilePayslipStyles(theme), [theme]);
@@ -63,6 +78,9 @@ export function ProfilePayslipCard({
   const [loading, setLoading] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [confirmingReview, setConfirmingReview] = useState(false);
+  const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
+  const [correctionNote, setCorrectionNote] = useState('');
+  const [submittingCorrection, setSubmittingCorrection] = useState(false);
 
   const payrollCycleOptions = useMemo(() => listPayrollCycleKeysDescending(15), []);
 
@@ -142,23 +160,29 @@ export function ProfilePayslipCard({
 
   async function printSelectedSlip() {
     if (!selectedSlip) return;
-    const printWindow = openPayslipPrintWindow();
     setExportingPdf(true);
     try {
       const company = await loadPayrollCompanyInfo();
-      await exportPayslipPdf({
+      const yearToDate = await fetchPayslipYearToDate(selectedSlip, items);
+      const html = buildPayslipHtml({
         slip: selectedSlip,
         items,
         employee: {
           name: employeeName,
-          meta: employeeMeta,
+          employeeCode,
+          position: employeePosition,
           paymentMethod,
           bankName,
           bankAccount,
         },
         company,
-      }, printWindow);
-      toast.success('เปิดสลิป PDF แล้ว', 'สามารถพิมพ์หรือบันทึกเป็น PDF ได้จากหน้าต่างที่เปิดขึ้น');
+        yearToDate,
+      });
+      openPrintPreview({
+        html,
+        title: 'สลิปเงินเดือน',
+        shareDialogTitle: 'ดาวน์โหลดสลิปเงินเดือน (PDF)',
+      });
     } catch (e) {
       toast.error('สร้าง PDF ไม่สำเร็จ', e instanceof Error ? e.message : String(e));
     } finally {
@@ -182,6 +206,35 @@ export function ProfilePayslipCard({
       setConfirmingReview(false);
     }
   }
+
+  async function submitCorrectionRequest() {
+    if (!selectedSlip?.id) return;
+    const note = correctionNote.trim();
+    if (!note) {
+      toast.info('กรุณาระบุหมายเหตุ', 'อธิบายรายการที่ต้องการให้แก้ไข');
+      return;
+    }
+    setSubmittingCorrection(true);
+    try {
+      const { error } = await supabase.rpc('request_payroll_slip_correction', {
+        p_slip_id: selectedSlip.id,
+        p_note: note,
+      });
+      if (error) throw error;
+      setCorrectionModalOpen(false);
+      setCorrectionNote('');
+      toast.success('ส่งคำขอแก้ไขแล้ว', 'Admin/HR จะได้รับแจ้งเตือนและตรวจสอบสลิปของคุณ');
+      await load();
+    } catch (e) {
+      toast.error('ส่งคำขอไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmittingCorrection(false);
+    }
+  }
+
+  const selectedHasCorrectionRequest = selectedSlip
+    ? slipHasEmployeeCorrectionRequest(selectedSlip)
+    : false;
 
   return (
     <View style={styles.card}>
@@ -227,13 +280,22 @@ export function ProfilePayslipCard({
           {!selectedSlip.employee_confirmed_at ? (
             <View style={styles.reviewNotice}>
               <Text style={styles.reviewNoticeTitle}>
-                {selectedSlip.reissued_from_slip_id
-                  ? 'มีสลิปฉบับแก้ไข กรุณาตรวจสอบอีกครั้ง'
-                  : 'กรุณาตรวจสอบและยืนยันสลิปเงินเดือน'}
+                {selectedHasCorrectionRequest
+                  ? 'ส่งคำขอแก้ไขสลิปแล้ว — รอ Admin/HR ตรวจสอบ'
+                  : selectedSlip.reissued_from_slip_id
+                    ? 'มีสลิปฉบับแก้ไข กรุณาตรวจสอบอีกครั้ง'
+                    : 'กรุณาตรวจสอบและยืนยันสลิปเงินเดือน'}
               </Text>
               <Text style={styles.reviewNoticeText}>
-                เมื่อรายละเอียดถูกต้อง ให้กดปุ่มยืนยันเพื่อแจ้ง Admin/HR ว่าคุณตรวจสอบเงินเดือนรอบนี้แล้ว
+                {selectedHasCorrectionRequest
+                  ? `หมายเหตุที่ส่ง: ${selectedSlip.employee_correction_note?.trim() ?? ''}`
+                  : 'เมื่อรายละเอียดถูกต้อง ให้กดปุ่มยืนยัน · หากพบข้อผิดพลาดให้กดแจ้งแก้ไข'}
               </Text>
+              {selectedHasCorrectionRequest && selectedSlip.employee_correction_requested_at ? (
+                <Text style={styles.reviewNoticeMeta}>
+                  ส่งเมื่อ {formatDateTimeTh(selectedSlip.employee_correction_requested_at)}
+                </Text>
+              ) : null}
             </View>
           ) : (
             <View style={styles.reviewConfirmedBox}>
@@ -263,7 +325,7 @@ export function ProfilePayslipCard({
               <Text style={styles.pdfBtnText}>พิมพ์ / ดาวน์โหลด PDF</Text>
             )}
           </Pressable>
-          {!selectedSlip.employee_confirmed_at ? (
+          {!selectedSlip.employee_confirmed_at && !selectedHasCorrectionRequest ? (
             <Pressable
               style={[styles.confirmReviewBtn, confirmingReview && styles.disabled]}
               disabled={confirmingReview}
@@ -275,6 +337,17 @@ export function ProfilePayslipCard({
               )}
             </Pressable>
           ) : null}
+          <Pressable
+            style={[styles.correctionBtn, submittingCorrection && styles.disabled]}
+            disabled={submittingCorrection}
+            onPress={() => {
+              setCorrectionNote(selectedSlip.employee_correction_note?.trim() ?? '');
+              setCorrectionModalOpen(true);
+            }}>
+            <Text style={styles.correctionBtnText}>
+              {selectedHasCorrectionRequest ? 'แก้ไขหมายเหตุ / ส่งอีกครั้ง' : 'แจ้งแก้ไขสลิปเงินเดือน'}
+            </Text>
+          </Pressable>
           <PayslipItemGroup title="รายได้" rows={grouped.income} styles={styles} />
           <PayslipItemGroup title="รายการหัก" rows={grouped.deduction} styles={styles} />
           <PayslipItemGroup title="เงินคืน/เบิกจ่าย" rows={grouped.reimbursement} styles={styles} />
@@ -284,6 +357,48 @@ export function ProfilePayslipCard({
           ยังไม่มีสลิปเงินเดือนที่ยืนยันแล้วในรอบ {formatPayrollCycleChipTh(selectedCycleKey)}
         </Text>
       )}
+
+      <Modal
+        visible={correctionModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCorrectionModalOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setCorrectionModalOpen(false)}>
+          <Pressable style={styles.modalCard} onPress={() => {}}>
+            <Text style={styles.modalTitle}>แจ้งแก้ไขสลิปเงินเดือน</Text>
+            <Text style={styles.modalSub}>
+              ระบุรายการที่ต้องการให้ Admin/HR ตรวจสอบและแก้ไข ระบบจะส่งแจ้งเตือนไปยังทีม Payroll
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              value={correctionNote}
+              onChangeText={setCorrectionNote}
+              placeholder="เช่น หักมาสายไม่ตรง / รายได้พิเศษผิด / วันขาดงานไม่ถูกต้อง"
+              placeholderTextColor={c.textMuted}
+              multiline
+              textAlignVertical="top"
+            />
+            <View style={styles.modalActions}>
+              <Pressable
+                style={styles.modalCancelBtn}
+                onPress={() => setCorrectionModalOpen(false)}
+                disabled={submittingCorrection}>
+                <Text style={styles.modalCancelText}>ยกเลิก</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.modalSendBtn, submittingCorrection && styles.disabled]}
+                disabled={submittingCorrection}
+                onPress={() => void submitCorrectionRequest()}>
+                {submittingCorrection ? (
+                  <ActivityIndicator color={c.canvas} />
+                ) : (
+                  <Text style={styles.modalSendText}>ส่ง</Text>
+                )}
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -385,6 +500,7 @@ function createProfilePayslipStyles(theme: AppTheme) {
   },
   reviewNoticeTitle: { color: c.warningTitle, fontSize: 13, fontWeight: '900' },
   reviewNoticeText: { marginTop: 4, color: c.warningBody, fontSize: 11, lineHeight: 16 },
+  reviewNoticeMeta: { marginTop: 6, color: c.warningBody, fontSize: 10, fontWeight: '700' },
   reviewConfirmedBox: {
     marginBottom: 10,
     padding: 9,
@@ -402,6 +518,61 @@ function createProfilePayslipStyles(theme: AppTheme) {
     alignItems: 'center',
   },
   confirmReviewText: { color: c.canvas, fontSize: 12, fontWeight: '900' },
+  correctionBtn: {
+    marginTop: 8,
+    borderRadius: r.sm,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.warningBorder,
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  correctionBtnText: { color: c.warningTitle, fontSize: 12, fontWeight: '900' },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    padding: 16,
+  },
+  modalTitle: { fontSize: 17, fontWeight: '900', color: c.text },
+  modalSub: { marginTop: 6, color: c.textMuted, fontSize: 12, lineHeight: 17 },
+  modalInput: {
+    marginTop: 12,
+    minHeight: 120,
+    borderRadius: r.sm,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surface,
+    padding: 12,
+    color: c.text,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  modalActions: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  modalCancelBtn: {
+    flex: 1,
+    borderRadius: r.sm,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  modalCancelText: { color: c.textSecondary, fontWeight: '800', fontSize: 13 },
+  modalSendBtn: {
+    flex: 1,
+    borderRadius: r.sm,
+    backgroundColor: c.primary,
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  modalSendText: { color: c.canvas, fontWeight: '900', fontSize: 13 },
   period: { color: c.textSecondary, fontWeight: '700', fontSize: 13 },
   netPay: { marginTop: 5, color: c.primaryDark, fontWeight: '900', fontSize: 18 },
   summary: { marginTop: 4, color: c.textMuted, fontSize: 12, lineHeight: 18 },

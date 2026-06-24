@@ -217,7 +217,7 @@ export function LeaveRequestModal({
       if (needSickCert && !medicalUrl) {
         toast.info(
           'ใบรับรองแพทย์',
-          'ลาป่วยติดกันเกิน 2 วัน ต้องแนบใบรับรองแพทย์ (อัปโหลดรูป)'
+          'ลาป่วยติดกันเกิน 2 วัน ต้องแนบใบรับรองแพทย์ (PDF หรือรูปภาพ)'
         );
         return;
       }
@@ -242,7 +242,7 @@ export function LeaveRequestModal({
         if (!suppDocUrl) {
           toast.info(
             'เอกสารเพิ่มเติม',
-            'กรณีนี้ควรแนบเอกสารประกอบ (อัปโหลดรูปเอกสาร)'
+            'กรณีนี้ต้องแนบเอกสารประกอบ (PDF หรือรูปภาพ)'
           );
           return;
         }
@@ -274,9 +274,9 @@ export function LeaveRequestModal({
           starts_on: startsOn,
           ends_on: endsOn,
           reason: reason.trim(),
-          medical_certificate_url: medicalUrl,
+          medical_certificate_url: leaveType === 'sick' ? medicalUrl : null,
           supplementary_note: needPersonalExtra ? suppNote.trim() : null,
-          supplementary_document_url: needPersonalExtra ? suppDocUrl : null,
+          supplementary_document_url: leaveType === 'personal' ? suppDocUrl : null,
           status: 'pending',
         })
         .select('id')
@@ -465,18 +465,21 @@ export function LeaveRequestModal({
                 multiline
               />
 
-              {leaveType === 'sick' && needSickCert ? (
+              {leaveType === 'sick' ? (
                 <>
-                  <Text style={[styles.label, themed.label]}>ใบรับรองแพทย์ (รูป)</Text>
+                  <Text style={[styles.label, themed.label]}>
+                    หลักฐานการลาป่วย (PDF หรือรูปภาพ)
+                    {needSickCert ? ' *' : ''}
+                  </Text>
                   <Pressable
                     style={[styles.uploadBtn, themed.uploadBtn]}
                     disabled={uploadingMed}
                     onPress={async () => {
                       setUploadingMed(true);
                       try {
-                        const url = await pickAndUploadLeaveAttachment(userId);
-                        setMedicalUrl(url);
-                        toast.success('อัปโหลดแล้ว', 'แนบใบรับรองแพทย์เรียบร้อย');
+                        const uploaded = await pickAndUploadLeaveAttachment(userId);
+                        setMedicalUrl(uploaded.url);
+                        toast.success('อัปโหลดแล้ว', 'แนบหลักฐานเรียบร้อย');
                       } catch (e) {
                         toast.error(
                           'อัปโหลดไม่สำเร็จ',
@@ -490,8 +493,8 @@ export function LeaveRequestModal({
                       {uploadingMed
                         ? 'กำลังอัปโหลด…'
                         : medicalUrl
-                          ? 'เปลี่ยนรูปใบรับรอง'
-                          : 'อัปโหลดรูปใบรับรอง'}
+                          ? 'เปลี่ยนไฟล์หลักฐาน'
+                          : 'เลือกไฟล์ PDF / รูปภาพ'}
                     </Text>
                   </Pressable>
                 </>
@@ -508,16 +511,24 @@ export function LeaveRequestModal({
                     placeholderTextColor={tc.textMuted}
                     multiline
                   />
-                  <Text style={[styles.label, themed.label]}>เอกสารประกอบ (รูป)</Text>
+                </>
+              ) : null}
+
+              {leaveType === 'personal' ? (
+                <>
+                  <Text style={[styles.label, themed.label]}>
+                    หลักฐานการลากิจ (PDF หรือรูปภาพ)
+                    {needPersonalExtra ? ' *' : ''}
+                  </Text>
                   <Pressable
                     style={[styles.uploadBtn, themed.uploadBtn]}
                     disabled={uploadingSupp}
                     onPress={async () => {
                       setUploadingSupp(true);
                       try {
-                        const url = await pickAndUploadLeaveAttachment(userId);
-                        setSuppDocUrl(url);
-                        toast.success('อัปโหลดแล้ว', 'แนบเอกสารเรียบร้อย');
+                        const uploaded = await pickAndUploadLeaveAttachment(userId);
+                        setSuppDocUrl(uploaded.url);
+                        toast.success('อัปโหลดแล้ว', 'แนบหลักฐานเรียบร้อย');
                       } catch (e) {
                         toast.error(
                           'อัปโหลดไม่สำเร็จ',
@@ -531,8 +542,8 @@ export function LeaveRequestModal({
                       {uploadingSupp
                         ? 'กำลังอัปโหลด…'
                         : suppDocUrl
-                          ? 'เปลี่ยนรูปเอกสาร'
-                          : 'อัปโหลดรูปเอกสาร'}
+                          ? 'เปลี่ยนไฟล์หลักฐาน'
+                          : 'เลือกไฟล์ PDF / รูปภาพ'}
                     </Text>
                   </Pressable>
                 </>

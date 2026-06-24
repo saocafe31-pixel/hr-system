@@ -25,12 +25,19 @@ type TaskNotificationsReadPayload = {
   source: 'tasks_tab' | 'notif_center' | 'other';
 };
 type TaskNotificationsReadListener = (payload: TaskNotificationsReadPayload) => void;
+type PayrollCorrectionOpenPayload = {
+  userId: string;
+  cycleKey: string;
+  slipId: string;
+};
+type PayrollCorrectionOpenListener = (payload: PayrollCorrectionOpenPayload) => void;
 
 const leaveStatusChangedListeners = new Set<LeaveStatusChangedListener>();
 const taskStatusChangedListeners = new Set<TaskStatusChangedListener>();
 const mentionReadListeners = new Set<MentionReadListener>();
 const communitySeenListeners = new Set<CommunitySeenListener>();
 const taskNotificationsReadListeners = new Set<TaskNotificationsReadListener>();
+const payrollCorrectionOpenListeners = new Set<PayrollCorrectionOpenListener>();
 
 export function emitLeaveStatusChanged(payload: LeaveStatusChangedPayload) {
   for (const fn of leaveStatusChangedListeners) {
@@ -114,5 +121,22 @@ export function onTaskNotificationsRead(listener: TaskNotificationsReadListener)
   taskNotificationsReadListeners.add(listener);
   return () => {
     taskNotificationsReadListeners.delete(listener);
+  };
+}
+
+export function emitPayrollCorrectionOpen(payload: PayrollCorrectionOpenPayload) {
+  for (const fn of payrollCorrectionOpenListeners) {
+    try {
+      fn(payload);
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
+export function onPayrollCorrectionOpen(listener: PayrollCorrectionOpenListener) {
+  payrollCorrectionOpenListeners.add(listener);
+  return () => {
+    payrollCorrectionOpenListeners.delete(listener);
   };
 }

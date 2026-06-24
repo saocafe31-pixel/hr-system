@@ -18,6 +18,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import {
   emitCommunitySeen,
   emitMentionRead,
+  emitPayrollCorrectionOpen,
   emitTaskNotificationsRead,
   onCommunitySeen,
   onTaskNotificationsRead,
@@ -63,6 +64,18 @@ type UnifiedNotif =
   | { kind: 'mention'; row: AttendanceChatMentionNotificationRow }
   | { kind: 'finance'; row: FinanceClaimNotificationRow }
   | { kind: 'status'; row: StatusNotificationRow }
+  | {
+      kind: 'payroll';
+      row: {
+        id: string;
+        slip_id: string;
+        user_id: string;
+        cycle_key: string;
+        body: string;
+        read_at: string | null;
+        created_at: string;
+      };
+    }
   | { kind: 'post_comment'; row: { id: string; body: string; created_at: string } }
   | { kind: 'note_reply'; row: { id: string; body: string; created_at: string } };
 
@@ -91,19 +104,26 @@ function notifCreatedAt(item: UnifiedNotif): string {
 }
 
 type SnapshotNotifRow = {
-  kind: 'task' | 'mention' | 'finance' | 'status' | 'post_comment' | 'note_reply';
+  kind: 'task' | 'mention' | 'finance' | 'status' | 'payroll' | 'post_comment' | 'note_reply';
   id: string;
   body: string;
   created_at: string;
   read_at: string | null;
   task_id: string | null;
   message_id: string | null;
-  claim_kind: 'salary' | 'expense' | null;
+  claim_kind: 'salary' | 'expense' | 'payroll' | null;
   claim_id: string | null;
-  event_type: 'submitted' | 'status_updated' | 'leave_status' | 'overtime_status' | null;
+  event_type:
+    | 'submitted'
+    | 'status_updated'
+    | 'leave_status'
+    | 'overtime_status'
+    | 'correction_requested'
+    | null;
   status: 'pending' | 'approved' | 'rejected' | 'paid' | null;
-  entity_kind: 'leave' | 'overtime' | null;
+  entity_kind: 'leave' | 'overtime' | 'payroll' | null;
   entity_id: string | null;
+  cycle_key: string | null;
 };
 
 export function TaskNotificationsProvider({ children }: { children: React.ReactNode }) {
@@ -210,6 +230,20 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
             } as StatusNotificationRow,
           };
         }
+        if (row.kind === 'payroll') {
+          return {
+            kind: 'payroll',
+            row: {
+              id: row.id,
+              slip_id: row.claim_id ?? '',
+              user_id: row.entity_id ?? '',
+              cycle_key: row.cycle_key ?? '',
+              body: row.body,
+              read_at: row.read_at,
+              created_at: row.created_at,
+            },
+          };
+        }
         if (row.kind === 'post_comment') {
           return {
             kind: 'post_comment',
@@ -289,6 +323,18 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           void loadNotifs();
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'payroll_correction_notifications',
+          filter: `recipient_id=eq.${uid}`,
+        },
+        () => {
+          void loadNotifs();
+        }
+      )
       .subscribe();
     return () => {
       supabase.removeChannel(channel);
@@ -302,7 +348,8 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           n.kind === 'task' ||
           n.kind === 'mention' ||
           n.kind === 'finance' ||
-          n.kind === 'status'
+          n.kind === 'status' ||
+          n.kind === 'payroll'
         ) {
           return !n.row.read_at;
         }
@@ -358,6 +405,11 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           .from('status_notifications')
           .update({ read_at: now })
           .eq('id', item.row.id);
+      } else if (item.kind === 'payroll') {
+        await supabase
+          .from('payroll_correction_notifications')
+          .update({ read_at: now })
+          .eq('id', item.row.id);
       } else if (uid) {
         const created = item.row.created_at;
         await writeCommunitySeen(uid, created);
@@ -385,6 +437,9 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
       .map((n) => n.row.id);
     const statusIds = unreadNotifs
       .filter((n): n is UnifiedNotif & { kind: 'status' } => n.kind === 'status')
+      .map((n) => n.row.id);
+    const payrollIds = unreadNotifs
+      .filter((n): n is UnifiedNotif & { kind: 'payroll' } => n.kind === 'payroll')
       .map((n) => n.row.id);
     if (taskIds.length) {
       await supabase
@@ -415,6 +470,12 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
         .update({ read_at: now })
         .in('id', statusIds);
     }
+    if (payrollIds.length) {
+      await supabase
+        .from('payroll_correction_notifications')
+        .update({ read_at: now })
+        .in('id', payrollIds);
+    }
     const communityRows = unreadNotifs.filter(
       (n) => n.kind === 'post_comment' || n.kind === 'note_reply'
     );
@@ -440,6 +501,9 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
           return { ...n, row: { ...n.row, read_at: now } };
         }
         if (n.kind === 'status' && statusIds.includes(n.row.id)) {
+          return { ...n, row: { ...n.row, read_at: now } };
+        }
+        if (n.kind === 'payroll' && payrollIds.includes(n.row.id)) {
           return { ...n, row: { ...n.row, read_at: now } };
         }
         return n;
@@ -508,6 +572,13 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
         router.push('/profile');
       } else if (item.kind === 'status') {
         router.push(item.row.entity_kind === 'overtime' ? '/attendance' : '/profile');
+      } else if (item.kind === 'payroll') {
+        emitPayrollCorrectionOpen({
+          userId: item.row.user_id,
+          cycleKey: item.row.cycle_key,
+          slipId: item.row.slip_id,
+        });
+        router.push('/admin');
       } else {
         router.push('/community');
       }
@@ -567,7 +638,8 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
                         item.kind === 'task' ||
                         item.kind === 'mention' ||
                         item.kind === 'finance' ||
-                        item.kind === 'status'
+                        item.kind === 'status' ||
+                        item.kind === 'payroll'
                           ? !item.row.read_at
                           : true;
                       return (
@@ -582,10 +654,12 @@ export function TaskNotificationsProvider({ children }: { children: React.ReactN
                                 ? 'แชท · กล่าวถึง'
                                 : item.kind === 'finance'
                                   ? 'การเงิน · เบิกเงิน'
-                                  : item.kind === 'status'
-                                    ? item.row.entity_kind === 'overtime'
-                                      ? 'ทีม · โอที'
-                                      : 'ลา · สถานะคำขอ'
+                                : item.kind === 'status'
+                                  ? item.row.entity_kind === 'overtime'
+                                    ? 'ทีม · โอที'
+                                    : 'ลา · สถานะคำขอ'
+                                  : item.kind === 'payroll'
+                                    ? 'Payroll · แจ้งแก้ไขสลิป'
                                 : item.kind === 'post_comment'
                                   ? 'คอมมูนิตี้ · โพสต์'
                                   : 'คอมมูนิตี้ · โน้ต'}

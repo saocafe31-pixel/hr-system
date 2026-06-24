@@ -9,7 +9,16 @@ alter table public.payroll_slip_events
 
 alter table public.payroll_slip_events
   add constraint payroll_slip_events_event_type_check
-  check (event_type in ('generated', 'confirmed', 'paid', 'voided', 'reissued', 'employee_confirmed'));
+  check (event_type in (
+    'generated',
+    'confirmed',
+    'paid',
+    'voided',
+    'reissued',
+    'employee_confirmed',
+    'correction_requested',
+    'correction_acknowledged'
+  ));
 
 create index if not exists payroll_slips_employee_confirmed_idx
   on public.payroll_slips (employee_confirmed_at desc)

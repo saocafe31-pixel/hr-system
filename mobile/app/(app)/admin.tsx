@@ -29,11 +29,14 @@ import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { DatePickerField } from '@/components/DatePickerField';
 import { AdminManagerDelegationModal } from '@/components/AdminManagerDelegationModal';
 import { AdminPayrollPanel } from '@/components/AdminPayrollPanel';
+import { AdminEmploymentCertificateIssueCard } from '@/components/AdminEmploymentCertificateIssueCard';
+import { AdminEmploymentCertificateSettingsCard } from '@/components/AdminEmploymentCertificateSettingsCard';
 import { ZoomableImage } from '@/components/ZoomableImage';
 import type { AppTheme } from '@/constants/Theme';
 import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
+import { onPayrollCorrectionOpen } from '@/lib/appSignals';
 import { mergeEmployeeWithProfiles, isUuidLike } from '@/lib/adminEmployeeMerge';
 import {
   ANNOUNCEMENT_DEFAULT_DURATION_MS,
@@ -101,6 +104,16 @@ type AdminSectionKey =
 type EmployeeConfirmAction = {
   kind: 'resign' | 'delete';
   row: AdminEmployeePasswordRow;
+};
+type EmployeePurgeOptions = {
+  attendance: boolean;
+  leave: boolean;
+  other: boolean;
+};
+const DEFAULT_EMPLOYEE_PURGE_OPTIONS: EmployeePurgeOptions = {
+  attendance: true,
+  leave: true,
+  other: true,
 };
 const ADMIN_SECTIONS: Array<{
   key: AdminSectionKey;
@@ -784,6 +797,12 @@ export default function AdminScreen() {
   const c = theme.colors;
   const styles = useMemo(() => createAdminStyles(theme), [theme]);
   const [activeSection, setActiveSection] = useState<AdminSectionKey | null>(null);
+
+  useEffect(() => {
+    return onPayrollCorrectionOpen(() => {
+      setActiveSection('payroll');
+    });
+  }, []);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [legacyAuth, setLegacyAuth] = useState<AdminEmployeePasswordRow[]>([]);
@@ -864,6 +883,9 @@ export default function AdminScreen() {
   const [employeeActionBusyId, setEmployeeActionBusyId] = useState<string | null>(null);
   const [employeeConfirmAction, setEmployeeConfirmAction] =
     useState<EmployeeConfirmAction | null>(null);
+  const [employeePurgeOptions, setEmployeePurgeOptions] = useState<EmployeePurgeOptions>(
+    DEFAULT_EMPLOYEE_PURGE_OPTIONS
+  );
   const [claimHistoryKind, setClaimHistoryKind] = useState<ClaimHistoryKind | null>(null);
   const [claimHistoryStatusFilter, setClaimHistoryStatusFilter] =
     useState<ClaimHistoryStatusFilter>('all');
@@ -1763,16 +1785,44 @@ export default function AdminScreen() {
     workAnalytics.wellbeingRows,
   ]);
 
-  const deleteEmployeeRecord = useCallback(
-    async (row: AdminEmployeePasswordRow) => {
+  const purgeEmployeeOperationalData = useCallback(
+    async (row: AdminEmployeePasswordRow, options: EmployeePurgeOptions) => {
+      if (!options.attendance && !options.leave && !options.other) {
+        toast.info('เลือกข้อมูล', 'เลือกอย่างน้อยหนึ่งประเภทที่ต้องการลบ');
+        return;
+      }
       setEmployeeActionBusyId(row.id);
       try {
-        const { error } = await supabase.from('employee').delete().eq('id', row.id);
+        const { data, error } = await supabase.rpc('admin_purge_employee_operational_data', {
+          p_employee_id: row.id,
+          p_delete_attendance: options.attendance,
+          p_delete_leave: options.leave,
+          p_delete_other: options.other,
+        });
         if (error) throw error;
+        const summary = data as {
+          attendance_deleted?: number;
+          leave_deleted?: number;
+          other_deleted?: number;
+          profile_id?: string | null;
+        } | null;
+        const parts: string[] = [];
+        if (options.attendance) {
+          parts.push(`เข้า-ออก ${summary?.attendance_deleted ?? 0} แถว`);
+        }
+        if (options.leave) {
+          parts.push(`ลา/สาย ${summary?.leave_deleted ?? 0} แถว`);
+        }
+        if (options.other) {
+          parts.push(`อื่นๆ ${summary?.other_deleted ?? 0} แถว`);
+        }
+        if (!summary?.profile_id) {
+          parts.push('ไม่พบบัญชีที่เชื่อม — ลบเฉพาะข้อมูลที่ผูก employee_id');
+        }
         await load();
         toast.success(
-          'ลบพนักงานแล้ว',
-          'แถว employee ถูกลบ — บัญชีล็อกอิน (ถ้ามี) ยังอยู่ และ employee_id ใน profiles จะถูกปลดตาม FK'
+          'ลบข้อมูลการใช้งานแล้ว',
+          `เก็บข้อมูล HR และบัญชี Auth ไว้ · ${parts.join(' · ')}`
         );
       } catch (e) {
         toast.error('ลบไม่สำเร็จ', e instanceof Error ? e.message : String(e));
@@ -1809,13 +1859,16 @@ export default function AdminScreen() {
   const closeEmployeeConfirmAction = useCallback(() => {
     if (employeeActionBusyId !== null) return;
     setEmployeeConfirmAction(null);
+    setEmployeePurgeOptions(DEFAULT_EMPLOYEE_PURGE_OPTIONS);
   }, [employeeActionBusyId]);
 
   const employeeConfirmTitle =
-    employeeConfirmAction?.kind === 'delete' ? 'ลบข้อมูลพนักงาน?' : 'บันทึกการลาออก?';
+    employeeConfirmAction?.kind === 'delete'
+      ? 'ลบข้อมูลการใช้งานของพนักงาน?'
+      : 'บันทึกการลาออก?';
   const employeeConfirmMessage =
     employeeConfirmAction?.kind === 'delete'
-      ? 'จะลบแถวใน employee ถาวร — ข้อมูลที่อ้างอิง employee จะถูกปลดตามกฎ FK เช่น profiles.employee_id แต่บัญชี Auth ไม่ถูกลบ'
+      ? 'เลือกประเภทข้อมูลที่ต้องการลบ — ระบบจะเก็บแถว employee (ข้อมูล HR) และบัญชี Auth ไว้เพื่อประวัติ'
       : 'จะบันทึกประวัติใน employee_resignations และตั้ง employee.status เป็นลาออก';
   const employeeConfirmName = employeeConfirmAction
     ? [
@@ -1830,8 +1883,11 @@ export default function AdminScreen() {
   const employeeConfirmBusy =
     employeeConfirmAction != null && employeeActionBusyId === employeeConfirmAction.row.id;
   const employeeConfirmDanger = employeeConfirmAction?.kind === 'delete';
+  const employeePurgeHasSelection =
+    employeePurgeOptions.attendance || employeePurgeOptions.leave || employeePurgeOptions.other;
 
   function confirmDeleteEmployee(row: AdminEmployeePasswordRow) {
+    setEmployeePurgeOptions(DEFAULT_EMPLOYEE_PURGE_OPTIONS);
     setEmployeeConfirmAction({ kind: 'delete', row });
   }
 
@@ -1843,11 +1899,12 @@ export default function AdminScreen() {
     if (!employeeConfirmAction || employeeConfirmBusy) return;
     const { kind, row } = employeeConfirmAction;
     if (kind === 'delete') {
-      await deleteEmployeeRecord(row);
+      await purgeEmployeeOperationalData(row, employeePurgeOptions);
     } else {
       await resignEmployeeRecord(row);
     }
     setEmployeeConfirmAction(null);
+    setEmployeePurgeOptions(DEFAULT_EMPLOYEE_PURGE_OPTIONS);
   }
 
   const announcementPreviewUri = useMemo(() => {
@@ -3040,6 +3097,8 @@ export default function AdminScreen() {
           <View style={styles.adminSectionCard}>
         <Text style={[styles.h2, { marginTop: 24 }]}>6 · Payroll / สลิปเงินเดือน</Text>
         <AdminPayrollPanel />
+        <AdminEmploymentCertificateIssueCard />
+        <AdminEmploymentCertificateSettingsCard />
           </View>
         ) : null}
 
@@ -4101,10 +4160,57 @@ export default function AdminScreen() {
               {employeeConfirmName || employeeConfirmAction?.row.id.slice(0, 8) || 'พนักงาน'}
             </Text>
             <Text style={styles.employeeConfirmMessage}>{employeeConfirmMessage}</Text>
+            {employeeConfirmDanger ? (
+              <View style={styles.employeePurgeOptionList}>
+                {(
+                  [
+                    {
+                      key: 'attendance' as const,
+                      label: 'ประวัติเข้า-ออกงาน',
+                      hint: 'บันทึกเวลา, OT, อารมณ์, แชทเข้า-ออก',
+                    },
+                    {
+                      key: 'leave' as const,
+                      label: 'การใช้สิทธิลา / ขอเข้าสาย',
+                      hint: 'คำขอลา, ขอสาย, โควตาวันลา',
+                    },
+                    {
+                      key: 'other' as const,
+                      label: 'การใช้งานอื่นๆ',
+                      hint: 'ตารางกะ, วันหยุดส่วนตัว, งาน, เบิกเงิน, โน้ตปฏิทิน, คอมมูนิตี้',
+                    },
+                  ] as const
+                ).map((opt) => {
+                  const on = employeePurgeOptions[opt.key];
+                  return (
+                    <Pressable
+                      key={opt.key}
+                      style={styles.employeePurgeOptionRow}
+                      onPress={() =>
+                        setEmployeePurgeOptions((prev) => ({
+                          ...prev,
+                          [opt.key]: !prev[opt.key],
+                        }))
+                      }
+                      disabled={employeeConfirmBusy}>
+                      <FontAwesome
+                        name={on ? 'check-square' : 'square-o'}
+                        size={20}
+                        color={on ? c.primary : c.textMuted}
+                      />
+                      <View style={styles.employeePurgeOptionBody}>
+                        <Text style={styles.employeePurgeOptionLabel}>{opt.label}</Text>
+                        <Text style={styles.employeePurgeOptionHint}>{opt.hint}</Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
             <View style={styles.employeeConfirmInfoBox}>
               <Text style={styles.employeeConfirmInfoText}>
                 {employeeConfirmDanger
-                  ? 'การลบเป็นการลบข้อมูล employee ถาวร ควรใช้เฉพาะกรณีข้อมูลซ้ำหรือคีย์ผิด'
+                  ? 'ไม่ลบแถว employee, profiles หรือบัญชี Auth · สลิปเงินเดือนและข้อมูล HR หลักยังอยู่'
                   : 'การลาออกจะเก็บประวัติไว้และยังตรวจสอบย้อนหลังได้จากข้อมูล HR'}
               </Text>
             </View>
@@ -4127,7 +4233,7 @@ export default function AdminScreen() {
                   employeeConfirmBusy && styles.empActionBtnDisabled,
                 ]}
                 onPress={() => void runEmployeeConfirmAction()}
-                disabled={employeeConfirmBusy}>
+                disabled={employeeConfirmBusy || (employeeConfirmDanger && !employeePurgeHasSelection)}>
                 {employeeConfirmBusy ? (
                   <ActivityIndicator color={employeeConfirmDanger ? c.error : c.warningTitle} />
                 ) : (
@@ -4138,7 +4244,7 @@ export default function AdminScreen() {
                         ? styles.employeeConfirmDeleteText
                         : styles.employeeConfirmResignText,
                     ]}>
-                    {employeeConfirmDanger ? 'ลบพนักงาน' : 'ยืนยันลาออก'}
+                    {employeeConfirmDanger ? 'ลบข้อมูลที่เลือก' : 'ยืนยันลาออก'}
                   </Text>
                 )}
               </Pressable>
@@ -5205,6 +5311,33 @@ function createAdminStyles(theme: AppTheme) {
     color: c.textMuted,
     lineHeight: 18,
     textAlign: 'center',
+  },
+  employeePurgeOptionList: {
+    alignSelf: 'stretch',
+    marginTop: 12,
+    gap: 8,
+  },
+  employeePurgeOptionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    borderRadius: r.sm,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+    backgroundColor: c.surfaceMuted,
+    padding: 10,
+  },
+  employeePurgeOptionBody: { flex: 1, minWidth: 0 },
+  employeePurgeOptionLabel: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: c.text,
+  },
+  employeePurgeOptionHint: {
+    marginTop: 3,
+    fontSize: 11,
+    color: c.textMuted,
+    lineHeight: 16,
   },
   employeeConfirmActions: {
     alignSelf: 'stretch',

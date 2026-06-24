@@ -23,6 +23,16 @@ import {
   companyHolidayMapByDate,
   fetchCompanyHolidayDates,
 } from '@/lib/companyHolidays';
+import {
+  bangkokYmdToday,
+  buildAbsenceDateSet,
+  buildCheckInByDateFromLogs,
+  mergeYmdBounds,
+  payrollPeriodForCalendarMonth,
+  PAYROLL_ABSENCE_DISPUTE_HINT,
+  PAYROLL_ABSENCE_NOTE_ADMIN,
+  PAYROLL_ABSENCE_NOTE_DETAIL,
+} from '@/lib/payrollPeriodWork';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
 import {
   buildAssignmentByUserDate,
@@ -56,6 +66,7 @@ type Cell = {
   companyHoliday: CompanyHolidayDateRow | null;
   employeeHoliday: boolean;
   approvedLeave: ApprovedLeave | null;
+  absenceDay: boolean;
 };
 
 type HighlightDay = {
@@ -65,6 +76,7 @@ type HighlightDay = {
   hasEmployeeHoliday: boolean;
   hasCompanyHoliday: boolean;
   hasMemo: boolean;
+  absenceDay: boolean;
 };
 
 type ApprovedLeave = {
@@ -180,6 +192,7 @@ export function EmployeeScheduleCalendarCard({
   const [approvedLeaves, setApprovedLeaves] = useState<ApprovedLeave[]>([]);
   const [companyHolidayRows, setCompanyHolidayRows] = useState<CompanyHolidayDateRow[]>([]);
   const [resolvedHolidayYmds, setResolvedHolidayYmds] = useState<Set<string>>(() => new Set());
+  const [absenceYmds, setAbsenceYmds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(false);
   const [selectedYmd, setSelectedYmd] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -210,6 +223,16 @@ export function EmployeeScheduleCalendarCard({
     d.setDate(d.getDate() - 1);
     return { startYmd: firstThis, endYmd: ymdFromDate(d) };
   }, [anchorDate]);
+
+  const payrollPeriod = useMemo(() => {
+    const { year, month } = ymdPartsInBangkok(anchorDate);
+    return payrollPeriodForCalendarMonth(year, month);
+  }, [anchorDate]);
+
+  const dataLoadRange = useMemo(
+    () => mergeYmdBounds(period, payrollPeriod),
+    [payrollPeriod, period]
+  );
 
   const rowsByYmd = useMemo(() => {
     const map = new Map<string, Row[]>();
@@ -263,6 +286,7 @@ export function EmployeeScheduleCalendarCard({
         companyHoliday: null,
         employeeHoliday: false,
         approvedLeave: null,
+        absenceDay: false,
       });
     }
     for (const ymd of dates) {
@@ -270,8 +294,10 @@ export function EmployeeScheduleCalendarCard({
       const hasMemo = memoYmdSet.has(ymd);
       const approvedLeave = approvedLeaveForYmd(approvedLeaves, ymd);
       const employeeHoliday = resolvedHolidayYmds.has(ymd);
+      const absenceDay =
+        !approvedLeave && !employeeHoliday && absenceYmds.has(ymd);
       const markerSource =
-        approvedLeave || employeeHoliday
+        approvedLeave || employeeHoliday || absenceDay
           ? null
           : dayRows.find((r) => r.source === 'shift')
             ? 'shift'
@@ -287,6 +313,7 @@ export function EmployeeScheduleCalendarCard({
         companyHoliday: companyHolidayByDate.get(ymd) ?? null,
         employeeHoliday,
         approvedLeave,
+        absenceDay,
       });
     }
     while (cells.length % 7 !== 0) {
@@ -297,6 +324,7 @@ export function EmployeeScheduleCalendarCard({
         companyHoliday: null,
         employeeHoliday: false,
         approvedLeave: null,
+        absenceDay: false,
       });
     }
     return cells;
@@ -308,6 +336,7 @@ export function EmployeeScheduleCalendarCard({
     period.startYmd,
     resolvedHolidayYmds,
     rowsByYmd,
+    absenceYmds,
   ]);
 
   const highlightDays = useMemo<HighlightDay[]>(
@@ -320,6 +349,7 @@ export function EmployeeScheduleCalendarCard({
           hasEmployeeHoliday: resolvedHolidayYmds.has(ymd),
           hasCompanyHoliday: companyHolidayByDate.has(ymd),
           hasMemo: memoYmdSet.has(ymd),
+          absenceDay: absenceYmds.has(ymd),
         }))
         .filter(
           (d) =>
@@ -327,7 +357,8 @@ export function EmployeeScheduleCalendarCard({
             d.hasApprovedLeave ||
             d.hasEmployeeHoliday ||
             d.hasCompanyHoliday ||
-            d.hasMemo
+            d.hasMemo ||
+            d.absenceDay
         ),
     [
       approvedLeavesByYmd,
@@ -337,6 +368,7 @@ export function EmployeeScheduleCalendarCard({
       period.startYmd,
       resolvedHolidayYmds,
       rowsByYmd,
+      absenceYmds,
     ]
   );
 
@@ -462,23 +494,24 @@ export function EmployeeScheduleCalendarCard({
   const loadCalendar = useCallback(async () => {
     if (!userId) return;
     setLoading(true);
+    const { startYmd: loadStart, endYmd: loadEnd } = dataLoadRange;
     try {
-      const [branchRes, assignmentRes, legacyRes, memoRes, leaveRes, empHolRes, companyHolRes, assigneeRes, directTaskRes] =
+      const [branchRes, assignmentRes, legacyRes, memoRes, leaveRes, empHolRes, companyHolRes, assigneeRes, directTaskRes, attendanceRes] =
         await Promise.all([
         supabase.from('branch_information').select('*').order('branch_name'),
         supabase
           .from('work_schedule_assignments')
           .select('work_date, shift_id, allowed_branch_id, created_at')
           .eq('user_id', userId)
-          .gte('work_date', period.startYmd)
-          .lte('work_date', period.endYmd)
+          .gte('work_date', loadStart)
+          .lte('work_date', loadEnd)
           .order('work_date', { ascending: true }),
         supabase
           .from('work_schedules')
           .select('start_at, end_at, title')
           .eq('user_id', userId)
-          .lte('start_at', new Date(`${period.endYmd}T23:59:59+07:00`).toISOString())
-          .gte('end_at', new Date(`${period.startYmd}T00:00:00+07:00`).toISOString())
+          .lte('start_at', new Date(`${loadEnd}T23:59:59+07:00`).toISOString())
+          .gte('end_at', new Date(`${loadStart}T00:00:00+07:00`).toISOString())
           .order('start_at', { ascending: true }),
         supabase
           .from('attendance_calendar_notes')
@@ -491,16 +524,16 @@ export function EmployeeScheduleCalendarCard({
           .select('id, leave_type, starts_on, ends_on, reason')
           .eq('user_id', userId)
           .eq('status', 'approved')
-          .lte('starts_on', period.endYmd)
-          .gte('ends_on', period.startYmd)
+          .lte('starts_on', loadEnd)
+          .gte('ends_on', loadStart)
           .order('starts_on', { ascending: true }),
         supabase
           .from('employee_holiday_dates')
           .select('id, user_id, holiday_date, created_at')
           .eq('user_id', userId)
-          .gte('holiday_date', period.startYmd)
-          .lte('holiday_date', period.endYmd),
-        fetchCompanyHolidayDates({ startYmd: period.startYmd, endYmd: period.endYmd }).catch(
+          .gte('holiday_date', loadStart)
+          .lte('holiday_date', loadEnd),
+        fetchCompanyHolidayDates({ startYmd: loadStart, endYmd: loadEnd }).catch(
           () => [] as CompanyHolidayDateRow[]
         ),
         supabase
@@ -514,6 +547,13 @@ export function EmployeeScheduleCalendarCard({
           .in('status', ['pending', 'in_progress'])
           .order('created_at', { ascending: false })
           .limit(20),
+        supabase
+          .from('attendance_logs')
+          .select('kind, created_at')
+          .eq('user_id', userId)
+          .eq('kind', 'check_in')
+          .gte('created_at', new Date(`${payrollPeriod.startYmd}T00:00:00+07:00`).toISOString())
+          .lte('created_at', new Date(`${payrollPeriod.endYmd}T23:59:59+07:00`).toISOString()),
       ]);
       const branchRows = mapBranchInformationRows(
         (branchRes.data as Record<string, unknown>[]) ?? []
@@ -660,6 +700,29 @@ export function EmployeeScheduleCalendarCard({
       }
       setRows(out);
 
+      const companyHolidayDates = new Set(
+        companyHolRes.map((row) => String(row.holiday_date).slice(0, 10))
+      );
+      setAbsenceYmds(
+        buildAbsenceDateSet({
+          userId,
+          startYmd: payrollPeriod.startYmd,
+          endYmd: payrollPeriod.endYmd,
+          asOfYmd: bangkokYmdToday(),
+          assignments: assignments.map((row) => ({
+            user_id: userId,
+            work_date: row.work_date,
+            created_at: row.created_at ?? '',
+          })),
+          employeeHolidays: employeeHolidayRows,
+          companyHolidayDates,
+          approvedLeaves: approvedLeavesList,
+          checkInByDate: buildCheckInByDateFromLogs(
+            (attendanceRes.data as Array<{ kind: string; created_at: string }>) ?? []
+          ),
+        })
+      );
+
       const linkedTaskIds = [
         ...new Set(
           ((assigneeRes.data ?? []) as { task_id?: string }[])
@@ -692,7 +755,7 @@ export function EmployeeScheduleCalendarCard({
     } finally {
       setLoading(false);
     }
-  }, [period.endYmd, period.startYmd, userId]);
+  }, [dataLoadRange.endYmd, dataLoadRange.startYmd, payrollPeriod.endYmd, payrollPeriod.startYmd, period.endYmd, period.startYmd, userId]);
 
   useEffect(() => {
     void loadCalendar();
@@ -798,7 +861,11 @@ export function EmployeeScheduleCalendarCard({
   const selectedEmployeeHoliday = !!(
     selectedYmd && resolvedHolidayYmds.has(selectedYmd) && !selectedHasApprovedLeave
   );
+  const selectedAbsence = !!(selectedYmd && absenceYmds.has(selectedYmd));
   const approvedLeaveDayCount = approvedLeavesByYmd.size;
+  const absenceDayCount = absenceYmds.size;
+  const isSelfProfile = session?.user?.id === userId;
+  const isHrViewer = manager || admin;
 
   return (
     <View style={styles.wrap}>
@@ -822,15 +889,21 @@ export function EmployeeScheduleCalendarCard({
           {highlightDays.length > 0 ||
           liveWorkTasks.length > 0 ||
           employeeHolidayDaysCount > 0 ||
-          approvedLeaveDayCount > 0 ? (
+          approvedLeaveDayCount > 0 ||
+          absenceDayCount > 0 ? (
             <View style={styles.highlightCard}>
               <View style={styles.highlightCopy}>
                 <Text style={styles.highlightTitle}>
                   มีตารางงาน {workDaysCount} วัน · วันหยุด {employeeHolidayDaysCount} วัน · ลา{' '}
-                  {approvedLeaveDayCount} วัน · Live Work {liveWorkTasks.length} งาน
+                  {approvedLeaveDayCount} วัน
+                  {absenceDayCount > 0
+                    ? ` · ขาดงานรอบ Payroll ${absenceDayCount} วัน`
+                    : ''}{' '}
+                  · Live Work {liveWorkTasks.length} งาน
                 </Text>
                 <Text style={styles.highlightSub}>
-                  แตะวันที่ในปฏิทินเพื่อดูตารางงาน วันหยุดบริษัท/ส่วนตัว และการลาที่อนุมัติแล้ว
+                  นับขาดงานตามรอบ Payroll {payrollPeriod.startYmd}–{payrollPeriod.endYmd} (เฉพาะวันที่ผ่านมาแล้ว)
+                  · แตะวันที่ในปฏิทินเพื่อดูตารางงาน วันหยุด การลา และวันขาดงานที่อาจถูกหักใน Payroll
                 </Text>
               </View>
               <Pressable
@@ -878,6 +951,10 @@ export function EmployeeScheduleCalendarCard({
                 ) : cell.employeeHoliday ? (
                   <Text style={styles.calendarEmployeeHolidayText} numberOfLines={1}>
                     วันหยุด
+                  </Text>
+                ) : cell.absenceDay ? (
+                  <Text style={styles.calendarAbsenceText} numberOfLines={1}>
+                    ขาดงาน
                   </Text>
                 ) : null}
                 {cell.markerSource ? (
@@ -1047,7 +1124,19 @@ export function EmployeeScheduleCalendarCard({
                     </View>
                   ))}
                 </View>
-              ) : detailRows.length > 0 ? (
+              ) : null}
+              {selectedAbsence ? (
+                <View style={styles.absenceBanner}>
+                  <Text style={styles.absenceBannerLabel}>ขาดงาน</Text>
+                  <Text style={styles.absenceBannerTitle}>{PAYROLL_ABSENCE_NOTE_DETAIL}</Text>
+                  <Text style={styles.absenceBannerMeta}>
+                    {isHrViewer && !isSelfProfile
+                      ? PAYROLL_ABSENCE_NOTE_ADMIN
+                      : PAYROLL_ABSENCE_DISPUTE_HINT}
+                  </Text>
+                </View>
+              ) : null}
+              {!selectedHasApprovedLeave && detailRows.length > 0 ? (
                 detailRows.map((row, idx) => (
                   <View key={`${row.ymd}-${row.source}-${idx}`} style={styles.detailRow}>
                     <Text style={styles.detailRowTitle}>{row.title}</Text>
@@ -1062,9 +1151,9 @@ export function EmployeeScheduleCalendarCard({
                     </Text>
                   </View>
                 ))
-              ) : (
+              ) : !selectedHasApprovedLeave && !selectedAbsence ? (
                 <Text style={styles.empty}>ยังไม่มีข้อมูลตารางงาน</Text>
-              )}
+              ) : null}
               <View style={styles.dayMemoCard}>
                 <Text style={styles.dayMemoTitle}>บันทึกงานของวัน (คล้ายกิจกรรม)</Text>
                 {!canEditNotes ? (
@@ -1278,6 +1367,39 @@ function createEmployeeScheduleCalendarStyles(theme: AppTheme) {
     fontWeight: '900',
     color: c.leaveSickBar,
     textAlign: 'center',
+  },
+  calendarAbsenceText: {
+    marginTop: 2,
+    fontSize: 7,
+    fontWeight: '900',
+    color: c.lateNoticeBar,
+    textAlign: 'center',
+  },
+  absenceBanner: {
+    backgroundColor: c.lateNoticeBg,
+    borderColor: c.lateNoticeBar,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 10,
+  },
+  absenceBannerLabel: {
+    color: c.lateNoticeBar,
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  absenceBannerTitle: {
+    color: c.text,
+    fontSize: 13,
+    lineHeight: 19,
+    fontWeight: '700',
+  },
+  absenceBannerMeta: {
+    color: c.textMuted,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 8,
   },
   calendarMiniLabel: {
     marginTop: 2,

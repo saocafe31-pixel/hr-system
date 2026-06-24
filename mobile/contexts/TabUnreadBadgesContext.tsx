@@ -78,6 +78,7 @@ type BadgeSnapshot = {
   mention_unread: number;
   finance_unread: number;
   status_unread: number;
+  payroll_unread: number;
 };
 
 export function TabUnreadBadgesProvider({
@@ -104,6 +105,7 @@ export function TabUnreadBadgesProvider({
   const [mentionRaw, setMentionRaw] = useState(0);
   const [financeNotifRaw, setFinanceNotifRaw] = useState(0);
   const [statusNotifRaw, setStatusNotifRaw] = useState(0);
+  const [payrollNotifRaw, setPayrollNotifRaw] = useState(0);
   const [notifPrefs, setNotifPrefs] = useState({
     task_enabled: true,
     mention_enabled: true,
@@ -163,6 +165,7 @@ export function TabUnreadBadgesProvider({
           mention_unread: 0,
           finance_unread: 0,
           status_unread: 0,
+          payroll_unread: 0,
         };
       }
       const { data } = await supabase.rpc('app_badge_notif_snapshot', {
@@ -178,6 +181,7 @@ export function TabUnreadBadgesProvider({
         mention_unread: Number(payload?.mention_unread ?? 0),
         finance_unread: Number(payload?.finance_unread ?? 0),
         status_unread: Number(payload?.status_unread ?? 0),
+        payroll_unread: Number(payload?.payroll_unread ?? 0),
       };
     },
     []
@@ -192,6 +196,7 @@ export function TabUnreadBadgesProvider({
     setMentionRaw(snapshot.mention_unread);
     setFinanceNotifRaw(snapshot.finance_unread);
     setStatusNotifRaw(snapshot.status_unread);
+    setPayrollNotifRaw(snapshot.payroll_unread);
   }, [
     lastChatSeen,
     lastCommunitySeen,
@@ -304,6 +309,7 @@ export function TabUnreadBadgesProvider({
       setMentionRaw(snapshot.mention_unread);
       setFinanceNotifRaw(snapshot.finance_unread);
       setStatusNotifRaw(snapshot.status_unread);
+      setPayrollNotifRaw(snapshot.payroll_unread);
       setNotifPrefs({
         task_enabled: (prefRow as { task_enabled?: boolean } | null)?.task_enabled ?? true,
         mention_enabled: (prefRow as { mention_enabled?: boolean } | null)?.mention_enabled ?? true,
@@ -420,6 +426,26 @@ export function TabUnreadBadgesProvider({
       .on(
         'postgres_changes',
         {
+          event: '*',
+          schema: 'public',
+          table: 'payroll_correction_notifications',
+          filter: `recipient_id=eq.${uid}`,
+        },
+        (payload) => {
+          scheduleRefresh();
+          if (payload.eventType === 'INSERT') {
+            const row = payload.new as { body?: string };
+            void presentBackgroundAwareNotification(
+              'Payroll',
+              row?.body ?? 'พนักงานแจ้งแก้ไขสลิปเงินเดือน',
+              { kind: 'payroll_correction' }
+            );
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
           event: 'UPDATE',
           schema: 'public',
           table: 'task_notifications',
@@ -486,8 +512,8 @@ export function TabUnreadBadgesProvider({
   }, [uid, hydrated, scheduleRefresh, notifPrefs.mention_enabled, notifPrefs.task_enabled]);
 
   const totalHomeBadge = useMemo(
-    () => chatRaw + communityRaw + taskNotifRaw + mentionRaw + financeNotifRaw + statusNotifRaw,
-    [chatRaw, communityRaw, taskNotifRaw, mentionRaw, financeNotifRaw, statusNotifRaw]
+    () => chatRaw + communityRaw + taskNotifRaw + mentionRaw + financeNotifRaw + statusNotifRaw + payrollNotifRaw,
+    [chatRaw, communityRaw, taskNotifRaw, mentionRaw, financeNotifRaw, statusNotifRaw, payrollNotifRaw]
   );
 
   const chatBadge = useMemo(() => {

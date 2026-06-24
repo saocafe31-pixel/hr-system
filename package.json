@@ -6,7 +6,8 @@
     "supabase": "supabase",
     "db:login": "supabase login",
     "db:link": "supabase link --project-ref qidohlmeyhsofuntbmbw",
-    "db:push": "supabase db push",
+    "db:push": "supabase db push --include-all",
+    "db:push:strict": "supabase db push",
     "db:pull": "supabase db pull",
     "db:query": "supabase db query --linked",
     "db:schema": "supabase db query --linked -f supabase/schema.sql",
@@ -29,6 +30,6 @@
   },
   "devDependencies": {
     "supabase": "^2.84.10",
-    "vercel": "^50.42.0"
+    "vercel": "^54.15.0"
   }
 }

@@ -17,10 +17,8 @@ import type { AppTheme } from '@/constants/Theme';
 import { FriendlyNoticeModal } from '@/components/FriendlyNoticeModal';
 import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
-import {
-  buildEmployeeHrUpdate,
-  type EmployeeHrForm,
-} from '@/lib/employeeTableUpdate';
+import { type EmployeeHrForm } from '@/lib/employeeTableUpdate';
+import { adminUpdateEmployeeHr } from '@/lib/adminUpdateEmployeeHr';
 import { resolveProfileUserIdForLeave } from '@/lib/adminProfileResolveForEmployee';
 import {
   currentYearBangkok,
@@ -117,6 +115,22 @@ function directoryToForm(d: EmployeeDirectory): EmployeeHrForm {
     account_number: d.account_number ?? '',
     status: d.status ?? '',
   };
+}
+
+async function fetchEmployeeDirectoryRow(
+  employeeId: string
+): Promise<EmployeeDirectory | null> {
+  const { data, error } = await supabase.rpc('admin_get_employee_directory_row', {
+    p_id: employeeId,
+  });
+  if (error) throw new Error(error.message);
+  const raw = data as unknown;
+  const rows: EmployeeDirectory[] = Array.isArray(raw)
+    ? (raw as EmployeeDirectory[])
+    : raw != null
+      ? [raw as EmployeeDirectory]
+      : [];
+  return rows[0] ?? null;
 }
 
 export const ADMIN_NEW_EMPLOYEE_ID = '__new__';
@@ -402,20 +416,6 @@ export function AdminEmployeeEditModal({
   async function saveHr() {
     if (!employeeId) return;
     setSavingHr(true);
-    const payload = buildEmployeeHrUpdate(hr);
-    const fallbackPayload = buildEmployeeHrUpdate(hr, { includeBranchId: false });
-    const shouldRetryWithoutBranchId = (message: string | undefined) => {
-      if (!message) return false;
-      const m = message.toLowerCase();
-      if (!m.includes('branch_id')) return false;
-      return (
-        m.includes('schema cache') ||
-        m.includes('column') ||
-        m.includes('could not find') ||
-        m.includes('does not exist') ||
-        m.includes('pgrst')
-      );
-    };
     if (isCreate) {
       const email = createEmail.trim().toLowerCase();
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -499,32 +499,21 @@ export function AdminEmployeeEditModal({
       onClose();
       return;
     }
-    let updateError: { message?: string } | null = null;
-    let usedBranchFallback = false;
-    const firstUpdate = await supabase
-      .from('employee')
-      .update(payload)
-      .eq('id', employeeId);
-    updateError = firstUpdate.error;
-    if (updateError && shouldRetryWithoutBranchId(updateError.message)) {
-      const fallbackUpdate = await supabase
-        .from('employee')
-        .update(fallbackPayload)
-        .eq('id', employeeId);
-      updateError = fallbackUpdate.error;
-      usedBranchFallback = !fallbackUpdate.error;
-    }
-    setSavingHr(false);
-    if (updateError) {
+    try {
+      await adminUpdateEmployeeHr(employeeId, hr);
+    } catch (e) {
+      setSavingHr(false);
       setFeedback({
         variant: 'error',
         title: 'บันทึกข้อมูลไม่สำเร็จ',
-        message: updateError.message ?? 'ไม่ทราบสาเหตุ',
+        message:
+          (e instanceof Error ? e.message : String(e)) +
+          '\n\nถ้าเห็นข้อความว่าไม่พบฟังก์ชัน ให้รัน migration admin_update_employee_hr ใน Supabase',
       });
       return;
     }
     let profileBranchUpdateMessage = '';
-    if (targetUserId && !usedBranchFallback) {
+    if (targetUserId) {
       const { error: profileBranchErr } = await supabase
         .from('profiles')
         .update({ branch_id: hr.branch_id })
@@ -535,17 +524,17 @@ export function AdminEmployeeEditModal({
           profileBranchErr.message;
       }
     }
-    if (usedBranchFallback) {
-      setFeedback({
-        variant: 'info',
-        title: 'บันทึกแบบโหมดเข้ากันได้',
-        message: 'ระบบนี้ยังไม่มีคอลัมน์ branch_id ใน employee — บันทึกข้อมูลอื่นเรียบร้อยแล้ว',
-      });
+    try {
+      const refreshed = await fetchEmployeeDirectoryRow(employeeId);
+      if (refreshed) setHr(directoryToForm(refreshed));
+    } catch {
+      /* บันทึกสำเร็จแล้ว — โหลดซ้ำไม่ได้ไม่ถือเป็นความล้มเหลว */
     }
+    setSavingHr(false);
     setFeedback({
       variant: 'success',
       title: 'อัปเดตข้อมูลพนักงานแล้ว',
-      message: `ข้อมูล HR ถูกบันทึกแล้ว${profileBranchUpdateMessage}`,
+      message: `ข้อมูล HR ถูกบันทึกในตาราง employee แล้ว${profileBranchUpdateMessage}`,
     });
     onSaved();
   }

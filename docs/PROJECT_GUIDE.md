@@ -70,6 +70,7 @@
 - **เชื่อม HR:** `profiles.employee_id` → FK ไป `employee.id` (uuid) เมื่อเชื่อมแล้ว โปรไฟล์/ลา/บางรายงานจะดึงข้อมูล HR ได้
 - **Admin รายชื่อพนักงาน legacy:** RPC `admin_list_employee_passwords` (คืนค่า `employment_status` จาก `employee.status` + ปุ่มลบ/ลาออกในแอป) — ไม่ใช้ `employee_directory` อย่างเดียวเพราะ RLS
 - **Admin บันทึกลาออก:** RPC `admin_record_employee_resignation` → แทรก `employee_resignations` และตั้ง `employee.status` เป็นลาออก
+- **Admin ลบข้อมูลการใช้งานพนักงาน (เก็บ HR + Auth):** RPC `admin_purge_employee_operational_data` — เลือกลบหมวดเข้า-ออกงาน / ลา-สาย / อื่นๆ จากหน้า `admin` ปุ่มลบพนักงาน โดยไม่ลบแถว `employee` หรือบัญชี Auth
 - **Admin โหลดฟอร์ม HR รายคน:** RPC `admin_get_employee_directory_row`
 - **Admin รายชื่อ HR ทั้งหมด (ทีมแอดมิน):** RPC `admin_list_employee_directory_rows` (เฉพาะ role `admin`)
 - **Manager รายชื่อทีมที่ดูแล:** RPC `manager_list_team_directory_rows` (สมาชิกใน `manager_direct_reports` ที่โปรไฟล์มี `employee_id`)
@@ -136,15 +137,17 @@
 
 | ชื่อ | ใช้ทำอะไร |
 |------|-----------|
-| `app_settings` | ค่าระบบ — คีย์ `announcement_slides` เก็บ `{ urls, slides: [{ url, duration_ms }], slide_height_px, transition_mode }` สำหรับสไลด์หน้าเข้า-ออก (รองรับข้อมูลเก่าแบบ `urls`, default 4 วินาทีต่อภาพ, transition `slide`/`fade`); คีย์ `attendance_break_start_messages` / `attendance_break_end_messages` เก็บ `{ messages: string[] }` สำหรับ popup พักเบรก/กลับงาน; คีย์ `attendance_leave_prompt_messages` เก็บ `{ messages: string[] }` สำหรับ popup แจ้งเตือนก่อนเปิดฟอร์มลางานในหน้าเข้า-ออก; คีย์ `attendance_kpi_settings` เก็บเกณฑ์ KPI ลา/เข้าสาย; คีย์ `attendance_overtime_prompt_settings` เก็บ `{ prompt_after_minutes, auto_checkout_after_minutes }` สำหรับถามทำ OT หลังเลิกงานและ auto checkout; คีย์ `payroll_company_info` เก็บ `{ name, address_lines, juristic_id }` สำหรับหัว PDF สลิปเงินเดือน |
+| `app_settings` | ค่าระบบ — คีย์ `announcement_slides` เก็บ `{ urls, slides: [{ url, duration_ms }], slide_height_px, transition_mode }` สำหรับสไลด์หน้าเข้า-ออก (รองรับข้อมูลเก่าแบบ `urls`, default 4 วินาทีต่อภาพ, transition `slide`/`fade`); คีย์ `attendance_break_start_messages` / `attendance_break_end_messages` เก็บ `{ messages: string[] }` สำหรับ popup พักเบรก/กลับงาน; คีย์ `attendance_leave_prompt_messages` เก็บ `{ messages: string[] }` สำหรับ popup แจ้งเตือนก่อนเปิดฟอร์มลางานในหน้าเข้า-ออก; คีย์ `attendance_kpi_settings` เก็บเกณฑ์ KPI ลา/เข้าสาย; คีย์ `attendance_overtime_prompt_settings` เก็บ `{ prompt_after_minutes, auto_checkout_after_minutes }` สำหรับถามทำ OT หลังเลิกงานและ auto checkout; คีย์ `payroll_company_info` เก็บ `{ name, address_lines, juristic_id }` สำหรับหัว PDF สลิปเงินเดือน; คีย์ `employment_certificate_settings` เก็บ `{ signer_name, signer_title, signature_url, logo_url, hr_footer_note }` สำหรับหนังสือรับรองการทำงาน |
 | `vacation_grants` | โควตาพักร้อน + sick/personal (คอลัมน์เพิ่มตาม migration) |
-| `salary_claims` | คำขอเบิกเงินเดือนล่วงหน้า (ช่วงวันที่ 10–14) พร้อมข้อมูลบัญชีและวงเงินคำนวณ; submit ผ่าน RPC เพื่อใช้ฐานเงินเดือนจาก `payroll_employee_compensation` ก่อน ถ้าไม่มีจึงใช้ฐานเงินเดือนที่พนักงานกรอก และ unique ต่อเดือนนับเฉพาะคำขอที่ไม่ใช่ `rejected` |
+| `salary_claims` | คำขอเบิกเงินเดือนล่วงหน้า (ช่วงวันที่ 10–14) พร้อมข้อมูลบัญชีและวงเงินคำนวณ; submit ผ่าน RPC เพื่อใช้ `base_salary.monthly_salary` ก่อน แล้ว fallback `payroll_employee_compensation.base_salary` ถ้าไม่มีจึงใช้ฐานเงินเดือนที่พนักงานกรอก และ unique ต่อเดือนนับเฉพาะคำขอที่ไม่ใช่ `rejected` |
 | `expense_claims` | หัวคำขอเบิกค่าใช้จ่าย (ยอดรวม + ข้อมูลบัญชีผู้ขอ) พร้อม `payroll_handling` ให้แอดมินเลือกตอนอนุมัติว่าจะลง Payroll/สลิป (`payroll`) หรือบันทึกจ่ายแยกไม่ลงเงินเดือน (`direct`) |
 | `expense_claim_items` | รายการเบิกย่อยต่อคำขอ (ชื่อรายการ, ยอด, หมายเหตุ, หลักฐาน) |
 | `finance_claim_notifications` | แจ้งเตือนกระดิ่งสำหรับคำขอเบิกเงิน (ส่งคำขอ/อัปเดตสถานะ) |
 | `status_notifications` | แจ้งเตือนกระดิ่งสำหรับสถานะคำขอ HR เช่น อนุมัติ/ปฏิเสธลา และอนุมัติ/ปฏิเสธ OT |
-| `payroll_employee_compensation` | ตั้งค่าฐานเงินเดือน/ค่าตอบแทนประจำ, สูตรค่า OT (`auto` จากฐานเงินเดือน หรือกรอกต่อชั่วโมง), ตัวคูณ OT และโหมดประกันสังคม/ภาษีต่อพนักงาน (admin-only) |
-| `payroll_slips` | สลิปเงินเดือนรายรอบ 26–25 แบบ snapshot สถานะ `draft/confirmed/paid/voided`; พนักงานเห็นเฉพาะ `confirmed/paid` ของตัวเอง โดยจับได้ทั้ง `user_id` และ `employee_id` ที่ผูกกับโปรไฟล์; พนักงานกดยืนยันการตรวจสอบสลิปผ่าน `employee_confirmed_at`; สลิปที่ยกเลิกจะถูกเก็บเป็น `voided` แล้วออก Draft ใหม่ผ่าน workflow reissue ซึ่งรีเซ็ตการยืนยันของพนักงาน |
+| `base_salary` | ฐานเงินเดือนหลักต่อพนักงาน: `monthly_salary`, `daily_rate`, `hourly_rate` (admin-only) — ใช้ทำ Payroll และเบิกเงินเดือน |
+| `payroll_employee_compensation` | ตั้งค่าค่าตอบแทนเพิ่มเติม (ค่าตำแหน่ง/เบี้ยขยัน/OT/ประกันสังคม/ภาษี) ต่อพนักงาน; `base_salary` sync จากตาราง `base_salary` เพื่อ backward compat (admin-only) |
+| `payroll_slips` | สลิปเงินเดือนรายรอบ 26–25 แบบ snapshot สถานะ `draft/confirmed/paid/voided` พร้อม `pay_mode` (`monthly`/`daily`/`hourly`) กำหนดวิธีคำนวณรายได้หลัก; พนักงานเห็นเฉพาะ `confirmed/paid` ของตัวเอง โดยจับได้ทั้ง `user_id` และ `employee_id` ที่ผูกกับโปรไฟล์; พนักงานกดยืนยันการตรวจสอบสลิปผ่าน `employee_confirmed_at` หรือแจ้งแก้ไขผ่าน `employee_correction_*`; สลิปที่ยกเลิกจะถูกเก็บเป็น `voided` แล้วออก Draft ใหม่ผ่าน workflow reissue ซึ่งรีเซ็ตการยืนยันของพนักงาน |
+| `payroll_correction_notifications` | แจ้งเตือนกระดิ่งแอดมินเมื่อพนักงานแจ้งแก้ไขสลิป (อ้างอิง `slip_id`, `user_id`, `cycle_key`) |
 | `payroll_items` | รายการในสลิป แยก `income`, `deduction`, `reimbursement` พร้อม flag taxable และ source อ้างอิง; รองรับ manual adjustment เฉพาะตอนสลิปยังเป็น `draft` |
 | `payroll_slip_events` | audit log ของสลิปเงินเดือน เช่น `generated/confirmed/paid/voided/reissued` พร้อม actor, เหตุผล และ metadata |
 
@@ -155,6 +158,8 @@
 | `push_notification_jobs` | คิว push native (Expo) |
 | `web_push_notification_jobs` | คิว web push |
 | `expense_claim_evidence` (Storage bucket) | หลักฐานไฟล์/รูปของการเบิกค่าใช้จ่าย |
+| `leave_attachments` (Storage bucket) | หลักฐานการลา (PDF/รูป) — `medical_certificate_url` / `supplementary_document_url` บน `leave_requests` |
+| `employment_certificate_assets` (Storage bucket) | ลายเซ็นและโลโก้สำหรับหนังสือรับรองการทำงาน (public read, admin write) |
 
 รายละเอียด pipeline: `supabase/PUSH_PIPELINE.md`
 
@@ -170,8 +175,13 @@
 - `admin_delete_attendance_chat_messages_older_than(p_days)` — แอดมินเท่านั้น (`is_admin()`): ลบ `attendance_chat_messages` ที่วันที่ `created_at` ตามปฏิทิน **Asia/Bangkok** เก่ากว่า `p_days` วันนับจากวันนี้ในเขตไทย (ค่าเริ่ม 90)
 - `admin_void_and_reissue_payroll_slip(p_slip_id, p_reason)` — แอดมินเท่านั้น: เปลี่ยนสลิป `confirmed/paid` เป็น `voided`, บันทึก audit event และ clone รายการเดิมออกเป็นสลิป `draft` ใหม่ในรอบเดียวกันเพื่อแก้ไขอย่างปลอดภัย
 - `confirm_payroll_slip_review(p_slip_id)` — พนักงานกดยืนยันว่าได้ตรวจสอบสลิป `confirmed/paid` ของตัวเองแล้ว; ใช้ RPC เพื่อจำกัดสิทธิ์เฉพาะเจ้าของสลิป/`employee_id` ที่ผูกกับโปรไฟล์
-- `salary_claim_eligibility()` — พนักงานตรวจสิทธิ์ Claim Salary ของเดือนปัจจุบัน, ฐานเงินเดือนจาก Payroll, เพดานเบิก และสถานะคำขอเดือนนี้ที่ยัง active
-- `submit_salary_claim(p_requested_amount, p_fallback_base_salary, p_note)` — พนักงานส่ง Claim Salary ผ่าน server-side calculation: ใช้ฐานเงินเดือน Payroll ก่อน ถ้าไม่มีจึงใช้ fallback จากพนักงาน และกันส่งซ้ำเฉพาะกรณีเดือนนั้นยังมีคำขอที่ไม่ถูกปฏิเสธ
+- `request_payroll_slip_correction(p_slip_id, p_note)` — พนักงานแจ้งแก้ไขสลิปพร้อมหมายเหตุ; แจ้งเตือนแอดมินทุกคนและรีเซ็ต `employee_confirmed_at`
+- `admin_update_employee_hr(...)` — แอดมินบันทึกฟอร์ม HR ลง `public.employee` (ข้าม RLS / คอลัมน์ legacy)
+- `attach_leave_request_evidence(p_leave_id, p_url)` — พนักงาน (หรือแอดมิน) แนบ/เปลี่ยนหลักฐานลา: ลาป่วย → `medical_certificate_url`, ลากิจ → `supplementary_document_url`
+- `get_my_employment_certificate_data(p_with_salary)` — พนักงานดึงข้อมูลออกหนังสือรับรองของตัวเอง (ชื่อ ตำแหน่ง สาขา วันเริ่มงาน ฐานเงินเดือนถ้าระบุ) พร้อมตั้งค่าลายเซ็นและข้อมูลบริษัทจาก `app_settings`
+- `admin_get_employment_certificate_data(p_employee_id, p_with_salary)` — แอดมินออกหนังสือรับรองให้พนักงานตาม `employee.id`
+- `salary_claim_eligibility()` — พนักงานตรวจสิทธิ์ Claim Salary ของเดือนปัจจุบัน, ฐานเงินเดือนจาก `base_salary` (fallback `payroll_employee_compensation`), เพดานเบิก และสถานะคำขอเดือนนี้ที่ยัง active
+- `submit_salary_claim(p_requested_amount, p_fallback_base_salary, p_note)` — พนักงานส่ง Claim Salary ผ่าน server-side calculation: ใช้ `base_salary.monthly_salary` ก่อน แล้ว fallback Payroll/พนักงาน และกันส่งซ้ำเฉพาะกรณีเดือนนั้นยังมีคำขอที่ไม่ถูกปฏิเสธ
 - DB functions / cron: overtime (`process_attendance_overtime`), triggers เกี่ยว OT และ notification — ดู migrations ช่วง `20260427*`
 - DB cron: `prune_work_schedule_assignments_retention_30d()` ถูกปิดแล้วและ function เป็น no-op — เก็บ `work_schedule_assignments` ย้อนหลังไว้เพื่อคำนวณมาสาย/รายงานย้อนหลัง
 
@@ -192,6 +202,8 @@
 - [x] โปรไฟล์: เมนูเบิกเงินเดือน (สูตร 70% ของ 50% ฐานเงินเดือนในช่วงวันที่ 10-14) โดยดึงฐานเงินเดือนจาก Payroll ที่ Admin/HR ตั้งไว้ก่อน ถ้าไม่มีจึงให้พนักงานกรอกเอง; คำขอที่ถูกปฏิเสธคืนสิทธิ์ให้ส่งใหม่ในเดือนเดียวกัน + เบิกค่าใช้จ่ายหลายรายการพร้อมแนบหลักฐาน + ประวัติ Claim Salary / Expense Claim ของพนักงานเอง
 - [x] แอดมิน: เมนูรับคำขอเบิกเงินเดือน/ค่าใช้จ่าย พร้อมแสดงข้อมูลบัญชีและหลักฐานแยกรายการ; รายการที่อนุมัติ/ปฏิเสธ/จ่ายแล้วถูกย้ายไปหน้าประวัติแยกตามหัวข้อ พร้อมกรองตามสถานะและวันที่
 - [x] Payroll MVP: หน้า `admin` ตั้งค่าค่าตอบแทนต่อพนักงาน, คำนวณสลิป draft รอบ 26–25, รวม OT ที่อนุมัติแล้วเข้าเงินเดือน, เพิ่ม manual adjustment ก่อนยืนยัน, ยืนยัน/บันทึกจ่ายแล้ว (`draft/confirmed/paid`), export summary/bank transfer CSV, ดูประวัติ/ค้นหา/กรองสลิปย้อนหลัง และยกเลิก/ออกสลิปใหม่แบบ `voided + reissue draft` พร้อม audit log; หน้า `profile` แสดงสลิปที่ยืนยันหรือจ่ายแล้วพร้อมปุ่ม PDF และปุ่มให้พนักงานยืนยันการตรวจสอบสลิป
+- [x] Payroll ฐานเงินเดือน: ตาราง `base_salary` + เมนู **จัดการฐานเงินเดือน** ใน Admin Payroll; ทำสลิปเลือก `pay_mode` รายเดือน/รายวัน/รายชั่วโมง คำนวณจากตารางหลัก (รายเดือนหักขาดงาน, รายวันคูณวันทำงาน, รายชั่วโมงคูณชั่วโมงจริง)
+- [x] หนังสือรับรองการทำงาน: หน้า `profile` > `สลิป / เบิกเงิน` ดาวน์โหลด/พิมพ์ 2 แบบ (ระบุ/ไม่ระบุฐานเงินเดือน); หน้า `admin` > Payroll ออกหนังสือรับรองให้พนักงาน + ตั้งค่าลายเซ็น; RPC `get_my_employment_certificate_data` / `admin_get_employment_certificate_data`
 - [ ] **iOS native build + EAS** — ต้องใช้ Apple Developer Program สำหรับ signing; Android เป็นทางเลือกทดสอบ push
 - [ ] ทบทวน **nested git** ใน `mobile/` ให้เหลือ repo เดียว (ถ้าต้องการ)
 
@@ -201,6 +213,28 @@
 
 | วันที่ (โดยประมาณ) | สรุป |
 |---------------------|------|
+| 2026-06-24 | หนังสือรับรอง: ลดฟอนต์อีก 1pt + ขยายลายเซ็น · กว้างคอลัมน์ label แก้ «ที่» ตกบรรทัดเดี่ยว |
+| 2026-06-24 | หนังสือรับรอง: ลดขนาด pt อีก 2pt ทุกส่วน (เนื้อหา 12pt, หัวเรื่อง 14pt) |
+| 2026-06-24 | หนังสือรับรอง: ปรับ pt Sarabun ลง ~12% (เนื้อหา 14pt ≈ Cordia 16pt) ให้ใกล้รูปแบบเดิมบนคอม |
+| 2026-06-24 | หนังสือรับรอง: บังคับ Sarabun จาก Google Fonts ทุกอุปกรณ์ + margin ตรง @page ในตัวอย่าง · รอโหลดฟอนต์ก่อนแสดง preview |
+| 2026-06-24 | หนังสือรับรอง: เปลี่ยนฟอนต์เป็น Cordia New (fallback Angsana/Sarabun บนมือถือ) · ปรับขนาด 16pt ตามมาตรฐานเอกสาร |
+| 2026-06-24 | หนังสือรับรอง: ปรับ typography 14pt + `word-break: keep-all` ทั้งแบบระบุ/ไม่ระบุเงินเดือน ลดการล้นบรรทัด · ย่อหน้า justify และรายการเงินเดือนให้ตัดบรรทัดได้ |
+| 2026-06-24 | มือถือ — พิมพ์เอกสารเปิดหน้าต่างเต็ม (`printHtmlInBrowserWindow`) แทนพิมพ์จาก iframe ที่ถูก scale เพื่อให้ขนาดตัวอักษรตรงคอม · แข็ง `@media print` หนังสือรับรอง |
+| 2026-06-24 | มือถือ — ตัวอย่างก่อนพิมพ์: ย่อ iframe แบบ scale ให้พอดีจอ (`computePrintPreviewScale`) คงขนาดตัวอักษร pt เหมือนตอนพิมพ์คอม · สลิปใช้ Sarabun + หน่วย pt |
+| 2026-06-24 | สลิปเงินเดือน: เพิ่มยอดสะสมปี (รายได้คิดภาษี + ประกันสังคม) ด้านล่างสลิป — รวมตามปีปฏิทินของ `cycle_key` ถึงรอบปัจจุบัน · utility `payrollSlipYtd.ts` |
+| 2026-06-24 | สลิปเงินเดือน: ส่วนพนักงานแสดงเฉพาะชื่อ-สกุล รหัสพนักงาน และตำแหน่ง (ไม่แสดงอีเมล/ชื่อเล่น/สาขา) |
+| 2026-06-24 | มือถือ — ปรับพิมพ์เอกสาร: `PrintDocumentPreviewContext` ใช้ portal z-index สูงกว่าโมดัล Payroll; ปิด sheet Payroll ก่อนเปิดตัวอย่างสลิป; CSS ตัวอย่าง A4 (`printDocumentScreenCss`) สำหรับหนังสือรับรอง/สลิป/ตารางเข้า-ออก — แก้ตัวอักษรบีบและ layout ไม่สวยบนมือถือ · ตารางสรุปเวลา PDF บนมือถือเปิดในแอปพร้อมปุ่มย้อนกลับ |
+| 2026-06-17 | มือถือ — พิมพ์/บันทึกเอกสาร (หนังสือรับรอง, สลิป): `PrintDocumentPreviewContext` แสดงตัวอย่างในแอป + ปุ่มย้อนกลับ/พิมพ์/แชร์ PDF; HTML ใช้ viewport กว้าง A4 (`printDocumentSizing`) ให้ตัวอักษรสัดส่วนใกล้คอม · ปฏิทินตารางงานหน้า `attendance` มีปุ่มย้อนกลับ |
+| 2026-06-24 | หนังสือรับรอง: เพิ่มคำอธิบายในโปรไฟล์ · แอดมินออกหนังสือรับรองให้พนักงานได้ (`AdminEmploymentCertificateIssueCard`) · RPC `admin_get_employment_certificate_data` |
+| 2026-06-17 | หนังสือรับรองการทำงาน: หน้า `profile` > `สลิป / เบิกเงิน` ปุ่มพิมพ์/ดาวน์โหลด 2 แบบ (ระบุ/ไม่ระบุฐานเงินเดือน) · แอดมิน > Payroll ตั้งค่าลายเซ็น/ผู้ลงนาม · RPC `get_my_employment_certificate_data` + bucket `employment_certificate_assets` |
+| 2026-06-17 | แก้บันทึกข้อมูลพนักงานในแอดมิน: ใช้ RPC `admin_update_employee_hr` (SECURITY DEFINER) แทน `.update(employee)` ที่อาจคืน success โดยไม่อัปเดตแถวจริง · โหลดฟอร์มซ้ำหลังบันทึก |
+| 2026-06-17 | หลักฐานการลา: ลาป่วยและลากิจแนบ PDF/รูปได้ทุกครั้ง · ประวัติการลาใน `profile` มีปุ่มแนบ/เปลี่ยน · หน้า `team` หัวหน้า/HR/แอดมินดูหลักฐานได้ · RPC `attach_leave_request_evidence` |
+| 2026-06-17 | พนักงานแจ้งแก้ไขสลิปจากโปรไฟล์ (หมายเหตุ + RPC) · แอดมินได้แจ้งเตือนกระดิ่งและ popup หมายเหตุเมื่อเปิด Payroll ของพนักงาน |
+| 2026-06-17 | แก้นับขาดงาน Payroll ไม่รวมวันอนาคต; ปฏิทินตารางงานนับตามรอบ Payroll 26–25 ให้ตรงกับสลิป; หมายเหตุขาดงานในตารางเวลาเข้า-ออกหน้าทีม |
+| 2026-06-17 | แสดงวันขาดงาน (ตามกฎ Payroll) ในตารางเวลาเข้า-ออก ปฏิทินตารางงาน และหน้าทีม — พนักงานแจ้ง HR ได้ผ่านแชท/ทีม |
+| 2026-06-17 | Payroll ฐานเงินเดือน: ปุ่ม **คำนวณอัตโนมัติ** (ฐาน÷30→รายวัน, รายวัน÷8→รายชั่วโมง); โหมดรายวันนับวันจากตารางไม่ต้อง check-in; แยกหักขาดงานกับลาไม่รับเงินในโหมดรายเดือน |
+| 2026-06-17 | Payroll ฐานเงินเดือน: ตาราง `base_salary` (`monthly_salary`, `daily_rate`, `hourly_rate`) + เมนู **จัดการฐานเงินเดือน** ใน Admin Payroll; ทำสลิปเลือก `pay_mode` ต่อรอบ (`monthly` หักขาดงานจากตาราง, `daily` คูณวันทำงาน, `hourly` คูณชั่วโมง check-in/out); RPC Claim Salary ดึงฐานจาก `base_salary` ก่อน |
+| 2026-06-17 | หน้า `admin` ปุ่มลบพนักงาน: popup เลือกลบข้อมูลการใช้งานตามหมวด (เข้า-ออก / ลา-สาย / อื่นๆ) ผ่าน RPC `admin_purge_employee_operational_data` — เก็บ employee + Auth ไว้ |
 | 2026-06-17 | `EmployeeScheduleCalendarCard` (แชทเข้า-ออก / ทีม): ปฏิทินตารางงานของพนักงานแสดงวันหยุดบริษัท/ส่วนตัว (แดง) และการลาอนุมัติ (ม่วง) ในปฏิทินและรายละเอียดวัน |
 | 2026-06-17 | หน้า `attendance` ปฏิทิน **ตารางงานของฉัน**: แสดงวันหยุดส่วนตัว (แดง) และการลาที่อนุมัติแล้ว (ม่วง) ในปฏิทินรายเดือน + รายละเอียดวัน |
 | 2026-06-17 | หน้า `schedule`: ปฏิทินตารางงานและรายละเอียดวันแสดง **การลาที่อนุมัติแล้ว** (จำนวนในปฏิทิน, สรุปใต้วันที่, ชิปกรอง **ลา**, รายชื่อแยกตามสาขา — สีม่วง) |

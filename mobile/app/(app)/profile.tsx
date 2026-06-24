@@ -20,7 +20,9 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
 import { AdminEmployeeEditModal } from '@/components/AdminEmployeeEditModal';
 import { LateRequestHistoryCard } from '@/components/LateRequestHistoryCard';
+import { LeaveHistoryEvidenceActions } from '@/components/LeaveHistoryEvidenceActions';
 import { ProfileClaimsCard } from '@/components/ProfileClaimsCard';
+import { ProfileEmploymentCertificateCard } from '@/components/ProfileEmploymentCertificateCard';
 import { ProfilePayslipCard } from '@/components/ProfilePayslipCard';
 import { UserAvatar } from '@/components/UserAvatar';
 import { useAppTheme } from '@/contexts/AppThemeContext';
@@ -137,7 +139,7 @@ const PROFILE_SECTIONS: Array<{
   {
     key: 'finance',
     title: 'สลิป / เบิกเงิน',
-    subtitle: 'สลิปเงินเดือน Claim Salary และ Expense Claim',
+    subtitle: 'สลิปเงินเดือน Claim Salary Expense Claim และหนังสือรับรอง',
     icon: 'money',
   },
   {
@@ -1108,6 +1110,9 @@ export default function ProfileScreen() {
       }),
     [leaveRows]
   );
+  const patchLeaveRow = useCallback((updated: LeaveRequestRow) => {
+    setLeaveRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+  }, []);
   const leaveHistoryPreview = leaveHistoryRows.slice(0, 4);
 
   const payrollCycleOptions = useMemo(
@@ -1152,17 +1157,14 @@ export default function ProfileScreen() {
     [myHr, profile?.email, profile?.full_name, session?.user?.email]
   );
 
-  const payslipEmployeeMeta = useMemo(() => {
-    const parts = [
-      profile?.email ?? session?.user?.email ?? '',
-      myHr?.employee_no != null ? `รหัส ${myHr.employee_no}` : profile?.employee_code ? `รหัส ${profile.employee_code}` : '',
-      myHr?.position ?? '',
-      myHr?.branch ?? '',
-    ]
-      .map((part) => String(part).trim())
-      .filter(Boolean);
-    return parts.join(' · ');
-  }, [myHr, profile?.email, profile?.employee_code, session?.user?.email]);
+  const payslipEmployeeCode = useMemo(() => {
+    if (myHr?.employee_no != null && Number.isFinite(Number(myHr.employee_no))) {
+      return String(myHr.employee_no);
+    }
+    return profile?.employee_code?.trim() || '';
+  }, [myHr, profile?.employee_code]);
+
+  const payslipEmployeePosition = useMemo(() => myHr?.position?.trim() || '', [myHr]);
 
   const attendanceKpi = useMemo(
     () =>
@@ -1645,6 +1647,12 @@ export default function ProfileScreen() {
                     {row.is_kpi_exempt ? (
                       <Text style={styles.leaveHistoryAttach}>ปรับโดยแอดมิน/HR · ไม่นับ KPI</Text>
                     ) : null}
+                    <LeaveHistoryEvidenceActions
+                      row={row}
+                      mode="employee"
+                      uploadUserId={session?.user?.id}
+                      onUpdated={patchLeaveRow}
+                    />
                   </View>
                 </View>
               );
@@ -1835,7 +1843,8 @@ export default function ProfileScreen() {
           userId={session?.user?.id ?? null}
           employeeId={profile?.employee_id ?? null}
           employeeName={payslipEmployeeName}
-          employeeMeta={payslipEmployeeMeta}
+          employeeCode={payslipEmployeeCode}
+          employeePosition={payslipEmployeePosition}
           paymentMethod={myHr?.bank || myHr?.account_number ? 'โอนผ่านบัญชีธนาคาร' : null}
           bankName={myHr?.bank ?? null}
           bankAccount={myHr?.account_number ?? null}
@@ -1849,6 +1858,8 @@ export default function ProfileScreen() {
             void onPullRefresh();
           }}
         />
+
+        <ProfileEmploymentCertificateCard userId={session?.user?.id ?? null} />
           </>
         ) : null}
 
@@ -2027,9 +2038,12 @@ export default function ProfileScreen() {
                         {row.is_kpi_exempt ? (
                           <Text style={styles.leaveHistoryAttach}>ปรับโดยแอดมิน/HR · ไม่นับ KPI</Text>
                         ) : null}
-                        {row.medical_certificate_url || row.supplementary_document_url ? (
-                          <Text style={styles.leaveHistoryAttach}>มีเอกสารแนบ</Text>
-                        ) : null}
+                        <LeaveHistoryEvidenceActions
+                          row={row}
+                          mode="employee"
+                          uploadUserId={session?.user?.id}
+                          onUpdated={patchLeaveRow}
+                        />
                       </View>
                     </View>
                   );

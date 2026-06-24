@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 
 import { LateRequestHistoryCard } from '@/components/LateRequestHistoryCard';
+import { LeaveHistoryEvidenceActions } from '@/components/LeaveHistoryEvidenceActions';
 import type { AppTheme } from '@/constants/Theme';
 import { useAppTheme } from '@/contexts/AppThemeContext';
 import { isAdmin, useRole } from '@/contexts/AuthContext';
@@ -593,6 +594,9 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
       }),
     [leaveRows]
   );
+  const patchLeaveRow = useCallback((updated: LeaveRequestRow) => {
+    setLeaveRows((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+  }, []);
   const leaveHistoryPreview = leaveHistoryRows.slice(0, 4);
 
   const attendanceKpi = useMemo(
@@ -782,6 +786,7 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
               preview
               canManage={admin}
               onManage={openLeaveEditor}
+              onAttachmentUpdated={patchLeaveRow}
             />
           ))
         )}
@@ -948,6 +953,7 @@ export function EmployeeLeaveLateProfilePanel({ userId }: Props) {
                     styles={styles}
                     canManage={admin}
                     onManage={openLeaveEditor}
+                    onAttachmentUpdated={patchLeaveRow}
                   />
                 ))
               )}
@@ -1074,12 +1080,14 @@ function LeaveHistoryRow({
   preview = false,
   canManage = false,
   onManage,
+  onAttachmentUpdated,
 }: {
   row: LeaveRequestRow;
   styles: ReturnType<typeof createEmployeeLeaveLateStyles>;
   preview?: boolean;
   canManage?: boolean;
   onManage?: (row: LeaveRequestRow) => void;
+  onAttachmentUpdated?: (row: LeaveRequestRow) => void;
 }) {
   const tone = leaveStatusTone(row.status);
   return (
@@ -1121,9 +1129,11 @@ function LeaveHistoryRow({
         {row.is_kpi_exempt ? (
           <Text style={styles.leaveHistoryAttach}>ปรับโดยแอดมิน/HR · ไม่นับ KPI</Text>
         ) : null}
-        {row.medical_certificate_url || row.supplementary_document_url ? (
-          <Text style={styles.leaveHistoryAttach}>มีเอกสารแนบ</Text>
-        ) : null}
+        <LeaveHistoryEvidenceActions
+          row={row}
+          mode="viewer"
+          onUpdated={onAttachmentUpdated}
+        />
         {canManage ? (
           <Pressable style={styles.adminInlineBtn} onPress={() => onManage?.(row)}>
             <Text style={styles.adminInlineBtnText}>แก้ไข/ลบรายการ</Text>

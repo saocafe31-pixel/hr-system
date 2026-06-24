@@ -4,12 +4,15 @@ import { Platform } from 'react-native';
 
 import { formatPayrollCycleChipTh, formatPayrollPeriodRangeTh } from '@/lib/leaveLateRules';
 import { money } from '@/lib/payroll';
+import type { PayslipYearToDate } from '@/lib/payrollSlipYtd';
 import type { PayrollCompanyInfo } from '@/lib/payrollCompanyInfo';
+import { expoPrintPageOptions, printDocumentScreenCss, printViewportMeta, PRINT_PAGE_WIDTH_PX } from '@/lib/printDocumentSizing';
 import type { PayrollItemKind, PayrollItemRow, PayrollSlipRow } from '@/lib/types';
 
 type PayslipEmployeeInfo = {
   name?: string | null;
-  meta?: string | null;
+  employeeCode?: string | null;
+  position?: string | null;
   paymentMethod?: string | null;
   bankName?: string | null;
   bankAccount?: string | null;
@@ -20,6 +23,7 @@ type ExportPayslipPdfInput = {
   items: PayrollItemRow[];
   employee?: PayslipEmployeeInfo;
   company?: PayrollCompanyInfo | null;
+  yearToDate?: PayslipYearToDate | null;
 };
 
 export type PayslipPrintWindow = Window | null;
@@ -70,9 +74,10 @@ function itemGroupHtml(kind: PayrollItemKind, rows: PayrollItemRow[]): string {
   `;
 }
 
-export function buildPayslipHtml({ slip, items, employee, company }: ExportPayslipPdfInput): string {
+export function buildPayslipHtml({ slip, items, employee, company, yearToDate }: ExportPayslipPdfInput): string {
   const employeeName = employee?.name?.trim() || 'พนักงาน';
-  const employeeMeta = employee?.meta?.trim() || '';
+  const employeeCode = employee?.employeeCode?.trim() || '';
+  const employeePosition = employee?.position?.trim() || '';
   const paymentMethod = employee?.paymentMethod?.trim() || '';
   const bankName = employee?.bankName?.trim() || '';
   const bankAccount = employee?.bankAccount?.trim() || '';
@@ -92,18 +97,26 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
   <html>
     <head>
       <meta charset="utf-8" />
+      ${printViewportMeta()}
       <title>Payslip ${htmlEscape(slip.cycle_key)}</title>
       <style>
-        * { box-sizing: border-box; }
+        @import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700;800&display=swap');
+        * { box-sizing: border-box; -webkit-text-size-adjust: none; text-size-adjust: none; }
+        @page { size: A4; margin: 14mm; }
+        html { font-size: 12pt; }
         body {
-          font-family: Arial, sans-serif;
+          font-family: 'Sarabun', Arial, sans-serif;
+          font-size: 12pt;
           color: #1f2d25;
           margin: 0;
-          padding: 28px;
+          padding: 21pt;
           background: #ffffff;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
         }
         .sheet {
-          max-width: 760px;
+          width: ${PRINT_PAGE_WIDTH_PX}px;
+          max-width: ${PRINT_PAGE_WIDTH_PX}px;
           margin: 0 auto;
           border: 1px solid #ccd8cf;
           border-radius: 18px;
@@ -117,34 +130,47 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
           justify-content: space-between;
           align-items: flex-start;
           gap: 24px;
+          flex-wrap: nowrap;
         }
         .company {
-          flex: 1;
-          min-width: 0;
+          flex: 1 1 50%;
+          min-width: 180px;
         }
         .company-name {
-          font-size: 16px;
+          font-size: 12pt;
           font-weight: 800;
-          margin-bottom: 6px;
+          margin-bottom: 4pt;
+          word-break: keep-all;
+          overflow-wrap: anywhere;
+          line-height: 1.35;
         }
         .company-line {
-          font-size: 11px;
+          font-size: 8pt;
           color: #526457;
           line-height: 1.45;
+          word-break: keep-all;
+          overflow-wrap: anywhere;
         }
         .document-title {
-          min-width: 240px;
+          flex: 0 0 auto;
+          min-width: 200px;
           text-align: right;
         }
         h1 {
           margin: 0;
-          font-size: 24px;
+          font-size: 18pt;
           letter-spacing: .2px;
         }
         .subtitle {
-          margin-top: 6px;
-          font-size: 13px;
+          margin-top: 4pt;
+          font-size: 10pt;
           color: #526457;
+        }
+        .employee-line {
+          margin-top: 3pt;
+          font-size: 10pt;
+          color: #526457;
+          line-height: 1.45;
         }
         .content { padding: 22px 24px 26px; }
         .info-grid {
@@ -167,12 +193,12 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
         }
         .label {
           display: block;
-          font-size: 11px;
+          font-size: 8pt;
           color: #6c7b70;
-          margin-bottom: 4px;
+          margin-bottom: 3pt;
         }
         .value {
-          font-size: 14px;
+          font-size: 10.5pt;
           font-weight: 700;
           color: #1f2d25;
         }
@@ -184,7 +210,7 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
           border: 1px solid #cbdc9b;
         }
         .net .label { color: #5f6f36; }
-        .net .value { font-size: 26px; color: #425c12; }
+        .net .value { font-size: 20pt; color: #425c12; }
         .summary {
           display: grid;
           grid-template-columns: repeat(3, 1fr);
@@ -198,8 +224,8 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
         }
         .summary-card strong {
           display: block;
-          margin-top: 4px;
-          font-size: 15px;
+          margin-top: 3pt;
+          font-size: 11pt;
         }
         .group { margin-top: 16px; }
         .group-title {
@@ -211,13 +237,13 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
           background: #f2f7f2;
           border: 1px solid #dbe5dc;
           border-bottom: 0;
-          font-size: 14px;
+          font-size: 10.5pt;
           font-weight: 800;
         }
         table {
           width: 100%;
           border-collapse: collapse;
-          font-size: 12px;
+          font-size: 9pt;
         }
         td {
           border: 1px solid #dbe5dc;
@@ -236,19 +262,58 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
           border-radius: 999px;
           background: #fff3cd;
           color: #785f00;
-          font-size: 10px;
+          font-size: 7.5pt;
           font-weight: 700;
         }
         .note {
-          margin-top: 18px;
-          font-size: 11px;
+          margin-top: 14pt;
+          font-size: 8pt;
           color: #6c7b70;
           line-height: 1.5;
         }
-        @media print {
-          body { padding: 0; }
-          .sheet { border-radius: 0; border: 0; }
+        .ytd-section {
+          margin-top: 20px;
+          padding: 14px 16px;
+          border-radius: 14px;
+          background: #f7faf7;
+          border: 1px solid #dbe5dc;
         }
+        .ytd-title {
+          font-size: 9pt;
+          font-weight: 800;
+          color: #425c12;
+          margin-bottom: 8pt;
+        }
+        .ytd-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+        .ytd-card {
+          border: 1px solid #dbe5dc;
+          border-radius: 12px;
+          padding: 12px;
+          background: #fff;
+        }
+        .ytd-card strong {
+          display: block;
+          margin-top: 4pt;
+          font-size: 12pt;
+          color: #1f2d25;
+        }
+        .ytd-hint {
+          margin-top: 6pt;
+          font-size: 7.5pt;
+          color: #6c7b70;
+          line-height: 1.45;
+        }
+        @media print {
+          html, body { font-size: 12pt; padding: 0; }
+          body { padding: 0; }
+          .sheet { border-radius: 0; border: 0; width: auto; max-width: none; min-width: 0; }
+        }
+
+        ${printDocumentScreenCss('main.sheet, .sheet')}
       </style>
     </head>
     <body>
@@ -282,7 +347,8 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
             <div class="info-card">
               <span class="label">พนักงาน</span>
               <div class="value">${htmlEscape(employeeName)}</div>
-              ${employeeMeta ? `<div class="subtitle">${htmlEscape(employeeMeta)}</div>` : ''}
+              ${employeeCode ? `<div class="employee-line">รหัสพนักงาน ${htmlEscape(employeeCode)}</div>` : ''}
+              ${employeePosition ? `<div class="employee-line">${htmlEscape(employeePosition)}</div>` : ''}
             </div>
             <div class="info-card">
               <span class="label">สถานะสลิป</span>
@@ -334,6 +400,25 @@ export function buildPayslipHtml({ slip, items, employee, company }: ExportPaysl
           ${itemGroupHtml('deduction', items)}
           ${itemGroupHtml('reimbursement', items)}
 
+          ${
+            yearToDate
+              ? `<section class="ytd-section">
+                  <div class="ytd-title">ยอดสะสมปี ${htmlEscape(yearToDate.year + 543)} · ถึงรอบ ${htmlEscape(formatPayrollCycleChipTh(slip.cycle_key))}</div>
+                  <div class="ytd-grid">
+                    <div class="ytd-card">
+                      <span class="label">รายได้สะสม (คิดภาษี)</span>
+                      <strong>${htmlEscape(money(yearToDate.taxableIncomeYtd))} บาท</strong>
+                    </div>
+                    <div class="ytd-card">
+                      <span class="label">ประกันสังคมสะสม</span>
+                      <strong>${htmlEscape(money(yearToDate.socialSecurityYtd))} บาท</strong>
+                    </div>
+                  </div>
+                  <div class="ytd-hint">รวมเฉพาะสลิปที่ยืนยัน/จ่ายแล้ว และรอบปัจจุบัน · ไม่รวมสลิปที่ยกเลิก</div>
+                </section>`
+              : ''
+          }
+
           <p class="note">
             เอกสารนี้สร้างจากระบบ HR System โดยอ้างอิงข้อมูลสลิป ณ เวลาที่พิมพ์/ดาวน์โหลด
             ${slip.notes ? `<br />หมายเหตุ: ${htmlEscape(slip.notes)}` : ''}
@@ -352,6 +437,7 @@ export function openPayslipPrintWindow(): PayslipPrintWindow {
   <html>
     <head>
       <meta charset="utf-8" />
+      ${printViewportMeta()}
       <title>Preparing payslip</title>
       <style>
         body { font-family: Arial, sans-serif; padding: 24px; color: #1f2d25; }
@@ -379,7 +465,7 @@ export async function exportPayslipPdf(
     return;
   }
 
-  const pdf = await Print.printToFileAsync({ html });
+  const pdf = await Print.printToFileAsync({ html, ...expoPrintPageOptions });
   if (await Sharing.isAvailableAsync()) {
     await Sharing.shareAsync(pdf.uri, {
       mimeType: 'application/pdf',

@@ -34,6 +34,14 @@ import {
   onLeaveStatusChanged,
 } from '@/lib/appSignals';
 import { mapBranchInformationRows } from '@/lib/mapBranchInformation';
+import { fetchCompanyHolidayDates } from '@/lib/companyHolidays';
+import {
+  bangkokYmdToday,
+  buildAbsenceDateSet,
+  buildCheckInByDateFromLogs,
+  mergeYmdBounds,
+  PAYROLL_ABSENCE_NOTE_TABLE,
+} from '@/lib/payrollPeriodWork';
 import {
   checklistProgress,
   dateToBangkokYmd,
@@ -66,11 +74,13 @@ import type {
   AttendanceOvertimeRequestRow,
   Branch,
   EmployeeDirectory,
+  EmployeeHolidayDateRow,
   LeaveRequestRow,
   LeaveRequestType,
   Profile,
   TaskPriority,
   TaskRow,
+  WorkScheduleAssignmentRow,
 } from '@/lib/types';
 
 type TeamMemberCard = Profile & { nickname: string | null };
@@ -157,6 +167,51 @@ const ATTENDANCE_LEAVE_CHOICES: { value: AttendanceLeaveChoice; label: string }[
   { value: 'vacation', label: 'พักร้อน' },
   { value: 'unpaid', label: 'ไม่รับเงิน' },
 ];
+
+type LeaveChoiceChipColors = {
+  backgroundColor: string;
+  borderColor: string;
+  textColor: string;
+};
+
+function leaveChoiceChipColors(
+  choice: AttendanceLeaveChoice,
+  c: AppTheme['colors']
+): LeaveChoiceChipColors {
+  switch (choice) {
+    case 'sick':
+      return {
+        backgroundColor: c.leaveSickBg,
+        borderColor: c.leaveSickBar,
+        textColor: c.leaveSickBar,
+      };
+    case 'personal':
+      return {
+        backgroundColor: c.riverLight,
+        borderColor: c.river,
+        textColor: c.river,
+      };
+    case 'vacation':
+      return {
+        backgroundColor: c.accentWarmLight,
+        borderColor: c.accentWarm,
+        textColor: c.accentWarm,
+      };
+    case 'unpaid':
+      return {
+        backgroundColor: c.errorBg,
+        borderColor: c.error,
+        textColor: c.error,
+      };
+    case 'none':
+    default:
+      return {
+        backgroundColor: c.chipActive,
+        borderColor: c.primary,
+        textColor: c.chipTextActive,
+      };
+  }
+}
 
 function ymdFromDate(d: Date): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -392,6 +447,15 @@ export default function TeamScreen() {
   const [memberActivityNotes, setMemberActivityNotes] = useState<MemberActivityNote[]>([]);
   const [memberLogs, setMemberLogs] = useState<AttendanceLog[]>([]);
   const [memberLeaves, setMemberLeaves] = useState<LeaveRequestRow[]>([]);
+  const [memberAssignments, setMemberAssignments] = useState<
+    Pick<WorkScheduleAssignmentRow, 'work_date' | 'created_at'>[]
+  >([]);
+  const [memberEmployeeHolidays, setMemberEmployeeHolidays] = useState<EmployeeHolidayDateRow[]>(
+    []
+  );
+  const [memberCompanyHolidayDates, setMemberCompanyHolidayDates] = useState<Set<string>>(
+    () => new Set()
+  );
   const [memberOvertimeRequests, setMemberOvertimeRequests] = useState<AttendanceOvertimeRequestRow[]>([]);
   const [summaryAnchorDate, setSummaryAnchorDate] = useState<Date | null>(() => new Date());
   const [detailLoading, setDetailLoading] = useState(false);
@@ -758,6 +822,9 @@ export default function TeamScreen() {
         { data: otRows },
         { data: noteRows },
         { data: chatRows },
+        { data: asnRows },
+        { data: empHolRows },
+        companyHolRows,
       ] = await Promise.all([
         supabase
           .from('tasks')
@@ -814,6 +881,21 @@ export default function TeamScreen() {
           .eq('user_id', edit.id)
           .order('created_at', { ascending: false })
           .limit(1),
+        supabase
+          .from('work_schedule_assignments')
+          .select('work_date, created_at')
+          .eq('user_id', edit.id)
+          .gte('work_date', period.startYmd)
+          .lte('work_date', period.endYmd),
+        supabase
+          .from('employee_holiday_dates')
+          .select('id, user_id, holiday_date, created_at')
+          .eq('user_id', edit.id)
+          .gte('holiday_date', period.startYmd)
+          .lte('holiday_date', period.endYmd),
+        fetchCompanyHolidayDates({ startYmd: period.startYmd, endYmd: period.endYmd }).catch(
+          () => []
+        ),
       ]);
       const merged = [...((mine as TaskRow[]) ?? []), ...((delegated as TaskRow[]) ?? [])];
       const uniqueById = new Map<string, TaskRow>();
@@ -821,6 +903,18 @@ export default function TeamScreen() {
       setMemberTasks([...uniqueById.values()]);
       setMemberLogs((logs as AttendanceLog[]) ?? []);
       setMemberLeaves((lv as LeaveRequestRow[]) ?? []);
+      setMemberAssignments(
+        ((asnRows as Pick<WorkScheduleAssignmentRow, 'work_date' | 'created_at'>[]) ?? []).map(
+          (row) => ({
+            work_date: row.work_date,
+            created_at: row.created_at ?? '',
+          })
+        )
+      );
+      setMemberEmployeeHolidays((empHolRows as EmployeeHolidayDateRow[]) ?? []);
+      setMemberCompanyHolidayDates(
+        new Set(companyHolRows.map((row) => String(row.holiday_date).slice(0, 10)))
+      );
       setMemberOvertimeRequests((otRows as AttendanceOvertimeRequestRow[]) ?? []);
       const latestNote = ((noteRows as { body?: string | null; created_at?: string; updated_at?: string }[]) ?? [])[0];
       const latestChat = ((chatRows as { body?: string | null; created_at?: string }[]) ?? [])[0];
@@ -923,6 +1017,35 @@ export default function TeamScreen() {
     return off;
   }, [edit, load, loadMemberDetail]);
 
+  const memberAbsenceDates = useMemo(() => {
+    if (!edit) return new Set<string>();
+    const approvedOnly = memberLeaves.filter((row) => row.status === 'approved');
+    return buildAbsenceDateSet({
+      userId: edit.id,
+      startYmd: period.startYmd,
+      endYmd: period.endYmd,
+      asOfYmd: bangkokYmdToday(),
+      assignments: memberAssignments.map((row) => ({
+        user_id: edit.id,
+        work_date: row.work_date,
+        created_at: row.created_at ?? '',
+      })),
+      employeeHolidays: memberEmployeeHolidays,
+      companyHolidayDates: memberCompanyHolidayDates,
+      approvedLeaves: approvedOnly,
+      checkInByDate: buildCheckInByDateFromLogs(memberLogs),
+    });
+  }, [
+    edit,
+    memberAssignments,
+    memberCompanyHolidayDates,
+    memberEmployeeHolidays,
+    memberLeaves,
+    memberLogs,
+    period.endYmd,
+    period.startYmd,
+  ]);
+
   const summaryRows = useMemo<AttendanceSummaryRow[]>(() => {
     if (!edit) return [];
     const leaveByDate = new Map<string, LeaveRequestRow>();
@@ -990,6 +1113,9 @@ export default function TeamScreen() {
         (day?.checkIn?.branch_id != null
           ? branches.find((b) => b.id === day.checkIn?.branch_id)?.branch_name ?? ''
           : '');
+      const locationWithAbsence = memberAbsenceDates.has(ymd)
+        ? [location, PAYROLL_ABSENCE_NOTE_TABLE].filter(Boolean).join(' · ')
+        : location;
       const breakMinutes = calculateBreakMinutes(day?.logs ?? [], day?.checkOut?.created_at);
       const workMinutes = calculateWorkMinutes(
         day?.checkIn?.created_at,
@@ -1021,7 +1147,7 @@ export default function TeamScreen() {
         checkInIso: day?.checkIn?.created_at,
         checkOutIso: day?.checkOut?.created_at,
         employeeCode: code.trim() || '-',
-        checkInLocation: location,
+        checkInLocation: locationWithAbsence,
         workMinutes,
         breakMinutes,
         overtimeMinutes,
@@ -1039,6 +1165,7 @@ export default function TeamScreen() {
     branches,
     code,
     edit,
+    memberAbsenceDates,
     memberLeaves,
     memberLogs,
     memberOvertimeRequests,
@@ -2914,10 +3041,21 @@ export default function TeamScreen() {
                             <View style={[styles.leaveChoiceRow, styles.colLeave]}>
                               {ATTENDANCE_LEAVE_CHOICES.map((choice) => {
                                 const on = (draft.leaveType ?? 'none') === choice.value;
+                                const selectedColors = on
+                                  ? leaveChoiceChipColors(choice.value, c)
+                                  : null;
                                 return (
                                   <Pressable
                                     key={choice.value}
-                                    style={[styles.leaveChoiceChip, on && styles.leaveChoiceChipOn]}
+                                    style={[
+                                      styles.leaveChoiceChip,
+                                      on &&
+                                        selectedColors && {
+                                          backgroundColor: selectedColors.backgroundColor,
+                                          borderColor: selectedColors.borderColor,
+                                          borderWidth: 2,
+                                        },
+                                    ]}
                                     disabled={attendanceSavingAll || (!!row.leaveId && !row.leaveIsKpiExempt)}
                                     onPress={() =>
                                       setAttendanceEditDrafts((prev) => ({
@@ -2933,7 +3071,11 @@ export default function TeamScreen() {
                                     <Text
                                       style={[
                                         styles.leaveChoiceChipText,
-                                        on && styles.leaveChoiceChipTextOn,
+                                        on &&
+                                          selectedColors && {
+                                            color: selectedColors.textColor,
+                                            fontWeight: '900',
+                                          },
                                       ]}>
                                       {choice.label}
                                     </Text>
@@ -3974,16 +4116,11 @@ function createTeamStyles(theme: AppTheme) {
     paddingHorizontal: 8,
     paddingVertical: 5,
     borderRadius: r.sm,
-    backgroundColor: c.surfaceMuted,
+    backgroundColor: c.chip,
     borderWidth: 1,
     borderColor: c.borderSoft,
   },
-  leaveChoiceChipOn: {
-    backgroundColor: c.primaryLight,
-    borderColor: c.primaryMuted,
-  },
-  leaveChoiceChipText: { color: c.textSecondary, fontSize: 11, fontWeight: '700' },
-  leaveChoiceChipTextOn: { color: c.primaryDark },
+  leaveChoiceChipText: { color: c.chipText, fontSize: 11, fontWeight: '700' },
   leaveChoiceLocked: { width: '100%', color: c.textMuted, fontSize: 10, marginTop: 2 },
   attendanceSaveBtn: {
     backgroundColor: c.primary,

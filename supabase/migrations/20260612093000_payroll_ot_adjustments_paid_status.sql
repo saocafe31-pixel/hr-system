@@ -35,7 +35,7 @@ alter table public.payroll_slips
 
 alter table public.payroll_slips
   add constraint payroll_slips_status_check
-  check (status in ('draft', 'confirmed', 'paid'));
+  check (status in ('draft', 'confirmed', 'paid', 'voided'));
 
 drop policy if exists "payroll_slips_select_visible" on public.payroll_slips;
 create policy "payroll_slips_select_visible" on public.payroll_slips

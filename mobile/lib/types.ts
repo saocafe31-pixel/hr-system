@@ -358,6 +358,17 @@ export type ExpenseClaimItemRow = {
   created_at: string;
 };
 
+export type BaseSalaryRow = {
+  user_id: string;
+  monthly_salary: number;
+  daily_rate: number;
+  hourly_rate: number;
+  updated_by: string | null;
+  updated_at: string;
+};
+
+export type PayrollPayMode = 'monthly' | 'daily' | 'hourly';
+
 export type PayrollCompensationRow = {
   user_id: string;
   base_salary: number;
@@ -386,6 +397,7 @@ export type PayrollSlipRow = {
   cycle_key: string;
   period_start: string;
   period_end: string;
+  pay_mode?: PayrollPayMode;
   status: 'draft' | 'confirmed' | 'paid' | 'voided';
   taxable_income: number;
   reimbursement_total: number;
@@ -404,6 +416,10 @@ export type PayrollSlipRow = {
   reissued_from_slip_id?: string | null;
   employee_confirmed_by?: string | null;
   employee_confirmed_at?: string | null;
+  employee_correction_note?: string | null;
+  employee_correction_requested_at?: string | null;
+  employee_correction_requested_by?: string | null;
+  employee_correction_admin_seen_at?: string | null;
   notes: string | null;
 };
 
@@ -444,6 +460,18 @@ export type StatusNotificationRow = {
   entity_kind: 'leave' | 'overtime';
   entity_id: string;
   status: string;
+  body: string;
+  read_at: string | null;
+  created_at: string;
+};
+
+export type PayrollCorrectionNotificationRow = {
+  id: string;
+  recipient_id: string;
+  actor_id: string | null;
+  slip_id: string;
+  user_id: string;
+  cycle_key: string;
   body: string;
   read_at: string | null;
   created_at: string;

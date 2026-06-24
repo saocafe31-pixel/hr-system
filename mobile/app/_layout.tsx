@@ -19,6 +19,7 @@ import { AppLoadingScreen } from '@/components/AppLoadingScreen';
 import { AppThemeProvider, useAppTheme } from '@/contexts/AppThemeContext';
 import { AuthProvider } from '@/contexts/AuthContext';
 import { CuteToastProvider } from '@/contexts/CuteToastContext';
+import { PrintDocumentPreviewProvider } from '@/contexts/PrintDocumentPreviewContext';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -55,7 +56,9 @@ export default function RootLayout() {
       <AppThemeProvider>
         <AuthProvider>
           <CuteToastProvider>
-            <RootLayoutNav />
+            <PrintDocumentPreviewProvider>
+              <RootLayoutNav />
+            </PrintDocumentPreviewProvider>
           </CuteToastProvider>
         </AuthProvider>
       </AppThemeProvider>

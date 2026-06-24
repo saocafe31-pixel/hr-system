@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -13,11 +13,13 @@ import {
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 
+import { AdminBaseSalaryPanel } from '@/components/AdminBaseSalaryPanel';
 import { UserAvatar } from '@/components/UserAvatar';
 import type { AppTheme } from '@/constants/Theme';
 import { useAppTheme } from '@/contexts/AppThemeContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCuteToast } from '@/contexts/CuteToastContext';
+import { usePrintDocumentPreview } from '@/contexts/PrintDocumentPreviewContext';
 import { calculateOvertimeMinutes, formatDurationMinutesTh } from '@/lib/attendanceDurations';
 import {
   computeLateFromAttendanceData,
@@ -41,18 +43,28 @@ import {
   socialSecurityAuto,
   withholdingTaxMonthly,
 } from '@/lib/payroll';
+import { computePeriodWorkMetrics, payModeLabelTh } from '@/lib/payrollPeriodWork';
+import {
+  slipHasEmployeeCorrectionRequest,
+  slipHasPendingPayrollCorrection,
+} from '@/lib/payrollSlipCorrection';
+import { onPayrollCorrectionOpen } from '@/lib/appSignals';
 import { loadPayrollCompanyInfo } from '@/lib/payrollCompanyInfo';
-import { exportPayslipPdf, openPayslipPrintWindow } from '@/lib/payslipPdf';
+import { buildPayslipHtml } from '@/lib/payslipPdf';
+import { fetchPayslipYearToDate } from '@/lib/payrollSlipYtd';
 import { supabase } from '@/lib/supabase';
 import type {
   AttendanceLog,
   AttendanceOvertimeRequestRow,
+  BaseSalaryRow,
   EmployeeDirectory,
+  EmployeeHolidayDateRow,
   ExpenseClaimRow,
   LeaveRequestRow,
   PayrollCompensationRow,
   PayrollItemKind,
   PayrollItemRow,
+  PayrollPayMode,
   PayrollSlipRow,
   Profile,
   SalaryClaimRow,
@@ -63,6 +75,8 @@ type PayrollEmployeeDisplay = {
   primary: string;
   secondary: string;
   searchText: string;
+  employeeCode: string;
+  position: string;
   paymentMethod: string;
   bankName: string;
   bankAccount: string;
@@ -80,7 +94,6 @@ type PayrollDraftItem = {
 };
 
 type CompensationDraft = {
-  base_salary: string;
   position_allowance: string;
   special_allowance: string;
   diligence_allowance: string;
@@ -113,7 +126,6 @@ type VoidReissuePrompt = {
 };
 
 const emptyDraft: CompensationDraft = {
-  base_salary: '',
   position_allowance: '',
   special_allowance: '',
   diligence_allowance: '',
@@ -287,6 +299,8 @@ function buildPayrollDisplay(profile: Profile, directory?: EmployeeDirectory): P
     searchText: [primary, ...secondaryParts, directory?.legacy_user_id ?? '', bankName, bankAccount]
       .join(' ')
       .toLowerCase(),
+    employeeCode: code,
+    position,
     paymentMethod: bankName || bankAccount ? 'โอนผ่านบัญชีธนาคาร' : '',
     bankName,
     bankAccount,
@@ -362,6 +376,7 @@ function attendanceLogTimesByYmd(rows: Pick<AttendanceLog, 'kind' | 'created_at'
 export function AdminPayrollPanel() {
   const { session } = useAuth();
   const toast = useCuteToast();
+  const { openPrintPreview } = usePrintDocumentPreview();
   const { theme } = useAppTheme();
   const c = theme.colors;
   const styles = useMemo(() => createAdminPayrollStyles(theme), [theme]);
@@ -377,7 +392,6 @@ export function AdminPayrollPanel() {
   const [slip, setSlip] = useState<PayrollSlipRow | null>(null);
   const [items, setItems] = useState<PayrollItemRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [savingComp, setSavingComp] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [markingPaid, setMarkingPaid] = useState(false);
@@ -394,6 +408,20 @@ export function AdminPayrollPanel() {
   const [voiding, setVoiding] = useState(false);
   const [employeePickerOpen, setEmployeePickerOpen] = useState(false);
   const [employeeSearch, setEmployeeSearch] = useState('');
+  const [baseSalaryOpen, setBaseSalaryOpen] = useState(false);
+  const [correctionPrompt, setCorrectionPrompt] = useState<{
+    slipId: string;
+    note: string;
+    cycleKey: string;
+  } | null>(null);
+  const [acknowledgingCorrection, setAcknowledgingCorrection] = useState(false);
+  const correctionPopupShownRef = useRef<string | null>(null);
+  const [payMode, setPayMode] = useState<PayrollPayMode>('monthly');
+  const [baseSalaryRates, setBaseSalaryRates] = useState({
+    monthly_salary: 0,
+    daily_rate: 0,
+    hourly_rate: 0,
+  });
 
   const selectedProfile = useMemo(
     () => profiles.find((p) => p.id === selectedUserId) ?? null,
@@ -467,11 +495,13 @@ export function AdminPayrollPanel() {
       setDraft(emptyDraft);
       setSlip(null);
       setItems([]);
+      setBaseSalaryRates({ monthly_salary: 0, daily_rate: 0, hourly_rate: 0 });
+      setPayMode('monthly');
       return;
     }
     setLoading(true);
     try {
-      const [compRes, slipRes] = await Promise.all([
+      const [compRes, slipRes, baseRes] = await Promise.all([
         supabase.from('payroll_employee_compensation').select('*').eq('user_id', selectedUserId).maybeSingle(),
         supabase
           .from('payroll_slips')
@@ -480,13 +510,21 @@ export function AdminPayrollPanel() {
           .eq('cycle_key', cycleKey)
           .neq('status', 'voided')
           .maybeSingle(),
+        supabase.from('base_salary').select('*').eq('user_id', selectedUserId).maybeSingle(),
       ]);
       if (compRes.error) throw compRes.error;
+      if (baseRes.error) throw baseRes.error;
       const comp = compRes.data as PayrollCompensationRow | null;
+      const baseRow = baseRes.data as BaseSalaryRow | null;
+      const monthlySalary = Number(baseRow?.monthly_salary ?? comp?.base_salary ?? 0);
+      setBaseSalaryRates({
+        monthly_salary: monthlySalary,
+        daily_rate: Number(baseRow?.daily_rate ?? 0),
+        hourly_rate: Number(baseRow?.hourly_rate ?? 0),
+      });
       setDraft(
         comp
           ? {
-              base_salary: fmtInput(comp.base_salary),
               position_allowance: fmtInput(comp.position_allowance),
               special_allowance: fmtInput(comp.special_allowance),
               diligence_allowance: fmtInput(comp.diligence_allowance),
@@ -508,6 +546,7 @@ export function AdminPayrollPanel() {
       if (slipRes.error) throw slipRes.error;
       const currentSlip = (slipRes.data as PayrollSlipRow | null) ?? null;
       setSlip(currentSlip);
+      setPayMode(currentSlip?.pay_mode ?? 'monthly');
       if (currentSlip?.id) {
         const { data: itemRows, error: itemErr } = await supabase
           .from('payroll_items')
@@ -556,6 +595,50 @@ export function AdminPayrollPanel() {
     void loadPayrollHistory();
   }, [loadPayrollHistory]);
 
+  useEffect(() => {
+    return onPayrollCorrectionOpen(({ userId, cycleKey }) => {
+      setActivePayrollSection('overview');
+      setCycleKey(cycleKey);
+      setSelectedUserId(userId);
+      setPayrollDetailOpen(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!slip?.id || !slipHasPendingPayrollCorrection(slip)) {
+      if (slip?.id && !slipHasPendingPayrollCorrection(slip)) {
+        correctionPopupShownRef.current = null;
+      }
+      return;
+    }
+    if (correctionPopupShownRef.current === slip.id) return;
+    correctionPopupShownRef.current = slip.id;
+    setCorrectionPrompt({
+      slipId: slip.id,
+      note: slip.employee_correction_note?.trim() ?? '',
+      cycleKey: slip.cycle_key,
+    });
+  }, [slip]);
+
+  async function acknowledgeCorrectionPrompt() {
+    if (!correctionPrompt?.slipId) return;
+    setAcknowledgingCorrection(true);
+    try {
+      const { error } = await supabase.rpc('acknowledge_payroll_slip_correction', {
+        p_slip_id: correctionPrompt.slipId,
+      });
+      if (error) throw error;
+      setCorrectionPrompt(null);
+      toast.success('รับทราบคำขอแก้ไขแล้ว', 'ดำเนินการแก้ไขสลิปแล้วกด Void + Draft ใหม่หรือคำนวณใหม่');
+      await loadSelectedPayroll();
+      await loadPayrollHistory();
+    } catch (e) {
+      toast.error('บันทึกไม่สำเร็จ', e instanceof Error ? e.message : String(e));
+    } finally {
+      setAcknowledgingCorrection(false);
+    }
+  }
+
   function setDraftValue(key: keyof CompensationDraft, value: string) {
     setDraft((prev) => ({ ...prev, [key]: value }));
   }
@@ -570,7 +653,7 @@ export function AdminPayrollPanel() {
     const { error } = await supabase.from('payroll_employee_compensation').upsert(
       {
         user_id: selectedUserId,
-        base_salary: n(draft.base_salary),
+        base_salary: baseSalaryRates.monthly_salary,
         position_allowance: n(draft.position_allowance),
         special_allowance: n(draft.special_allowance),
         diligence_allowance: n(draft.diligence_allowance),
@@ -594,23 +677,6 @@ export function AdminPayrollPanel() {
       { onConflict: 'user_id' }
     );
     if (error) throw error;
-  }
-
-  async function saveCompensation() {
-    if (!selectedUserId || !session?.user?.id) return;
-    setSavingComp(true);
-    try {
-      await persistCompensation();
-      toast.success(
-        'บันทึกฐานเงินเดือนแล้ว',
-        selectedProfile ? profileName(selectedProfile, employeeDisplayByUserId) : ''
-      );
-      await loadSelectedPayroll();
-    } catch (e) {
-      toast.error('บันทึกฐานเงินเดือนไม่สำเร็จ', e instanceof Error ? e.message : String(e));
-    } finally {
-      setSavingComp(false);
-    }
   }
 
   async function recordPayrollEvent(
@@ -639,8 +705,18 @@ export function AdminPayrollPanel() {
     netPay: number;
   }> {
     if (!selectedUserId || !cycleBounds) throw new Error('เลือกพนักงานและรอบเงินเดือนก่อน');
-    const baseSalary = n(draft.base_salary);
-    if (baseSalary <= 0) throw new Error('กรุณากรอกฐานเงินเดือนก่อนคำนวณสลิป');
+    const monthlySalary = baseSalaryRates.monthly_salary;
+    const dailyRate = baseSalaryRates.daily_rate;
+    const hourlyRate = baseSalaryRates.hourly_rate;
+    if (payMode === 'monthly' && monthlySalary <= 0) {
+      throw new Error('กรุณาตั้งฐานเงินเดือน (รายเดือน) ในเมนูจัดการฐานเงินเดือนก่อน');
+    }
+    if (payMode === 'daily' && dailyRate <= 0) {
+      throw new Error('กรุณาตั้งค่าจ้างรายวันในเมนูจัดการฐานเงินเดือนก่อน');
+    }
+    if (payMode === 'hourly' && hourlyRate <= 0) {
+      throw new Error('กรุณาตั้งค่าจ้างรายชั่วโมงในเมนูจัดการฐานเงินเดือนก่อน');
+    }
     const { startYmd, endYmd } = cycleBounds;
     const { fromIso, toIso } = payrollPeriodCheckInIsoRange(startYmd, endYmd);
 
@@ -650,13 +726,16 @@ export function AdminPayrollPanel() {
       logRes,
       lateRes,
       leaveRes,
+      allLeaveRes,
+      holidayRes,
+      companyHolidayRes,
       overtimeRes,
       salaryClaimRes,
       expenseClaimRes,
     ] = await Promise.all([
       supabase
         .from('work_schedule_assignments')
-        .select('id, work_date, work_shifts(name, start_time, end_time)')
+        .select('id, user_id, work_date, created_at, work_shifts(name, start_time, end_time)')
         .eq('user_id', selectedUserId)
         .gte('work_date', startYmd)
         .lte('work_date', endYmd),
@@ -687,6 +766,24 @@ export function AdminPayrollPanel() {
         .eq('leave_type', 'unpaid')
         .lte('starts_on', endYmd)
         .gte('ends_on', startYmd),
+      supabase
+        .from('leave_requests')
+        .select('starts_on, ends_on, leave_type')
+        .eq('user_id', selectedUserId)
+        .eq('status', 'approved')
+        .lte('starts_on', endYmd)
+        .gte('ends_on', startYmd),
+      supabase
+        .from('employee_holiday_dates')
+        .select('user_id, holiday_date, created_at')
+        .eq('user_id', selectedUserId)
+        .gte('holiday_date', startYmd)
+        .lte('holiday_date', endYmd),
+      supabase
+        .from('company_holiday_dates')
+        .select('holiday_date')
+        .gte('holiday_date', startYmd)
+        .lte('holiday_date', endYmd),
       supabase
         .from('attendance_overtime_requests')
         .select(
@@ -720,6 +817,9 @@ export function AdminPayrollPanel() {
       logRes,
       lateRes,
       leaveRes,
+      allLeaveRes,
+      holidayRes,
+      companyHolidayRes,
       overtimeRes,
       salaryClaimRes,
       expenseClaimRes,
@@ -728,6 +828,25 @@ export function AdminPayrollPanel() {
     }
 
     const attendanceRows = ((logRes.data as Pick<AttendanceLog, 'kind' | 'created_at'>[]) ?? []);
+    const { checkInByDate, checkOutByDate } = attendanceLogTimesByYmd(attendanceRows);
+    const companyHolidayDates = new Set(
+      ((companyHolidayRes.data as { holiday_date: string }[]) ?? []).map((row) =>
+        String(row.holiday_date).slice(0, 10)
+      )
+    );
+    const workMetrics = computePeriodWorkMetrics({
+      userId: selectedUserId,
+      startYmd,
+      endYmd,
+      assignments: (asnRes.data as Array<{ user_id: string; work_date: string; created_at: string }>) ?? [],
+      employeeHolidays: (holidayRes.data as EmployeeHolidayDateRow[]) ?? [],
+      companyHolidayDates,
+      approvedLeaves:
+        (allLeaveRes.data as Array<{ starts_on: string; ends_on: string; leave_type?: string }>) ??
+        [],
+      checkInByDate,
+      checkOutByDate,
+    });
     const lateRows = computeLateFromAttendanceData({
       startYmd,
       endYmd,
@@ -753,11 +872,15 @@ export function AdminPayrollPanel() {
       (sum, row) => sum + Number(row.total_amount || 0),
       0
     );
-    const { checkInByDate, checkOutByDate } = attendanceLogTimesByYmd(attendanceRows);
+    const ssBaseSalary = monthlySalary > 0 ? monthlySalary : roundMoney(
+      payMode === 'daily'
+        ? dailyRate * workMetrics.scheduledWorkDayCount
+        : hourlyRate * workMetrics.workHours
+    );
     const overtimeBaseHourlyRate =
       draft.overtime_hourly_rate_mode === 'manual'
         ? n(draft.overtime_manual_hourly_rate)
-        : roundMoney(baseSalary / 30 / 8);
+        : roundMoney((monthlySalary > 0 ? monthlySalary : ssBaseSalary) / 30 / 8);
     const overtimeMultiplier = positiveMoneyInput(draft.overtime_multiplier, 1.5);
     const overtimeHourlyRate = roundMoney(overtimeBaseHourlyRate * overtimeMultiplier);
     const overtimeEntries = ((overtimeRes.data as AttendanceOvertimeRequestRow[]) ?? [])
@@ -781,8 +904,40 @@ export function AdminPayrollPanel() {
       })
       .filter((item) => item.amount > 0);
 
+    let primaryIncome: PayrollDraftItem;
+    if (payMode === 'daily') {
+      const amount = roundMoney(dailyRate * workMetrics.scheduledWorkDayCount);
+      primaryIncome = {
+        item_kind: 'income',
+        item_code: 'daily_wage',
+        label: `ค่าจ้างรายวัน ${workMetrics.scheduledWorkDayCount} วัน (จากตาราง) × ${money(dailyRate)}`,
+        amount,
+        taxable: true,
+        sort_order: 10,
+      };
+    } else if (payMode === 'hourly') {
+      const amount = roundMoney(hourlyRate * workMetrics.workHours);
+      primaryIncome = {
+        item_kind: 'income',
+        item_code: 'hourly_wage',
+        label: `ค่าจ้างรายชั่วโมง ${workMetrics.workHours} ชม. × ${money(hourlyRate)}`,
+        amount,
+        taxable: true,
+        sort_order: 10,
+      };
+    } else {
+      primaryIncome = {
+        item_kind: 'income',
+        item_code: 'base_salary',
+        label: 'ฐานเงินเดือน (รายเดือน)',
+        amount: roundMoney(monthlySalary),
+        taxable: true,
+        sort_order: 10,
+      };
+    }
+
     const incomeEntries = ([
-      { item_kind: 'income', item_code: 'base_salary', label: 'ฐานเงินเดือน', amount: baseSalary, taxable: true, sort_order: 10 },
+      primaryIncome,
       { item_kind: 'income', item_code: 'position_allowance', label: 'ค่าตำแหน่ง', amount: n(draft.position_allowance), taxable: true, sort_order: 20 },
       { item_kind: 'income', item_code: 'special_allowance', label: 'เงินพิเศษ', amount: n(draft.special_allowance), taxable: true, sort_order: 30 },
       { item_kind: 'income', item_code: 'diligence_allowance', label: 'เบี้ยขยัน', amount: n(draft.diligence_allowance), taxable: false, sort_order: 40 },
@@ -798,12 +953,19 @@ export function AdminPayrollPanel() {
     const socialSecurity =
       draft.social_security_mode === 'manual'
         ? n(draft.social_security_manual_amount)
-        : socialSecurityAuto(baseSalary);
+        : socialSecurityAuto(ssBaseSalary);
     const tax =
       draft.withholding_tax_mode === 'manual'
         ? n(draft.withholding_tax_manual_amount)
         : withholdingTaxMonthly(taxableIncome);
-    const unpaidDeduction = roundMoney((baseSalary / 30) * unpaidDays);
+    const absenceDeduction =
+      payMode === 'monthly' && workMetrics.absenceDayCount > 0
+        ? roundMoney((monthlySalary / 30) * workMetrics.absenceDayCount)
+        : 0;
+    const unpaidDeduction =
+      payMode === 'monthly' && monthlySalary > 0 && unpaidDays > 0
+        ? roundMoney((monthlySalary / 30) * unpaidDays)
+        : 0;
     const lateDeduction = roundMoney(lateMinutes * LATE_DEDUCTION_BAHT_PER_MINUTE);
 
     const deductionEntries = ([
@@ -823,6 +985,18 @@ export function AdminPayrollPanel() {
         taxable: false,
         sort_order: 120,
       },
+      ...(absenceDeduction > 0
+        ? [
+            {
+              item_kind: 'deduction' as const,
+              item_code: 'absence_deduction',
+              label: `หักขาดงาน ${workMetrics.absenceDayCount} วัน`,
+              amount: absenceDeduction,
+              taxable: false,
+              sort_order: 125,
+            },
+          ]
+        : []),
       {
         item_kind: 'deduction',
         item_code: 'unpaid_leave',
@@ -895,6 +1069,7 @@ export function AdminPayrollPanel() {
         cycle_key: cycleKey,
         period_start: cycleBounds.startYmd,
         period_end: cycleBounds.endYmd,
+        pay_mode: payMode,
         status: 'draft',
         taxable_income: totals.taxableIncome,
         reimbursement_total: totals.reimbursementTotal,
@@ -932,6 +1107,7 @@ export function AdminPayrollPanel() {
       }
       await recordPayrollEvent(slipRow.id, 'generated', null, {
         cycle_key: cycleKey,
+        pay_mode: payMode,
         item_count: slipItems.length,
         net_pay: totals.netPay,
       });
@@ -1093,23 +1269,30 @@ export function AdminPayrollPanel() {
 
   async function printSlipPdf() {
     if (!slip || !selectedProfile) return;
-    const printWindow = openPayslipPrintWindow();
     setExportingPdf(true);
     try {
       const company = await loadPayrollCompanyInfo();
-      await exportPayslipPdf({
+      const yearToDate = await fetchPayslipYearToDate(slip, items);
+      const html = buildPayslipHtml({
         slip,
         items,
         employee: {
           name: selectedEmployeeDisplay?.primary ?? profileName(selectedProfile, employeeDisplayByUserId),
-          meta: selectedEmployeeDisplay?.secondary ?? selectedProfile.email,
+          employeeCode: selectedEmployeeDisplay?.employeeCode ?? selectedProfile.employee_code ?? '',
+          position: selectedEmployeeDisplay?.position ?? '',
           paymentMethod: selectedEmployeeDisplay?.paymentMethod,
           bankName: selectedEmployeeDisplay?.bankName,
           bankAccount: selectedEmployeeDisplay?.bankAccount,
         },
         company,
-      }, printWindow);
-      toast.success('เปิดสลิป PDF แล้ว', 'สามารถพิมพ์หรือบันทึกเป็น PDF ได้จากหน้าต่างที่เปิดขึ้น');
+        yearToDate,
+      });
+      openPrintPreview({
+        html,
+        title: 'สลิปเงินเดือน',
+        shareDialogTitle: 'ดาวน์โหลดสลิปเงินเดือน (PDF)',
+      });
+      setPayrollDetailOpen(false);
     } catch (e) {
       toast.error('สร้าง PDF ไม่สำเร็จ', e instanceof Error ? e.message : String(e));
     } finally {
@@ -1123,6 +1306,8 @@ export function AdminPayrollPanel() {
       primary: userId.slice(0, 8),
       secondary: '-',
       searchText: userId.toLowerCase(),
+      employeeCode: '',
+      position: '',
       paymentMethod: '',
       bankName: '',
       bankAccount: '',
@@ -1130,7 +1315,6 @@ export function AdminPayrollPanel() {
   }, [employeeDisplayByUserId, profiles]);
 
   async function printHistorySlipPdf(historySlip: PayrollSlipRow) {
-    const printWindow = openPayslipPrintWindow();
     setExportingPdf(true);
     try {
       const [{ data: itemRows, error: itemError }, company] = await Promise.all([
@@ -1142,20 +1326,29 @@ export function AdminPayrollPanel() {
         loadPayrollCompanyInfo(),
       ]);
       if (itemError) throw itemError;
+      const historyItems = (itemRows as PayrollItemRow[]) ?? [];
       const display = displayForUserId(historySlip.user_id);
-      await exportPayslipPdf({
+      const yearToDate = await fetchPayslipYearToDate(historySlip, historyItems);
+      const html = buildPayslipHtml({
         slip: historySlip,
-        items: (itemRows as PayrollItemRow[]) ?? [],
+        items: historyItems,
         employee: {
           name: display.primary,
-          meta: display.secondary,
+          employeeCode: display.employeeCode,
+          position: display.position,
           paymentMethod: display.paymentMethod,
           bankName: display.bankName,
           bankAccount: display.bankAccount,
         },
         company,
-      }, printWindow);
-      toast.success('เปิดสลิป PDF แล้ว', `${display.primary} · ${historySlip.cycle_key}`);
+        yearToDate,
+      });
+      openPrintPreview({
+        html,
+        title: 'สลิปเงินเดือน',
+        shareDialogTitle: 'ดาวน์โหลดสลิปเงินเดือน (PDF)',
+      });
+      setPayrollDetailOpen(false);
     } catch (e) {
       toast.error('สร้าง PDF ไม่สำเร็จ', e instanceof Error ? e.message : String(e));
     } finally {
@@ -1407,6 +1600,16 @@ export function AdminPayrollPanel() {
           <Text style={styles.payrollMenuAction}>เปิดหน้าต่างทำ Payroll</Text>
         </Pressable>
         <Pressable
+          style={styles.payrollMenuCard}
+          onPress={() => setBaseSalaryOpen(true)}>
+          <Text style={styles.payrollMenuIcon}>≡</Text>
+          <Text style={styles.payrollMenuTitle}>จัดการฐานเงินเดือน</Text>
+          <Text style={styles.payrollMenuSub}>
+            ตั้งฐานเงินเดือน ค่าจ้างรายวัน และค่าจ้างรายชั่วโมงต่อพนักงาน
+          </Text>
+          <Text style={styles.payrollMenuAction}>เปิดหน้าต่างจัดการฐานเงินเดือน</Text>
+        </Pressable>
+        <Pressable
           style={[
             styles.payrollMenuCard,
             activePayrollSection === 'overview' && styles.payrollMenuCardOn,
@@ -1531,6 +1734,15 @@ export function AdminPayrollPanel() {
                     {row.employee_confirmed_at ? ` · ${formatDateTimeTh(row.employee_confirmed_at)}` : ''}
                   </Text>
                 ) : null}
+                {slipHasPendingPayrollCorrection(row) ? (
+                  <Text style={styles.historyCorrectionAlert}>
+                    แจ้งแก้ไขสลิป · {row.employee_correction_note?.trim()}
+                  </Text>
+                ) : slipHasEmployeeCorrectionRequest(row) ? (
+                  <Text style={styles.historyCorrectionSeen}>
+                    เคยแจ้งแก้ไข · {row.employee_correction_note?.trim()}
+                  </Text>
+                ) : null}
                 {row.status === 'voided' ? (
                   <Text style={styles.historyVoidReason}>
                     เหตุผลยกเลิก: {row.void_reason || '-'} · {formatDateTimeTh(row.voided_at)}
@@ -1621,8 +1833,55 @@ export function AdminPayrollPanel() {
 
       {selectedProfile ? (
         <>
+          <View style={styles.modeBox}>
+            <Text style={styles.label}>ฐานเงินเดือนจากตารางหลัก</Text>
+            <Text style={styles.sub}>
+              แก้ไขที่เมนู «จัดการฐานเงินเดือน» — ค่าด้านล่างใช้คำนวณสลิปรอบนี้
+            </Text>
+            <View style={styles.baseRateGrid}>
+              <View style={styles.baseRateCard}>
+                <Text style={styles.baseRateLabel}>รายเดือน</Text>
+                <Text style={styles.baseRateValue}>{money(baseSalaryRates.monthly_salary)}</Text>
+              </View>
+              <View style={styles.baseRateCard}>
+                <Text style={styles.baseRateLabel}>รายวัน</Text>
+                <Text style={styles.baseRateValue}>{money(baseSalaryRates.daily_rate)}</Text>
+              </View>
+              <View style={styles.baseRateCard}>
+                <Text style={styles.baseRateLabel}>รายชั่วโมง</Text>
+                <Text style={styles.baseRateValue}>{money(baseSalaryRates.hourly_rate)}</Text>
+              </View>
+            </View>
+            <Pressable style={styles.linkBtn} onPress={() => setBaseSalaryOpen(true)}>
+              <Text style={styles.linkBtnText}>เปิดจัดการฐานเงินเดือน</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.modeBox}>
+            <Text style={styles.label}>โหมดจ่ายรอบนี้</Text>
+            <Text style={styles.sub}>
+              เลือกวิธีคำนวณรายได้หลัก — รายเดือนหักขาดงานและลาไม่รับเงินแยกกัน, รายวันนับจากตาราง (ไม่ต้อง check-in), รายชั่วโมงจากเวลาเข้า-ออก
+            </Text>
+            <View style={styles.chipRow}>
+              {(['monthly', 'daily', 'hourly'] as PayrollPayMode[]).map((mode) => {
+                const on = payMode === mode;
+                const locked = !!slip && slip.status !== 'draft';
+                return (
+                  <Pressable
+                    key={mode}
+                    style={[styles.chip, on && styles.chipOn, locked && styles.disabledSoft]}
+                    disabled={locked}
+                    onPress={() => setPayMode(mode)}>
+                    <Text style={[styles.chipText, on && styles.chipTextOn]}>
+                      {payModeLabelTh(mode)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
           <View style={styles.grid}>
-            {renderInput('ฐานเงินเดือน', 'base_salary')}
             {renderInput('ค่าตำแหน่ง', 'position_allowance')}
             {renderInput('เงินพิเศษ', 'special_allowance')}
             {renderInput('เบี้ยขยัน', 'diligence_allowance')}
@@ -1708,9 +1967,6 @@ export function AdminPayrollPanel() {
           />
 
           <View style={styles.actions}>
-            <Pressable style={[styles.secondaryBtn, savingComp && styles.disabled]} disabled={savingComp} onPress={() => void saveCompensation()}>
-              <Text style={styles.secondaryBtnText}>{savingComp ? 'กำลังบันทึก...' : 'บันทึกฐานเงินเดือน'}</Text>
-            </Pressable>
             <Pressable
               style={[
                 styles.primaryBtn,
@@ -1736,6 +1992,39 @@ export function AdminPayrollPanel() {
 
           {slip ? (
             <View style={styles.slipBox}>
+              {slipHasEmployeeCorrectionRequest(slip) ? (
+                <View
+                  style={[
+                    styles.correctionNotice,
+                    slipHasPendingPayrollCorrection(slip) && styles.correctionNoticePending,
+                  ]}>
+                  <Text style={styles.correctionNoticeTitle}>
+                    {slipHasPendingPayrollCorrection(slip)
+                      ? 'พนักงานแจ้งขอแก้ไขสลิป'
+                      : 'หมายเหตุการแจ้งแก้ไข (รับทราบแล้ว)'}
+                  </Text>
+                  <Text style={styles.correctionNoticeBody}>{slip.employee_correction_note?.trim()}</Text>
+                  {slip.employee_correction_requested_at ? (
+                    <Text style={styles.correctionNoticeMeta}>
+                      ส่งเมื่อ {formatDateTimeTh(slip.employee_correction_requested_at)}
+                    </Text>
+                  ) : null}
+                  {slipHasPendingPayrollCorrection(slip) ? (
+                    <Pressable
+                      style={[styles.correctionAckBtn, acknowledgingCorrection && styles.disabled]}
+                      disabled={acknowledgingCorrection}
+                      onPress={() =>
+                        setCorrectionPrompt({
+                          slipId: slip.id,
+                          note: slip.employee_correction_note?.trim() ?? '',
+                          cycleKey: slip.cycle_key,
+                        })
+                      }>
+                      <Text style={styles.correctionAckBtnText}>เปิดหมายเหตุ / รับทราบ</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
               <View style={styles.slipHeader}>
                 <Text style={styles.slipTitle}>
                   สลิป {slip.cycle_key} · {slipStatusLabel(slip.status)}
@@ -1973,6 +2262,49 @@ export function AdminPayrollPanel() {
           </View>
         </View>
       </Modal>
+      <Modal
+        visible={!!correctionPrompt}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCorrectionPrompt(null)}>
+        <Pressable style={styles.correctionModalBackdrop} onPress={() => setCorrectionPrompt(null)}>
+          <Pressable style={styles.correctionModalCard} onPress={() => {}}>
+            <Text style={styles.correctionModalTitle}>พนักงานแจ้งแก้ไขสลิปเงินเดือน</Text>
+            {correctionPrompt ? (
+              <Text style={styles.correctionModalSub}>รอบ {correctionPrompt.cycleKey}</Text>
+            ) : null}
+            <Text style={styles.correctionModalNote}>{correctionPrompt?.note ?? ''}</Text>
+            <Text style={styles.correctionModalHint}>
+              แก้ไขสลิปด้วย Void + Draft ใหม่หรือคำนวณ Draft ใหม่ แล้วยืนยันสลิปอีกครั้ง
+            </Text>
+            <View style={styles.actions}>
+              <Pressable
+                style={[styles.secondaryBtn, acknowledgingCorrection && styles.disabled]}
+                disabled={acknowledgingCorrection}
+                onPress={() => setCorrectionPrompt(null)}>
+                <Text style={styles.secondaryBtnText}>ปิด</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.confirmBtn, acknowledgingCorrection && styles.disabled]}
+                disabled={acknowledgingCorrection}
+                onPress={() => void acknowledgeCorrectionPrompt()}>
+                <Text style={styles.confirmBtnText}>
+                  {acknowledgingCorrection ? 'กำลังบันทึก...' : 'รับทราบ'}
+                </Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+      <AdminBaseSalaryPanel
+        visible={baseSalaryOpen}
+        onClose={() => {
+          setBaseSalaryOpen(false);
+          void loadSelectedPayroll();
+        }}
+        profiles={profiles}
+        employeeDisplayByUserId={employeeDisplayByUserId}
+      />
     </View>
   );
 }
@@ -2125,6 +2457,21 @@ function createAdminPayrollStyles(theme: AppTheme) {
   payrollMenuTitle: { marginTop: 10, color: c.text, fontSize: 14, lineHeight: 18, fontWeight: '900' },
   payrollMenuSub: { marginTop: 6, color: c.textMuted, fontSize: 11, lineHeight: 16 },
   payrollMenuAction: { marginTop: 'auto', paddingTop: 10, color: c.primaryDark, fontSize: 11, fontWeight: '900' },
+  baseRateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  baseRateCard: {
+    flexGrow: 1,
+    flexBasis: '30%',
+    padding: 10,
+    borderRadius: r.md,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  baseRateLabel: { fontSize: 11, color: c.textMuted, fontWeight: '600' },
+  baseRateValue: { marginTop: 4, fontSize: 14, color: c.text, fontWeight: '800' },
+  linkBtn: { marginTop: 10, alignSelf: 'flex-start' },
+  linkBtnText: { color: c.primaryDark, fontSize: 12, fontWeight: '700' },
+  disabledSoft: { opacity: 0.55 },
   historyBox: {
     marginTop: 14,
     gap: 10,
@@ -2184,6 +2531,78 @@ function createAdminPayrollStyles(theme: AppTheme) {
   },
   historyReviewOk: { color: c.primaryDark, backgroundColor: c.primaryLight },
   historyReviewPending: { color: c.warningTitle, backgroundColor: c.warningBg },
+  historyCorrectionAlert: {
+    marginTop: 8,
+    padding: 8,
+    borderRadius: r.sm,
+    color: c.warningTitle,
+    backgroundColor: c.warningBg,
+    borderWidth: 1,
+    borderColor: c.warningBorder,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
+  },
+  historyCorrectionSeen: {
+    marginTop: 8,
+    padding: 8,
+    borderRadius: r.sm,
+    color: c.textMuted,
+    backgroundColor: c.surfaceMuted,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  correctionNotice: {
+    marginBottom: 10,
+    padding: 10,
+    borderRadius: r.md,
+    backgroundColor: c.surfaceMuted,
+    borderWidth: 1,
+    borderColor: c.borderSoft,
+  },
+  correctionNoticePending: {
+    backgroundColor: c.warningBg,
+    borderColor: c.warningBorder,
+  },
+  correctionNoticeTitle: { color: c.warningTitle, fontSize: 13, fontWeight: '900' },
+  correctionNoticeBody: { marginTop: 6, color: c.text, fontSize: 12, lineHeight: 18 },
+  correctionNoticeMeta: { marginTop: 6, color: c.textMuted, fontSize: 10, fontWeight: '700' },
+  correctionAckBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    borderRadius: r.sm,
+    backgroundColor: c.surface,
+    borderWidth: 1,
+    borderColor: c.warningBorder,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  correctionAckBtnText: { color: c.warningTitle, fontSize: 12, fontWeight: '900' },
+  correctionModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  correctionModalCard: {
+    borderRadius: r.lg,
+    backgroundColor: c.surfaceElevated,
+    borderWidth: 1,
+    borderColor: c.warningBorder,
+    padding: 16,
+  },
+  correctionModalTitle: { fontSize: 17, fontWeight: '900', color: c.warningTitle },
+  correctionModalSub: { marginTop: 4, color: c.textMuted, fontSize: 12, fontWeight: '700' },
+  correctionModalNote: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: r.sm,
+    backgroundColor: c.warningBg,
+    color: c.text,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  correctionModalHint: { marginTop: 10, color: c.textMuted, fontSize: 11, lineHeight: 16 },
   historyVoidReason: {
     marginTop: 6,
     padding: 8,
