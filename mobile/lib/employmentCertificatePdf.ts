@@ -134,6 +134,7 @@ function certificateStyles(): string {
   const bodyLine = '1.5';
   const paraIndent = '2.75em';
   const sectionGap = '9pt';
+  const titleTopGap = '16pt';
   const detailLabelWidth = '11.5em';
   const salaryWordsIndent = '12em';
   const pageMargin = '22mm 24mm 20mm';
@@ -164,7 +165,7 @@ function certificateStyles(): string {
     }
 
     .letterhead {
-      margin-bottom: ${sectionGap};
+      margin-bottom: 12pt;
       padding-bottom: 5pt;
       border-bottom: 0.5pt solid #bbb;
     }
@@ -198,7 +199,7 @@ function certificateStyles(): string {
       font-size: 13pt;
       font-weight: 700;
       letter-spacing: 0.02em;
-      margin: ${sectionGap} 0 8pt;
+      margin: ${titleTopGap} 0 8pt;
       color: #111;
     }
     .doc-date {

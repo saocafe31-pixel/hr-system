@@ -59,6 +59,8 @@ function getWebPrintPreviewHost(): HTMLDivElement | null {
     el.style.left = '0';
     el.style.right = '0';
     el.style.bottom = '0';
+    el.style.display = 'flex';
+    el.style.flexDirection = 'column';
     el.style.zIndex = String(WEB_PRINT_PREVIEW_Z_INDEX);
     el.style.pointerEvents = 'none';
     document.body.appendChild(el);
@@ -202,11 +204,20 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
   const styles = useMemo(
     () =>
       StyleSheet.create({
-        backdrop: { flex: 1, backgroundColor: c.canvas },
+        backdrop: {
+          flex: 1,
+          width: '100%',
+          minHeight: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          backgroundColor: c.canvas,
+        },
         header: {
           flexDirection: 'row',
           alignItems: 'center',
           gap: 8,
+          flexShrink: 0,
+          zIndex: 10,
           paddingHorizontal: 12,
           paddingBottom: 10,
           borderBottomWidth: 1,
@@ -231,6 +242,8 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
         },
         previewWrap: {
           flex: 1,
+          flexShrink: 1,
+          minHeight: 0,
           backgroundColor: '#e8e8e8',
           ...(Platform.OS === 'web'
             ? {
@@ -265,6 +278,8 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
         footer: {
           flexDirection: 'row',
           gap: 10,
+          flexShrink: 0,
+          zIndex: 10,
           paddingHorizontal: 14,
           paddingTop: 10,
           borderTopWidth: 1,
