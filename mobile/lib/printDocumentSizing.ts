@@ -72,9 +72,11 @@ export function printDocumentScreenCss(
       ${rootSelector} {
         box-shadow: none !important;
         width: 100% !important;
-        max-width: none !important;
+        max-width: 100% !important;
         min-width: 0 !important;
         margin: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
       }
     }
   `;
@@ -123,8 +125,94 @@ export function waitForPrintDocumentReady(doc: Document, timeoutMs = 6000): Prom
   });
 }
 
+/** วัดความสูงเอกสารใน iframe สำหรับตัวอย่าง/พิมพ์ */
+export function measurePrintDocumentHeight(doc: Document): number {
+  const root = doc.querySelector('.page, .sheet, main.page, main.sheet, main.report');
+  const rootHeight =
+    root instanceof HTMLElement
+      ? Math.max(root.scrollHeight, root.offsetHeight, root.getBoundingClientRect().height)
+      : 0;
+  return Math.max(
+    doc.documentElement?.scrollHeight ?? 0,
+    doc.body?.scrollHeight ?? 0,
+    rootHeight
+  ) + 64;
+}
+
 /**
- * พิมพ์จากหน้าต่างเต็ม (ไม่ใช่ iframe ที่ถูก scale) — ให้ขนาดตัวอักษรตรงกับคอม
+ * พิมพ์จาก iframe ตัวอย่าง — คงหน้า preview (ปุ่มย้อนกลับ) และยกเลิก scale ชั่วคราว
+ * กัน iOS ตัดเนื้อหาขวา/ล่างเมื่อ iframe ถูก transform
+ */
+export async function printIframeDocument(iframe: HTMLIFrameElement): Promise<void> {
+  const doc = iframe.contentDocument;
+  const win = iframe.contentWindow;
+  if (!doc || !win) {
+    throw new Error('ไม่พบเอกสารในตัวอย่าง');
+  }
+
+  await waitForPrintDocumentReady(doc);
+  const measured = measurePrintDocumentHeight(doc);
+
+  const prevTransform = iframe.style.transform;
+  const prevTransformOrigin = iframe.style.transformOrigin;
+  const prevWidth = iframe.style.width;
+  const prevHeight = iframe.style.height;
+
+  iframe.style.transform = 'none';
+  iframe.style.transformOrigin = 'top left';
+  iframe.style.width = `${PRINT_PAGE_WIDTH_PX}px`;
+  iframe.style.height = `${measured}px`;
+
+  const resetStyle = doc.createElement('style');
+  resetStyle.setAttribute('data-print-iframe-reset', 'true');
+  resetStyle.textContent = `
+    @media print {
+      html, body {
+        overflow: visible !important;
+        height: auto !important;
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+      .page, .sheet, main.page, main.sheet, main.report {
+        overflow: visible !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        page-break-inside: avoid;
+      }
+    }
+  `;
+  doc.head.appendChild(resetStyle);
+
+  const restore = () => {
+    iframe.style.transform = prevTransform;
+    iframe.style.transformOrigin = prevTransformOrigin;
+    iframe.style.width = prevWidth;
+    iframe.style.height = prevHeight;
+    resetStyle.remove();
+  };
+
+  try {
+    win.focus();
+    win.print();
+  } finally {
+    if (typeof win.matchMedia === 'function') {
+      const media = win.matchMedia('print');
+      const onChange = () => {
+        if (!media.matches) {
+          restore();
+          media.removeEventListener('change', onChange);
+        }
+      };
+      media.addEventListener('change', onChange);
+      setTimeout(restore, 3000);
+    } else {
+      setTimeout(restore, 1500);
+    }
+  }
+}
+
+/**
+ * พิมพ์จากหน้าต่างเต็ม — ใช้บนคอมจอกว้างเท่านั้น (มือถือเปิดหน้านี้จะไม่มีปุ่มย้อนกลับและตัด layout)
  */
 export async function printHtmlInBrowserWindow(html: string): Promise<void> {
   if (typeof window === 'undefined') return;

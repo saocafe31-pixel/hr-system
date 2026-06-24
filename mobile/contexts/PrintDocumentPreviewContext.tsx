@@ -28,8 +28,10 @@ import { useAppTheme } from '@/contexts/AppThemeContext';
 import {
   computePrintPreviewScale,
   expoPrintPageOptions,
+  measurePrintDocumentHeight,
   PRINT_PAGE_WIDTH_PX,
   printHtmlInBrowserWindow,
+  printIframeDocument,
   shouldUseInAppPrintPreview,
   waitForPrintDocumentReady,
   WEB_PRINT_PREVIEW_Z_INDEX,
@@ -98,12 +100,7 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
     if (Platform.OS !== 'web') return;
     const doc = iframeRef.current?.contentDocument;
     if (!doc) return;
-    const root = doc.querySelector('.page, .sheet, main.page, main.sheet, main.report');
-    const measured = Math.max(
-      doc.documentElement?.scrollHeight ?? 0,
-      doc.body?.scrollHeight ?? 0,
-      root instanceof HTMLElement ? root.offsetHeight + 32 : 0
-    );
+    const measured = measurePrintDocumentHeight(doc);
     if (measured > 120) {
       setDocHeight(measured);
     }
@@ -155,7 +152,7 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
 
   useEffect(() => {
     if (!visible || !request || Platform.OS !== 'web') return;
-    const timers = [80, 350, 900].map((ms) => setTimeout(measureIframeDocument, ms));
+    const timers = [80, 350, 900, 1800].map((ms) => setTimeout(measureIframeDocument, ms));
     return () => {
       for (const timer of timers) clearTimeout(timer);
     };
@@ -166,11 +163,16 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
     setBusy('print');
     try {
       if (Platform.OS === 'web') {
-        try {
-          await printHtmlInBrowserWindow(request.html);
-        } catch {
-          iframeRef.current?.contentWindow?.focus();
-          iframeRef.current?.contentWindow?.print();
+        if (shouldUseInAppPrintPreview(width) && iframeRef.current) {
+          await printIframeDocument(iframeRef.current);
+        } else {
+          try {
+            await printHtmlInBrowserWindow(request.html);
+          } catch {
+            if (iframeRef.current) {
+              await printIframeDocument(iframeRef.current);
+            }
+          }
         }
       } else {
         await Print.printAsync({ html: request.html, ...expoPrintPageOptions });
@@ -178,7 +180,7 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
     } finally {
       setBusy(null);
     }
-  }, [request]);
+  }, [request, width]);
 
   const handleShare = useCallback(async () => {
     if (!request) return;
@@ -256,7 +258,7 @@ export function PrintDocumentPreviewProvider({ children }: { children: ReactNode
             : {}),
         },
         previewScaler: {
-          overflow: 'hidden' as const,
+          overflow: 'visible' as const,
           backgroundColor: '#fff',
           ...(Platform.OS === 'web'
             ? {

@@ -354,20 +354,26 @@ function certificateStyles(): string {
     @media print {
       html, body {
         font-size: ${bodySize} !important;
-        width: 100%;
+        width: 100% !important;
+        max-width: 100% !important;
         margin: 0;
         padding: 0;
+        overflow: visible !important;
+        height: auto !important;
         -webkit-text-size-adjust: none !important;
         text-size-adjust: none !important;
       }
       .page {
         width: 100% !important;
-        max-width: none !important;
+        max-width: 100% !important;
         min-width: 0 !important;
         padding: 0 !important;
         margin: 0 !important;
+        overflow: visible !important;
+        page-break-inside: avoid;
       }
       .body-text, .intro-text { text-indent: ${paraIndent}; }
+      .signature-wrap, .footer-note { page-break-inside: avoid; }
       .signature-img { height: 76pt; max-width: 240pt; }
     }
 
