@@ -41,6 +41,7 @@ import {
   buildCheckInByDateFromLogs,
   mergeYmdBounds,
   PAYROLL_ABSENCE_NOTE_TABLE,
+  payrollPeriodFromAnchorDate,
 } from '@/lib/payrollPeriodWork';
 import {
   checklistProgress,
@@ -224,23 +225,6 @@ function ymdFromDate(d: Date): string {
 
 function ymdToDate(ymd: string): Date {
   return new Date(`${ymd}T12:00:00+07:00`);
-}
-
-function period26to25(anchor: Date): { startYmd: string; endYmd: string } {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Bangkok',
-    year: 'numeric',
-    month: '2-digit',
-  }).formatToParts(anchor);
-  const year = Number(parts.find((p) => p.type === 'year')?.value ?? '0');
-  const month = Number(parts.find((p) => p.type === 'month')?.value ?? '1');
-  const prevMonth = month === 1 ? 12 : month - 1;
-  const prevYear = month === 1 ? year - 1 : year;
-  const two = (n: number) => String(n).padStart(2, '0');
-  return {
-    startYmd: `${prevYear}-${two(prevMonth)}-26`,
-    endYmd: `${year}-${two(month)}-25`,
-  };
 }
 
 function listYmd(startYmd: string, endYmd: string): string[] {
@@ -804,7 +788,7 @@ export default function TeamScreen() {
   }
 
   const period = useMemo(
-    () => period26to25(summaryAnchorDate ?? new Date()),
+    () => payrollPeriodFromAnchorDate(summaryAnchorDate ?? new Date()),
     [summaryAnchorDate]
   );
 

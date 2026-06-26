@@ -749,7 +749,7 @@ export function AdminPayrollPanel() {
         .from('attendance_logs')
         .select('kind, created_at')
         .eq('user_id', selectedUserId)
-        .in('kind', ['check_in', 'check_out'])
+        .in('kind', ['check_in', 'check_out', 'break_start', 'break_end'])
         .gte('created_at', fromIso)
         .lte('created_at', toIso),
       supabase
@@ -846,6 +846,7 @@ export function AdminPayrollPanel() {
         [],
       checkInByDate,
       checkOutByDate,
+      attendanceLogs: attendanceRows,
     });
     const lateRows = computeLateFromAttendanceData({
       startYmd,
@@ -910,7 +911,7 @@ export function AdminPayrollPanel() {
       primaryIncome = {
         item_kind: 'income',
         item_code: 'daily_wage',
-        label: `ค่าจ้างรายวัน ${workMetrics.scheduledWorkDayCount} วัน (จากตาราง) × ${money(dailyRate)}`,
+        label: `ค่าจ้างรายวัน ${workMetrics.scheduledWorkDayCount} วัน (ตาราง+วันหยุดที่มอบหมาย) × ${money(dailyRate)}`,
         amount,
         taxable: true,
         sort_order: 10,

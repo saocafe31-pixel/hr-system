@@ -1,9 +1,11 @@
-import { bangkokPayrollPeriodBounds } from '@/lib/leaveLateRules';
+import { bangkokPayrollPeriodBounds, payrollCycleEndYMFromBangkokDate } from '@/lib/leaveLateRules';
 import {
   buildAssignmentByUserDate,
   buildHolidayByUserDate,
   resolvedScheduleDayStatusForUser,
+  type ScheduleDayStatus,
 } from '@/lib/scheduleDayResolution';
+import { calculateBreakMinutes, calculateWorkMinutes } from '@/lib/attendanceDurations';
 import { roundMoney } from '@/lib/payroll';
 import type { EmployeeHolidayDateRow, WorkScheduleAssignmentRow } from '@/lib/types';
 
@@ -23,13 +25,22 @@ export const PAYROLL_ABSENCE_DISPUTE_HINT =
   'หากข้อมูลไม่ถูกต้อง แจ้ง HR/แอดมินผ่านแชทเข้า-ออกหรือหน้าทีม';
 
 export type PeriodWorkMetrics = {
-  /** วันมีตารางเข้างาน (ไม่นับวันหยุด) — ไม่รวมวันลาไม่รับเงิน — ใช้โหมดรายวัน (ไม่ต้อง check-in) */
+  /** วันมอบหมายในตาราง (กะ + วันหยุดที่มอบหมาย) — ไม่รวมวันลาไม่รับเงิน · โหมดรายวัน */
   scheduledWorkDayCount: number;
   /** วันขาดงาน: มีตาราง ไม่มีลาอนุมัติ ไม่มี check-in — หักเฉพาะโหมดรายเดือน */
   absenceDayCount: number;
-  /** ชั่วโมงทำงานรวมจาก check-in / check-out */
+  /** ชั่วโมงทำงานจริงจาก check-in/out (หักพัก) — ให้ตรงตารางเข้า-ออก */
   workHours: number;
 };
+
+/** วันมอบหมายในรอบ payroll (กะหรือวันหยุดพนักงาน) ไม่นับวันหยุดบริษัท */
+export function isPayrollAssignedScheduleDay(
+  status: ScheduleDayStatus | null,
+  isCompanyHoliday: boolean
+): boolean {
+  if (isCompanyHoliday || !status) return false;
+  return status === 'work' || status === 'holiday';
+}
 
 export function listYmdRange(startYmd: string, endYmd: string): string[] {
   const out: string[] = [];
@@ -74,6 +85,14 @@ export function bangkokYmdToday(): string {
   return bangkokYmdFromIso(new Date().toISOString());
 }
 
+/** รอบ Payroll 26–25 จากวันที่อ้างอิง (สอดคล้อง cycle key ใน Payroll) */
+export function payrollPeriodFromAnchorDate(
+  anchor: Date
+): { startYmd: string; endYmd: string } {
+  const { y, m } = payrollCycleEndYMFromBangkokDate(anchor);
+  return bangkokPayrollPeriodBounds(y, m);
+}
+
 /** รอบ Payroll 26–25 ที่สิ้นสุดวันที่ 25 ของเดือนปฏิทิน (year, month) */
 export function payrollPeriodForCalendarMonth(
   year: number,
@@ -107,6 +126,20 @@ export function buildCheckInByDateFromLogs(
     if (!current || new Date(row.created_at).getTime() < new Date(current).getTime()) {
       map.set(ymd, row.created_at);
     }
+  }
+  return map;
+}
+
+function buildAttendanceLogsByDate(
+  logs: Array<{ kind: string; created_at: string }>
+): Map<string, Array<{ kind: string; created_at: string }>> {
+  const map = new Map<string, Array<{ kind: string; created_at: string }>>();
+  for (const row of logs) {
+    const ymd = bangkokYmdFromIso(row.created_at);
+    if (!ymd) continue;
+    const bucket = map.get(ymd) ?? [];
+    bucket.push(row);
+    map.set(ymd, bucket);
   }
   return map;
 }
@@ -164,13 +197,6 @@ export function buildAbsenceDateSet(params: {
   return out;
 }
 
-function workHoursBetween(checkInIso: string, checkOutIso: string): number {
-  const inMs = new Date(checkInIso).getTime();
-  const outMs = new Date(checkOutIso).getTime();
-  if (!Number.isFinite(inMs) || !Number.isFinite(outMs) || outMs <= inMs) return 0;
-  return (outMs - inMs) / (1000 * 60 * 60);
-}
-
 /** ฐานเงินเดือน ÷ 30 → รายวัน, รายวัน ÷ 8 → รายชั่วโมง */
 export function deriveRatesFromMonthlySalary(monthlySalary: number): {
   daily_rate: number;
@@ -194,6 +220,8 @@ export function computePeriodWorkMetrics(params: {
   approvedLeaves: Array<{ starts_on: string; ends_on: string; leave_type?: string }>;
   checkInByDate: Map<string, string>;
   checkOutByDate: Map<string, string>;
+  /** บันทึกเข้า-ออกทั้งหมดในช่วง — ใช้หักพักให้ตรงตารางทีม */
+  attendanceLogs?: Array<{ kind: string; created_at: string }>;
 }): PeriodWorkMetrics {
   const {
     userId,
@@ -206,24 +234,24 @@ export function computePeriodWorkMetrics(params: {
     approvedLeaves,
     checkInByDate,
     checkOutByDate,
+    attendanceLogs = [],
   } = params;
 
   const holidayByUserDate = buildHolidayByUserDate(employeeHolidays);
   const assignmentByUserDate = buildAssignmentByUserDate(assignments);
+  const logsByDate = buildAttendanceLogsByDate(attendanceLogs);
 
   let scheduledWorkDayCount = 0;
   let workHours = 0;
 
   for (const ymd of listYmdRange(startYmd, endYmd)) {
-    if (companyHolidayDates.has(ymd)) continue;
-
+    const isCompanyHoliday = companyHolidayDates.has(ymd);
     const status = resolvedScheduleDayStatusForUser(
       userId,
       ymd,
       holidayByUserDate,
       assignmentByUserDate
     );
-    if (status !== 'work') continue;
 
     const onUnpaidLeave = approvedLeaves.some(
       (leave) =>
@@ -233,18 +261,19 @@ export function computePeriodWorkMetrics(params: {
       ymdInLeaveRange(ymd, leave.starts_on, leave.ends_on)
     );
 
-    if (!onUnpaidLeave) {
+    if (isPayrollAssignedScheduleDay(status, isCompanyHoliday) && !onUnpaidLeave) {
       scheduledWorkDayCount += 1;
     }
 
     if (onApprovedLeave) continue;
 
     const checkIn = checkInByDate.get(ymd);
-    if (checkIn) {
-      const checkOut = checkOutByDate.get(ymd);
-      if (checkOut) {
-        workHours += workHoursBetween(checkIn, checkOut);
-      }
+    const checkOut = checkOutByDate.get(ymd);
+    if (checkIn && checkOut) {
+      const dayLogs = logsByDate.get(ymd) ?? [];
+      const breakMinutes = calculateBreakMinutes(dayLogs, checkOut);
+      const workMinutes = calculateWorkMinutes(checkIn, checkOut, breakMinutes);
+      workHours += workMinutes / 60;
     }
   }
 
