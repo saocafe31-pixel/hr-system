@@ -20,7 +20,6 @@ import { useCuteToast } from '@/contexts/CuteToastContext';
 import { type EmployeeHrForm } from '@/lib/employeeTableUpdate';
 import { adminUpdateEmployeeHr } from '@/lib/adminUpdateEmployeeHr';
 import { adminResetUserPassword } from '@/lib/adminResetUserPassword';
-import { adminUpdateEmployeeLegacyPassword } from '@/lib/adminUpdateEmployeeLegacyPassword';
 import { resolveProfileUserIdForLeave } from '@/lib/adminProfileResolveForEmployee';
 import {
   currentYearBangkok,
@@ -174,12 +173,9 @@ export function AdminEmployeeEditModal({
   const styles = useMemo(() => createAdminEmployeeEditStyles(theme), [theme]);
   const [hr, setHr] = useState<EmployeeHrForm>(emptyHr);
   const [loading, setLoading] = useState(false);
-  const [savingPw, setSavingPw] = useState(false);
   const [savingLoginPw, setSavingLoginPw] = useState(false);
   const [savingHr, setSavingHr] = useState(false);
   const [savingLeaveBalance, setSavingLeaveBalance] = useState(false);
-  const [pw1, setPw1] = useState('');
-  const [pw2, setPw2] = useState('');
   const [loginPw1, setLoginPw1] = useState('');
   const [loginPw2, setLoginPw2] = useState('');
   const [targetUserId, setTargetUserId] = useState<string | null>(null);
@@ -298,8 +294,6 @@ export function AdminEmployeeEditModal({
       return;
     }
     let cancelled = false;
-    setPw1('');
-    setPw2('');
     setLoginPw1('');
     setLoginPw2('');
     setTargetUserId(null);
@@ -393,33 +387,6 @@ export function AdminEmployeeEditModal({
     grantYear,
     loadLeaveAndGrants,
   ]);
-
-  async function savePassword() {
-    if (!employeeId || isCreate) return;
-    if (!pw1 && !pw2) {
-      toast.info('รหัสผ่าน', 'กรอกรหัสใหม่หรือยกเลิก');
-      return;
-    }
-    if (pw1 !== pw2) {
-      toast.info('รหัสผ่าน', 'ยืนยันรหัสไม่ตรงกัน');
-      return;
-    }
-    setSavingPw(true);
-    try {
-      await adminUpdateEmployeeLegacyPassword(employeeId, pw1);
-      setPw1('');
-      setPw2('');
-      toast.success('อัปเดตรหัส legacy แล้ว', 'บันทึกในตาราง employee แล้ว');
-      onSaved();
-    } catch (e) {
-      toast.error(
-        'บันทึกรหัส legacy ไม่สำเร็จ',
-        e instanceof Error ? e.message : String(e)
-      );
-    } finally {
-      setSavingPw(false);
-    }
-  }
 
   async function saveLoginPassword() {
     if (!employeeId || isCreate) return;
@@ -516,7 +483,6 @@ export function AdminEmployeeEditModal({
               bank: hr.bank,
               account_number: hr.account_number,
               status: hr.status,
-              password: pw1.trim() || undefined,
             },
           },
         });
@@ -838,45 +804,6 @@ export function AdminEmployeeEditModal({
                 </>
               ) : null}
 
-              <Text style={styles.section}>รหัสผ่าน legacy (ระบบเก่า)</Text>
-              <Text style={styles.hint}>
-                {isCreate
-                  ? 'ไม่บังคับ — ถ้ากรอกจะบันทึกในคอลัมน์ Password ของตาราง employee (คนละชุดกับรหัสล็อกอิน)'
-                  : 'ไม่ใช่รหัสเข้าแอป — ใช้เฉพาะองค์กรที่ยังมีคอลัมน์ legacy ในตาราง employee'}
-              </Text>
-              {!isCreate ? (
-                <Text style={styles.currentPw}>
-                  รหัสปัจจุบัน:{' '}
-                  <Text style={styles.mono}>
-                    {preview?.legacy_password ?? '—'}
-                  </Text>
-                </Text>
-              ) : null}
-              <TextInput
-                style={styles.input}
-                placeholder={isCreate ? 'รหัสผ่าน legacy (ไม่บังคับ)' : 'รหัสผ่านใหม่'}
-                secureTextEntry
-                value={pw1}
-                onChangeText={setPw1}
-              />
-              <TextInput
-                style={styles.input}
-                placeholder="ยืนยันรหัสผ่าน"
-                secureTextEntry
-                value={pw2}
-                onChangeText={setPw2}
-              />
-              {!isCreate ? (
-                <Pressable
-                  style={[styles.btnPw, savingPw && styles.disabled]}
-                  onPress={savePassword}
-                  disabled={savingPw}>
-                  <Text style={styles.btnPwText}>
-                    {savingPw ? 'กำลังบันทึก…' : 'บันทึกเฉพาะรหัสผ่าน'}
-                  </Text>
-                </Pressable>
-              ) : null}
-
               <Text style={[styles.section, { marginTop: 20 }]}>ข้อมูล HR</Text>
               {isCreate ? (
                 <Text style={styles.hint}>
@@ -1008,7 +935,6 @@ export function AdminEmployeeEditModal({
                   </Text>
                   <Text style={styles.hint}>
                     ใช้เมื่อพนักงานลืมรหัส — ตั้งรหัสใหม่ให้บัญชี Supabase Auth ที่เชื่อมกับพนักงานคนนี้
-                    (ไม่ใช่รหัส legacy ด้านบน)
                   </Text>
                   {linkedProfile ? (
                     <Text style={styles.currentPw}>
