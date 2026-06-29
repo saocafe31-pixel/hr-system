@@ -185,7 +185,8 @@ export function AdminManagerDelegationModal({
               </View>
               <Text style={[styles.label, { marginTop: 14 }]}>คนในทีม / ผู้รับมอบหมายงาน</Text>
               <Text style={styles.hint}>
-                เลือกบัญชีที่ผู้จัดการคนนี้ดูแลหรือมอบหมายงานให้ได้ — รวม Admin/HR ได้ตามโครงสร้างองค์กร
+                เลือกบัญชีที่ผู้จัดการคนนี้ดูแล — เมื่อบันทึกแล้วจะอนุมัติลา มอบหมายตาราง และตั้งวันหยุดให้ลูกทีมได้
+                (สวิตช์ด้านบนปรับละเอียดเพิ่มเติมได้ แต่จะเปิดอัตโนมัติเมื่อมีลูกทีม)
               </Text>
               {sortedCandidates.map((p) => {
                 const on = selected.has(p.id);

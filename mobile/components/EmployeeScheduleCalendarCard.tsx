@@ -469,22 +469,14 @@ export function EmployeeScheduleCalendarCard({
       };
     }
     (async () => {
-      const [{ data: sc }, { data: rep }] = await Promise.all([
-        supabase
-          .from('manager_scopes')
-          .select('can_manage_schedule')
-          .eq('manager_id', viewer)
-          .maybeSingle(),
-        supabase
-          .from('manager_direct_reports')
-          .select('subordinate_id')
-          .eq('manager_id', viewer)
-          .eq('subordinate_id', userId)
-          .maybeSingle(),
-      ]);
+      const { data: rep } = await supabase
+        .from('manager_direct_reports')
+        .select('subordinate_id')
+        .eq('manager_id', viewer)
+        .eq('subordinate_id', userId)
+        .maybeSingle();
       if (!alive) return;
-      const canSch = !!(sc as { can_manage_schedule?: boolean } | null)?.can_manage_schedule;
-      setCanEditNotes(canSch && !!rep);
+      setCanEditNotes(!!rep);
     })();
     return () => {
       alive = false;

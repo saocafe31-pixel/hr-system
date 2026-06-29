@@ -502,28 +502,16 @@ export default function ScheduleScreen() {
     let list = (pe as SchedulePerson[]) ?? [];
     const uid = session?.user?.id;
     if (!admin && role === 'manager' && uid) {
-      const [{ data: sc }, { data: reps }] = await Promise.all([
-        supabase
-          .from('manager_scopes')
-          .select('can_manage_schedule')
-          .eq('manager_id', uid)
-          .maybeSingle(),
-        supabase
-          .from('manager_direct_reports')
-          .select('subordinate_id')
-          .eq('manager_id', uid),
-      ]);
-      const canSch = !!(sc as { can_manage_schedule?: boolean } | null)?.can_manage_schedule;
+      const { data: reps } = await supabase
+        .from('manager_direct_reports')
+        .select('subordinate_id')
+        .eq('manager_id', uid);
       const subIds = new Set(
         (reps as { subordinate_id?: string }[] | null)
           ?.map((r) => r.subordinate_id)
           .filter((x): x is string => !!x) ?? []
       );
-      if (!canSch) {
-        list = list.filter((p) => p.id === uid);
-      } else {
-        list = list.filter((p) => p.id === uid || subIds.has(p.id));
-      }
+      list = list.filter((p) => p.id === uid || subIds.has(p.id));
     }
     setPeople(list);
     let dirRows: EmployeeDirLite[] = [];

@@ -625,26 +625,18 @@ export default function TeamScreen() {
         setTeamAssignPicklist(normalizeAssignPickRows(pickRpc));
       }
     } else if (role === 'manager' && session?.user?.id) {
-      const [{ data: sc }, { data: reps }] = await Promise.all([
-        supabase
-          .from('manager_scopes')
-          .select('can_approve_leave, can_manage_schedule')
-          .eq('manager_id', session.user.id)
-          .maybeSingle(),
-        supabase
-          .from('manager_direct_reports')
-          .select('subordinate_id')
-          .eq('manager_id', session.user.id),
-      ]);
-      const canL = !!(sc as { can_approve_leave?: boolean } | null)?.can_approve_leave;
-      const canS = !!(sc as { can_manage_schedule?: boolean } | null)?.can_manage_schedule;
-      setMgrCanApproveLeave(canL);
-      setMgrCanManageSchedule(canS);
+      const { data: reps } = await supabase
+        .from('manager_direct_reports')
+        .select('subordinate_id')
+        .eq('manager_id', session.user.id);
       const ids = (reps as { subordinate_id?: string }[] | null)
         ?.map((r) => r.subordinate_id)
         .filter((x): x is string => !!x) ?? [];
+      const hasTeam = ids.length > 0;
+      setMgrCanApproveLeave(hasTeam);
+      setMgrCanManageSchedule(hasTeam);
       setSubordinateProfileIds(ids);
-      if (canL && ids.length > 0) {
+      if (hasTeam) {
         const [{ data: lv }, { data: otRows }] = await Promise.all([
           supabase
             .from('leave_requests')
